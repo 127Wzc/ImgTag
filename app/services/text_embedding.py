@@ -12,27 +12,49 @@ import numpy as np
 import os
 import time
 from pathlib import Path
-from logging_config import get_logger, get_perf_logger
-from config import MODEL_NAME, MODEL_DIR
+from app.core.logging_config import get_logger, get_perf_logger
+from app.core.config import settings
 
 # 获取日志记录器
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
 
 class TextEmbedding:
-    """文本向量嵌入类"""
+    """文本向量嵌入类（单例模式）"""
     
-    def __init__(self, model_name=MODEL_NAME):
+    # 类变量，存储单例实例
+    _instance = None
+    
+    def __new__(cls, model_name=None):
+        """创建单例实例
+        
+        Args:
+            model_name: 模型名称，默认使用配置中的MODEL_NAME
+        """
+        if cls._instance is None:
+            logger.info("创建TextEmbedding单例实例")
+            cls._instance = super(TextEmbedding, cls).__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self, model_name=None):
         """初始化模型
         
         Args:
             model_name: 模型名称，默认使用配置中的MODEL_NAME
         """
+        # 如果已经初始化，直接返回
+        if getattr(self, "_initialized", False):
+            return
+            
+        if model_name is None:
+            model_name = settings.MODEL_NAME
+            
         logger.info(f"初始化TextEmbedding，模型名称: {model_name}")
         start_time = time.time()
         
         # 设置本地模型路径
-        local_model_path = f"{MODEL_DIR}/{model_name}"
+        local_model_path = f"{settings.MODEL_DIR}/{model_name}"
         
         try:
             # 检查目录是否存在，不存在则创建
@@ -41,8 +63,8 @@ class TextEmbedding:
                 Path(local_model_path).mkdir(parents=True, exist_ok=True)
                 
                 # 从Hugging Face下载模型
-                self.tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=MODEL_DIR)
-                self.model = AutoModel.from_pretrained(model_name, cache_dir=MODEL_DIR)
+                self.tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=settings.MODEL_DIR)
+                self.model = AutoModel.from_pretrained(model_name, cache_dir=settings.MODEL_DIR)
                 
                 # 保存模型到本地路径
                 self.tokenizer.save_pretrained(local_model_path)
@@ -58,6 +80,9 @@ class TextEmbedding:
             load_time = time.time() - start_time
             logger.info(f"模型加载完成，使用设备: {self.device}")
             perf_logger.info(f"模型加载耗时: {load_time:.2f}秒")
+            
+            # 标记为已初始化
+            self._initialized = True
         except Exception as e:
             logger.error(f"模型加载失败: {str(e)}")
             raise
@@ -171,29 +196,4 @@ class TextEmbedding:
             return embedding
         except Exception as e:
             logger.error(f"向量生成失败: {str(e)}")
-            raise
-
-
-if __name__ == "__main__":
-    """示例用法"""
-    # 初始化文本向量化工具
-    text_embedding = TextEmbedding()
-    
-    # 单个文本向量化示例
-    text = "这是一段需要转换为向量的中文文本"
-    embedding = text_embedding.get_embedding(text)
-    print(f"文本: '{text}'")
-    print(f"向量维度: {embedding.shape}")
-    print(f"向量前5个元素: {embedding[:5]}")
-    
-    # 结合标签的向量化示例
-    tags = ["示例", "测试", "向量"]
-    combined_embedding = text_embedding.get_embedding_combined(text, tags)
-    print(f"\n文本+标签: '{text}' + {tags}")
-    print(f"向量维度: {combined_embedding.shape}")
-    print(f"向量前5个元素: {combined_embedding[:5]}")
-    
-    # 计算相似度示例
-    from sklearn.metrics.pairwise import cosine_similarity
-    similarity = cosine_similarity([embedding], [combined_embedding])[0][0]
-    print(f"\n两个向量的余弦相似度: {similarity:.4f}") 
+            raise 

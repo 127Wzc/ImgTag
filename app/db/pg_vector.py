@@ -4,54 +4,94 @@
 """
 PostgreSQL向量数据库操作
 包含对images表的增删改查操作
+使用连接池管理数据库连接
 """
 
-import psycopg2
+import psycopg
+from psycopg_pool import ConnectionPool
 import time
-from logging_config import get_logger, get_perf_logger
-from config import DB_CONNECTION_STRING, DEFAULT_SEARCH_LIMIT, DEFAULT_SIMILARITY_THRESHOLD
+from app.core.logging_config import get_logger, get_perf_logger
+from app.core.config import settings
 
 # 获取日志记录器
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
 
 class PGVectorDB:
-    """PostgreSQL向量数据库操作类"""
+    """PostgreSQL向量数据库操作类（使用连接池）"""
     
-    def __init__(self, connection_string=DB_CONNECTION_STRING):
-        """初始化数据库连接
+    # 类变量，存储单例实例
+    _instance = None
+    # 连接池
+    _pool = None
+    
+    def __new__(cls, connection_string=None):
+        """创建单例实例
         
         Args:
-            connection_string: 数据库连接字符串，默认使用配置中的DB_CONNECTION_STRING
+            connection_string: 数据库连接字符串，默认使用配置中的PG_CONNECTION_STRING
         """
+        if cls._instance is None:
+            logger.info("创建PGVectorDB单例实例")
+            cls._instance = super(PGVectorDB, cls).__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self, connection_string=None):
+        """初始化数据库连接池
+        
+        Args:
+            connection_string: 数据库连接字符串，默认使用配置中的PG_CONNECTION_STRING
+        """
+        # 如果已经初始化，直接返回
+        if getattr(self, "_initialized", False):
+            return
+            
+        if connection_string is None:
+            connection_string = settings.PG_CONNECTION_STRING
+        
         start_time = time.time()
-        logger.info("初始化数据库连接")
+        logger.info("初始化数据库连接池")
         
         try:
-            self.conn = psycopg2.connect(connection_string)
-            self.cursor = self.conn.cursor()
-            
-            init_time = time.time() - start_time
-            logger.info("数据库连接成功")
-            perf_logger.info(f"数据库连接耗时: {init_time:.4f}秒")
+            # 创建连接池
+            PGVectorDB._pool = ConnectionPool(
+                connection_string,
+                min_size=5,  # 连接池最小连接数
+                max_size=20,  # 连接池最大连接数
+                name="pg_vector_pool"
+            )
             
             # 初始化表结构
-            self.init_tables()
+            with PGVectorDB._pool.connection() as conn:
+                conn.autocommit = True
+                with conn.cursor() as cursor:
+                    self._init_tables(cursor)
+            
+            init_time = time.time() - start_time
+            logger.info("数据库连接池初始化成功")
+            perf_logger.info(f"数据库连接池初始化耗时: {init_time:.4f}秒")
+            
+            # 标记为已初始化
+            self._initialized = True
         except Exception as e:
-            logger.error(f"数据库连接失败: {str(e)}")
+            logger.error(f"数据库连接池初始化失败: {str(e)}")
             raise
     
-    def __del__(self):
-        """析构函数，关闭数据库连接"""
-        if hasattr(self, 'cursor') and self.cursor:
-            self.cursor.close()
-        if hasattr(self, 'conn') and self.conn:
-            self.conn.close()
-            logger.info("数据库连接已关闭")
+    def _get_connection(self):
+        """获取连接池中的连接
+        
+        Returns:
+            连接上下文管理器
+        """
+        return PGVectorDB._pool.connection()
     
-    def init_tables(self):
+    def _init_tables(self, cursor):
         """初始化数据库表
         
+        Args:
+            cursor: 数据库游标
+            
         检查public.images表是否存在，不存在则创建
         """
         start_time = time.time()
@@ -59,33 +99,32 @@ class PGVectorDB:
         
         try:
             # 检查vector扩展是否存在
-            self.cursor.execute("""
+            cursor.execute("""
             SELECT EXISTS (
                 SELECT 1 FROM pg_available_extensions WHERE name = 'vector' AND installed_version IS NOT NULL
             );
             """)
             
-            vector_extension_exists = self.cursor.fetchone()[0]
+            vector_extension_exists = cursor.fetchone()[0]
             
             if not vector_extension_exists:
                 logger.info("安装vector扩展")
-                self.cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-                self.conn.commit()
+                cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
             
             # 检查images表是否存在
-            self.cursor.execute("""
+            cursor.execute("""
             SELECT EXISTS (
                 SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'images'
             );
             """)
             
-            table_exists = self.cursor.fetchone()[0]
+            table_exists = cursor.fetchone()[0]
             
             if not table_exists:
                 logger.info("创建images表")
                 
                 # 创建表
-                self.cursor.execute("""
+                cursor.execute("""
                 CREATE TABLE public.images (
                     id SERIAL PRIMARY KEY,
                     image_url TEXT NOT NULL,
@@ -97,15 +136,14 @@ class PGVectorDB:
                 """)
                 
                 # 创建索引
-                self.cursor.execute("""
+                cursor.execute("""
                 CREATE INDEX idx_images_tags ON public.images USING GIN (tags);
                 """)
                 
-                self.cursor.execute("""
+                cursor.execute("""
                 CREATE INDEX idx_images_embedding ON public.images USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
                 """)
                 
-                self.conn.commit()
                 logger.info("images表创建成功")
             else:
                 logger.info("images表已存在，跳过创建")
@@ -114,7 +152,6 @@ class PGVectorDB:
             perf_logger.info(f"表结构初始化耗时: {init_time:.4f}秒")
             
         except Exception as e:
-            self.conn.rollback()
             logger.error(f"初始化表结构失败: {str(e)}")
             raise
     
@@ -143,20 +180,21 @@ class PGVectorDB:
             RETURNING id;
             """
             
-            self.cursor.execute(query, (image_url, tags, f"[{vector_str}]", description))
-            new_id = self.cursor.fetchone()[0]
-            self.conn.commit()
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, (image_url, tags, f"[{vector_str}]", description))
+                    new_id = cursor.fetchone()[0]
+                conn.commit()
             
             process_time = time.time() - start_time
             logger.info(f"插入成功，ID: {new_id}, 耗时: {process_time:.4f}秒")
             
             return new_id
         except Exception as e:
-            self.conn.rollback()
             logger.error(f"插入失败: {str(e)}")
             return None
     
-    def search_by_tags(self, tags, limit=DEFAULT_SEARCH_LIMIT):
+    def search_by_tags(self, tags, limit=settings.DEFAULT_SEARCH_LIMIT):
         """通过标签搜索图像
         
         Args:
@@ -177,8 +215,10 @@ class PGVectorDB:
             LIMIT %s;
             """
             
-            self.cursor.execute(query, (tags, limit))
-            results = self.cursor.fetchall()
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, (tags, limit))
+                    results = cursor.fetchall()
             
             images = []
             for id, url, img_tags, description in results:
@@ -197,7 +237,7 @@ class PGVectorDB:
             logger.error(f"标签搜索失败: {str(e)}")
             return []
     
-    def search_similar_vectors(self, query_vector, limit=DEFAULT_SEARCH_LIMIT, threshold=DEFAULT_SIMILARITY_THRESHOLD):
+    def search_similar_vectors(self, query_vector, limit=settings.DEFAULT_SEARCH_LIMIT, threshold=settings.DEFAULT_SIMILARITY_THRESHOLD):
         """向量相似度搜索
         
         Args:
@@ -223,10 +263,12 @@ class PGVectorDB:
             """
             
             query_start = time.time()
-            self.cursor.execute(query, (f"[{vector_str}]", f"[{vector_str}]", threshold, limit))
-            results = self.cursor.fetchall()
-            query_time = time.time() - query_start
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, (f"[{vector_str}]", f"[{vector_str}]", threshold, limit))
+                    results = cursor.fetchall()
             
+            query_time = time.time() - query_start
             perf_logger.info(f"向量搜索SQL执行耗时: {query_time:.4f}秒")
             
             images = []
@@ -251,17 +293,20 @@ class PGVectorDB:
         except Exception as e:
             logger.error(f"向量搜索失败: {str(e)}")
             return []
-    
+            
     def update_image_tags(self, image_id, new_tags):
         """更新图像标签
         
         Args:
             image_id: 图像ID
-            new_tags: 新标签列表
-        
+            new_tags: 新的标签列表
+            
         Returns:
             是否更新成功
         """
+        start_time = time.time()
+        logger.info(f"更新图像ID:{image_id}的标签: {new_tags}")
+        
         try:
             query = """
             UPDATE images
@@ -269,71 +314,39 @@ class PGVectorDB:
             WHERE id = %s;
             """
             
-            self.cursor.execute(query, (new_tags, image_id))
-            affected_rows = self.cursor.rowcount
-            self.conn.commit()
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, (new_tags, image_id))
+                conn.commit()
             
-            if affected_rows > 0:
-                logger.info(f"更新标签成功，ID: {image_id}")
-                return True
-            else:
-                logger.warning(f"未找到ID为{image_id}的记录")
-                return False
+            process_time = time.time() - start_time
+            logger.info(f"标签更新完成，耗时: {process_time:.4f}秒")
+            
+            return True
         except Exception as e:
-            self.conn.rollback()
-            logger.error(f"更新标签失败: {str(e)}")
+            logger.error(f"标签更新失败: {str(e)}")
             return False
     
     def count_images(self):
-        """统计图像总数
+        """获取图像总数
         
         Returns:
-            图像记录总数
+            图像总数
         """
-        start_time = time.time()
-        logger.debug("统计图像总数")
-        
         try:
-            self.cursor.execute("SELECT COUNT(*) FROM images;")
-            count = self.cursor.fetchone()[0]
-            
-            process_time = time.time() - start_time
-            logger.info(f"图像总数: {count}, 耗时: {process_time:.4f}秒")
-            
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT COUNT(*) FROM images;")
+                    count = cursor.fetchone()[0]
             return count
         except Exception as e:
-            logger.error(f"统计失败: {str(e)}")
+            logger.error(f"获取图像总数失败: {str(e)}")
             return 0
-
-
-if __name__ == "__main__":
-    """简单测试"""
-    from text_embedding import TextEmbedding
     
-    # 创建数据库连接
-    db = PGVectorDB()
-    
-    # 统计记录数
-    count = db.count_images()
-    print(f"当前数据库中有 {count} 条图像记录")
-    
-    if count > 0:
-        # 测试标签搜索
-        results = db.search_by_tags(["自然"], limit=2)
-        print(f"\n标签搜索结果: {len(results)} 条记录")
-        for img in results:
-            print(f"- {img['image_url']} ({img['tags']})")
-            print(f"  描述: {img['description']}")
-    else:
-        # 如果没有记录，插入测试数据
-        print("插入测试数据...")
-        text_embedding = TextEmbedding()
-        text = "测试图像描述"
-        embedding = text_embedding.get_embedding(text)
-        
-        db.insert_image(
-            "https://example.com/test.jpg",
-            ["测试", "示例"],
-            embedding,
-            "这是一个测试图像"
-        ) 
+    @classmethod
+    def close_pool(cls):
+        """关闭连接池"""
+        if cls._pool:
+            logger.info("关闭数据库连接池")
+            cls._pool.close()
+            cls._pool = None 

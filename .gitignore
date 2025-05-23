@@ -1,5 +1,32 @@
-.venv/*
-.vscode/*
-/models/*
-__pycache__/*
+# 环境变量
 .env
+
+# Python缓存
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+ENV/
+
+# 日志文件
+logs/
+*.log
+
+# 模型文件
+models/
+
+# IDE配置
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 测试报告
+htmlcov/
+.coverage
+coverage.xml
