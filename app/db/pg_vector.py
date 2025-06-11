@@ -293,39 +293,6 @@ class PGVectorDB:
         except Exception as e:
             logger.error(f"向量搜索失败: {str(e)}")
             return []
-            
-    def update_image_tags(self, image_id, new_tags):
-        """更新图像标签
-        
-        Args:
-            image_id: 图像ID
-            new_tags: 新的标签列表
-            
-        Returns:
-            是否更新成功
-        """
-        start_time = time.time()
-        logger.info(f"更新图像ID:{image_id}的标签: {new_tags}")
-        
-        try:
-            query = """
-            UPDATE images
-            SET tags = %s
-            WHERE id = %s;
-            """
-            
-            with self._get_connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(query, (new_tags, image_id))
-                conn.commit()
-            
-            process_time = time.time() - start_time
-            logger.info(f"标签更新完成，耗时: {process_time:.4f}秒")
-            
-            return True
-        except Exception as e:
-            logger.error(f"标签更新失败: {str(e)}")
-            return False
     
     def count_images(self):
         """获取图像总数
@@ -342,6 +309,261 @@ class PGVectorDB:
         except Exception as e:
             logger.error(f"获取图像总数失败: {str(e)}")
             return 0
+    
+    def search_images(self, tags=None, url_contains=None, description_contains=None, 
+                      limit=10, offset=0, sort_by="id", sort_desc=False):
+        """高级图像搜索
+        
+        Args:
+            tags: 标签列表（包含任一标签即匹配），可选
+            url_contains: URL包含的文本，可选
+            description_contains: 描述包含的文本，可选
+            limit: 返回结果数量上限
+            offset: 结果偏移量，用于分页
+            sort_by: 排序字段: id, image_url, created_at
+            sort_desc: 是否降序排序
+        
+        Returns:
+            符合条件的图像记录列表
+        """
+        start_time = time.time()
+        logger.info(f"高级图像搜索: 标签:{tags}, URL包含:{url_contains}, 描述包含:{description_contains}")
+        
+        try:
+            # 构建WHERE条件
+            conditions = []
+            params = []
+            
+            if tags and len(tags) > 0:
+                # 使用数组重叠操作符 && 检查是否有任何标签匹配
+                conditions.append("tags && %s")
+                params.append(tags)
+            
+            if url_contains:
+                conditions.append("image_url ILIKE %s")
+                params.append(f"%{url_contains}%")
+            
+            if description_contains:
+                conditions.append("description ILIKE %s")
+                params.append(f"%{description_contains}%")
+            
+            # 处理排序
+            valid_sort_fields = {"id": "id", "url": "image_url", "created_at": "created_at"}
+            sort_field = valid_sort_fields.get(sort_by, "id")
+            sort_order = "DESC" if sort_desc else "ASC"
+            
+            # 构建SQL查询
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            
+            query = f"""
+            SELECT id, image_url, tags, description
+            FROM images
+            WHERE {where_clause}
+            ORDER BY {sort_field} {sort_order}
+            LIMIT %s OFFSET %s;
+            """
+            
+            # 添加分页参数
+            params.append(limit)
+            params.append(offset)
+            
+            # 执行查询
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, params)
+                    results = cursor.fetchall()
+            
+            # 处理结果
+            images = []
+            for id, url, img_tags, description in results:
+                images.append({
+                    "id": id,
+                    "image_url": url,
+                    "tags": img_tags,
+                    "description": description
+                })
+            
+            # 获取总记录数（不考虑分页）
+            count_query = f"""
+            SELECT COUNT(*)
+            FROM images
+            WHERE {where_clause};
+            """
+            
+            total_count = 0
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(count_query, params[:-2] if params else [])
+                    total_count = cursor.fetchone()[0]
+            
+            process_time = time.time() - start_time
+            logger.info(f"高级搜索完成，找到{len(images)}/{total_count}条记录，耗时: {process_time:.4f}秒")
+            
+            return {
+                "images": images,
+                "total": total_count,
+                "limit": limit,
+                "offset": offset
+            }
+        except Exception as e:
+            logger.error(f"高级搜索失败: {str(e)}")
+            return {
+                "images": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset
+            }
+    
+    def update_image(self, image_id, image_url=None, tags=None, description=None, embedding=None):
+        """更新图像信息
+        
+        Args:
+            image_id: 图像ID
+            image_url: 新的图像URL，可选
+            tags: 新的标签列表，可选
+            description: 新的图像描述，可选
+            embedding: 新的向量嵌入，可选
+            
+        Returns:
+            是否更新成功
+        """
+        start_time = time.time()
+        logger.info(f"更新图像ID:{image_id}的信息")
+        
+        try:
+            # 构建更新字段
+            update_fields = []
+            params = []
+            
+            if image_url is not None:
+                update_fields.append("image_url = %s")
+                params.append(image_url)
+                
+            if tags is not None:
+                update_fields.append("tags = %s")
+                params.append(tags)
+                
+            if description is not None:
+                update_fields.append("description = %s")
+                params.append(description)
+                
+            if embedding is not None:
+                # 将numpy数组转换为PostgreSQL向量格式的字符串
+                vector_str = ','.join(map(str, embedding))
+                update_fields.append("embedding = %s")
+                params.append(f"[{vector_str}]")
+            
+            # 如果没有要更新的字段，直接返回成功
+            if not update_fields:
+                logger.info("没有提供要更新的字段，跳过更新")
+                return True
+                
+            # 构建SQL查询
+            query = f"""
+            UPDATE images
+            SET {", ".join(update_fields)}
+            WHERE id = %s;
+            """
+            
+            # 添加ID参数
+            params.append(image_id)
+            
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, params)
+                    if cursor.rowcount == 0:
+                        logger.warning(f"未找到ID为{image_id}的图像记录")
+                        return False
+                conn.commit()
+            
+            process_time = time.time() - start_time
+            logger.info(f"图像信息更新完成，耗时: {process_time:.4f}秒")
+            
+            return True
+        except Exception as e:
+            logger.error(f"图像信息更新失败: {str(e)}")
+            return False
+    
+    def delete_image(self, image_id):
+        """删除图像
+        
+        Args:
+            image_id: 图像ID
+            
+        Returns:
+            是否删除成功
+        """
+        start_time = time.time()
+        logger.info(f"删除图像ID:{image_id}")
+        
+        try:
+            query = """
+            DELETE FROM images
+            WHERE id = %s
+            RETURNING id;
+            """
+            
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, (image_id,))
+                    result = cursor.fetchone()
+                conn.commit()
+            
+            if not result:
+                logger.warning(f"未找到ID为{image_id}的图像记录")
+                return False
+                
+            process_time = time.time() - start_time
+            logger.info(f"图像删除完成，耗时: {process_time:.4f}秒")
+            
+            return True
+        except Exception as e:
+            logger.error(f"图像删除失败: {str(e)}")
+            return False
+    
+    def get_image(self, image_id):
+        """获取单个图像
+        
+        Args:
+            image_id: 图像ID
+            
+        Returns:
+            图像信息，如果不存在返回None
+        """
+        start_time = time.time()
+        logger.info(f"获取图像ID:{image_id}")
+        
+        try:
+            query = """
+            SELECT id, image_url, tags, description
+            FROM images
+            WHERE id = %s;
+            """
+            
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, (image_id,))
+                    result = cursor.fetchone()
+            
+            if not result:
+                logger.warning(f"未找到ID为{image_id}的图像记录")
+                return None
+                
+            id, url, tags, description = result
+            image = {
+                "id": id,
+                "image_url": url,
+                "tags": tags,
+                "description": description
+            }
+            
+            process_time = time.time() - start_time
+            logger.info(f"图像获取完成，耗时: {process_time:.4f}秒")
+            
+            return image
+        except Exception as e:
+            logger.error(f"图像获取失败: {str(e)}")
+            return None
     
     @classmethod
     def close_pool(cls):
