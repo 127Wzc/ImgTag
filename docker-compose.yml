@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  imgtag:
+    build: .
+    container_name: imgtag
+    restart: unless-stopped
+    environment:
+      # 数据库连接（必须配置外部 PostgreSQL）
+      PG_CONNECTION_STRING: ${PG_CONNECTION_STRING:-postgresql://user:password@host:5432/imgtag}
+      # 服务地址（默认本机）
+      BASE_URL: ${BASE_URL:-http://localhost:8000}
+    volumes:
+      # 图片上传目录
+      - ./uploads:/app/uploads
+    ports:
+      # 单端口同时提供 API 和前端
+      - "8000:8000"

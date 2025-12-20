@@ -173,15 +173,75 @@ watch(visible, (val) => {
 </script>
 
 <style scoped>
+.tag-manager {
+  padding: 8px 0;
+}
+
 .toolbar {
   display: flex;
   align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(212, 165, 116, 0.05) 100%);
+  border-radius: var(--radius-lg);
   margin-bottom: 20px;
 }
 
 .edit-cell {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+}
+
+:deep(.el-table) {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: rgba(139, 92, 246, 0.06);
+  --el-table-border-color: rgba(139, 92, 246, 0.08);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+:deep(.el-table th.el-table__cell) {
+  background: rgba(139, 92, 246, 0.06) !important;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.8px;
+  padding: 14px 16px;
+}
+
+:deep(.el-table td.el-table__cell) {
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(139, 92, 246, 0.06) !important;
+}
+
+:deep(.el-table tr:hover > td.el-table__cell) {
+  background: rgba(139, 92, 246, 0.04) !important;
+}
+
+:deep(.el-dialog) {
+  border-radius: 24px !important;
+  overflow: hidden;
+}
+
+:deep(.el-dialog__header) {
+  padding: 20px 24px !important;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.1) 0%, rgba(212, 165, 116, 0.05) 100%);
+  border-bottom: 1px solid rgba(139, 92, 246, 0.1);
+}
+
+:deep(.el-dialog__title) {
+  font-weight: 700;
+  font-size: 18px;
+  background: linear-gradient(135deg, #8b5cf6 0%, #d4a574 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+:deep(.el-dialog__body) {
+  padding: 24px !important;
 }
 </style>
