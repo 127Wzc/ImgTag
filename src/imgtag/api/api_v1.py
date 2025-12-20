@@ -1,0 +1,78 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+API 路由注册
+"""
+
+from fastapi import APIRouter
+
+from imgtag.api.endpoints import (
+    images, search, system, config, vectors, queue, collections, tags,
+    tasks,
+)
+
+api_router = APIRouter()
+
+# 注册图像相关路由
+api_router.include_router(
+    images.router,
+    prefix="/images",
+    tags=["图像管理"]
+)
+
+# 注册搜索相关路由
+api_router.include_router(
+    search.router,
+    prefix="/search",
+    tags=["搜索"]
+)
+
+# 注册系统相关路由
+api_router.include_router(
+    system.router,
+    prefix="/system",
+    tags=["系统"]
+)
+
+# 注册配置相关路由
+api_router.include_router(
+    config.router,
+    prefix="/config",
+    tags=["配置管理"]
+)
+
+# 注册向量管理路由
+api_router.include_router(
+    vectors.router,
+    prefix="/vectors",
+    tags=["向量管理"]
+)
+
+# 注册队列管理路由
+api_router.include_router(
+    queue.router,
+    prefix="/queue",
+    tags=["队列管理"]
+)
+
+# 注册收藏夹管理路由
+api_router.include_router(
+    collections.router, 
+    prefix="/collections", 
+    tags=["收藏夹管理"]
+)
+
+# 注册标签管理路由
+api_router.include_router(
+    tags.router, 
+    prefix="/tags", 
+    tags=["标签管理"]
+)
+
+# 注册任务管理路由
+api_router.include_router(
+    tasks.router, 
+    prefix="/tasks", 
+    tags=["任务管理"]
+)

@@ -1,162 +1,154 @@
-# ImgTag 图像向量搜索系统API
+# ImgTag - 智能图片标签管理系统
 
-一个基于向量数据库的图像标签和描述搜索系统API，使用 BAAI/bge-small-zh-v1.5 模型生成中文文本的向量表示，并通过FastAPI提供RESTful API服务。
+基于 AI 视觉模型的图片标签自动生成与向量搜索系统。
 
-## 项目结构
+## ✨ 功能特性
+
+- 🤖 **AI 自动打标签** - 支持 OpenAI、通义千问、Gemini 等视觉模型
+- 🔍 **语义向量搜索** - 基于文本描述的相似图片检索
+- 📦 **批量处理** - 支持批量上传后队列化分析
+- 🏠 **本地嵌入模型** - 支持 bge-small-zh 等本地模型，无需 API
+- 🎨 **现代化界面** - Vue 3 + Element Plus 构建
+- ⚙️ **灵活配置** - 数据库化配置管理
+
+## 🏗️ 项目结构
 
 ```
 ImgTag/
-├── app/                    # 应用程序包
-│   ├── api/                # API相关代码
-│   │   ├── endpoints/      # API端点
-│   │   │   ├── images.py   # 图像相关API
-│   │   │   ├── search.py   # 搜索相关API
-│   │   │   └── system.py   # 系统相关API
-│   │   └── api_v1.py       # API路由注册
-│   ├── core/               # 核心配置
-│   │   ├── config.py       # 配置设置
-│   │   └── logging_config.py # 日志配置
-│   ├── db/                 # 数据库操作
-│   │   └── pg_vector.py    # PostgreSQL向量数据库操作
-│   ├── models/             # 数据模型
-│   │   └── image.py        # 图像数据模型
-│   └── services/           # 服务
-│       └── text_embedding.py # 文本向量嵌入服务
-├── main.py                 # 应用入口点
-├── requirements.txt        # 项目依赖
-└── .env.example            # 环境变量示例
+├── src/imgtag/          # Python 后端源码
+│   ├── api/             # API 端点
+│   ├── core/            # 核心配置
+│   ├── db/              # 数据库操作
+│   ├── schemas/         # Pydantic 模型
+│   └── services/        # 业务服务
+├── frontend/            # Vue 前端
+│   ├── src/
+│   │   ├── views/       # 页面组件
+│   │   ├── api/         # API 封装
+│   │   └── assets/      # 静态资源
+│   └── package.json
+├── pyproject.toml       # Python 项目配置
+└── .env                 # 环境变量
 ```
 
-## 功能特点
+## 🚀 快速开始
 
-- RESTful API设计，采用FastAPI框架
-- 使用 BAAI/bge-small-zh-v1.5 模型生成中文文本向量
-- 支持文本描述和标签的组合向量生成
-- 基于 PostgreSQL pgvector 扩展的向量数据库存储
-- 支持标签搜索和向量相似度搜索
-- 完整的API文档（Swagger和ReDoc）
-- 完整的日志记录和性能监控
+### 环境要求
 
-## 安装说明
+- Python 3.10+
+- Node.js 18+
+- PostgreSQL 15+ (需安装 pgvector 扩展)
 
-### 前提条件
+### 1. 克隆项目
 
-- Python 3.8+
-- PostgreSQL 数据库（已安装 pgvector 扩展）
-
-### 安装步骤
-
-1. 克隆仓库
 ```bash
-git clone https://github.com/yourusername/ImgTag.git
+git clone https://github.com/your-repo/ImgTag.git
 cd ImgTag
 ```
 
-2. 安装依赖
-```bash
-pip install -r requirements.txt
+### 2. 配置数据库
+
+创建 PostgreSQL 数据库并启用 pgvector 扩展：
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
-3. 配置数据库连接
-将 `.env.example` 文件复制为 `.env`，并修改数据库连接信息：
-```
-PG_CONNECTION_STRING=postgres://username:password@hostname:port/database
-```
-
-## 使用方法
-
-### 启动API服务
+### 3. 配置环境变量
 
 ```bash
-python main.py
+cp .env.example .env
+# 编辑 .env 填入数据库连接
 ```
 
-服务将在 http://localhost:8000 启动，可以通过以下URL访问API文档：
-- Swagger UI: http://localhost:8000/api/v1/docs
-- ReDoc: http://localhost:8000/api/v1/redoc
+`.env` 文件内容：
 
-### API端点
-
-API服务提供以下主要端点：
-
-**图像操作**
-- `POST /api/v1/images/`：创建图像记录
-- `POST /api/v1/images/search/tags/`：通过标签搜索图像
-- `PUT /api/v1/images/{image_id}/tags/`：更新图像标签
-
-**搜索操作**
-- `POST /api/v1/search/similar/`：相似度搜索
-
-**系统操作**
-- `GET /api/v1/system/status/`：获取系统状态
-- `GET /api/v1/system/health/`：健康检查
-
-### API使用示例
-
-以下是使用cURL工具的API使用示例：
-
-**创建图像记录**
-```bash
-curl -X 'POST' \
-  'http://localhost:8000/api/v1/images/' \
-  -H 'accept: application/json' \
-  -H 'Content-Type: application/json' \
-  -d '{
-  "image_url": "https://example.com/image1.jpg",
-  "tags": ["自然", "山脉", "日落"],
-  "description": "壮丽的自然风景，包括高耸的山脉和美丽的日落景观"
-}'
+```
+PG_CONNECTION_STRING=postgresql://user:password@host:5432/imgtag
 ```
 
-**通过标签搜索图像**
-```bash
-curl -X 'POST' \
-  'http://localhost:8000/api/v1/images/search/tags/' \
-  -H 'accept: application/json' \
-  -H 'Content-Type: application/json' \
-  -d '{
-  "tags": ["自然", "山脉"],
-  "limit": 5
-}'
-```
-
-**相似度搜索**
-```bash
-curl -X 'POST' \
-  'http://localhost:8000/api/v1/search/similar/' \
-  -H 'accept: application/json' \
-  -H 'Content-Type: application/json' \
-  -d '{
-  "text": "美丽的自然风景和高山",
-  "tags": ["自然", "风景"],
-  "limit": 5,
-  "threshold": 0.7
-}'
-```
-
-**获取系统状态**
-```bash
-curl -X 'GET' \
-  'http://localhost:8000/api/v1/system/status/' \
-  -H 'accept: application/json'
-```
-
-## 部署
-
-### Docker部署
-通过Docker部署，可以创建Dockerfile和docker-compose.yml文件。
-
-### 服务器部署
-可以使用Gunicorn结合Uvicorn作为生产环境部署：
+### 4. 启动后端
 
 ```bash
-gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000
+# 安装依赖
+uv sync
+
+# 如需使用本地嵌入模型（约 700MB）
+uv sync --extra local
+
+# 启动服务
+uv run uvicorn imgtag.main:app --reload
 ```
 
-## 性能优化
+### 5. 启动前端
 
-系统已内置性能监控，所有关键操作都会记录执行时间。可以通过查看日志了解系统性能，并针对性进行优化。
+```bash
+cd frontend
+pnpm install
+pnpm dev
+```
 
-## 许可证
+访问 http://localhost:5173
 
-MIT 
+## 📋 配置说明
+
+所有配置都通过 Web 界面的「设置」页面管理：
+
+### 视觉模型
+
+| 配置项 | 说明 |
+|-------|------|
+| API 地址 | OpenAI 兼容的 API 端点 |
+| API 密钥 | 模型 API Key |
+| 模型名称 | 如 gpt-4o-mini、qwen-vl-plus |
+
+### 嵌入模型
+
+支持两种模式：
+
+**本地模型**（推荐）：
+- 无需 API，完全离线运行
+- 支持 bge-small-zh-v1.5（~90MB，512维）
+- 首次使用自动下载
+
+**在线 API**：
+- 使用 OpenAI text-embedding 等 API
+- 需配置 API 密钥
+
+### 队列配置
+
+| 配置项 | 说明 | 默认值 |
+|-------|------|-------|
+| 最大并发数 | 批量分析的并发线程 | 2 |
+
+## 🔧 API 接口
+
+后端提供 RESTful API：
+
+- `POST /api/v1/images/upload` - 上传图片
+- `GET /api/v1/images/{id}` - 获取图片详情
+- `PUT /api/v1/images/{id}` - 更新图片信息
+- `DELETE /api/v1/images/{id}` - 删除图片
+- `POST /api/v1/search/similar` - 语义搜索
+- `POST /api/v1/queue/add` - 添加到分析队列
+- `GET /api/v1/queue/status` - 获取队列状态
+
+完整 API 文档访问：http://localhost:8000/docs
+
+## 📦 技术栈
+
+**后端**：
+- FastAPI - Web 框架
+- PostgreSQL + pgvector - 向量数据库
+- OpenAI SDK - 模型调用
+- Sentence Transformers - 本地嵌入
+
+**前端**：
+- Vue 3 - 框架
+- Element Plus - UI 组件
+- Pinia - 状态管理
+- Vite - 构建工具
+
+## 📄 License
+
+MIT

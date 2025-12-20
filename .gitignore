@@ -17,8 +17,8 @@ ENV/
 logs/
 *.log
 
-# 模型文件
-models/
+# 上传文件
+uploads/
 
 # IDE配置
 .vscode/
@@ -30,3 +30,11 @@ models/
 htmlcov/
 .coverage
 coverage.xml
+
+# Node
+node_modules/
+dist/
+*.local
+
+# uv
+.python-version
