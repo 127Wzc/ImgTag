@@ -22,6 +22,15 @@
         </nav>
         
         <div class="sidebar-footer">
+          <div class="theme-toggle" @click="toggleTheme" :title="theme === 'light' ? '切换到深色模式' : '切换到浅色模式'">
+            <el-icon :size="20">
+              <Sunny v-if="theme === 'dark'" />
+              <Moon v-else />
+            </el-icon>
+            <span v-if="!sidebarCollapsed" class="theme-text">
+              {{ theme === 'light' ? '深色模式' : '浅色模式' }}
+            </span>
+          </div>
           <div class="collapse-btn" @click="sidebarCollapsed = !sidebarCollapsed">
             <el-icon :size="18">
               <ArrowLeft v-if="!sidebarCollapsed" />
@@ -38,10 +47,71 @@
             <h1 class="page-title">{{ pageTitle }}</h1>
           </div>
           <div class="header-right">
-            <el-tag type="success" effect="light" round>
-              <el-icon class="status-icon"><SuccessFilled /></el-icon>
-              运行中
-            </el-tag>
+            <!-- 进行中的任务 -->
+            <div v-if="processingTasks.length > 0" class="header-item tasks-indicator">
+              <el-icon class="tasks-icon"><Loading class="is-loading" /></el-icon>
+              <span class="tasks-text">
+                <span class="tasks-count">{{ processingTasks.length }}</span>
+                <span class="tasks-label">个任务进行中</span>
+              </span>
+              <el-popover
+                placement="bottom-end"
+                :width="320"
+                trigger="hover"
+                popper-class="tasks-popover"
+              >
+                <template #reference>
+                  <el-icon class="tasks-arrow"><ArrowDown /></el-icon>
+                </template>
+                <div class="tasks-list">
+                  <div class="tasks-list-header">
+                    <span>进行中的任务</span>
+                    <el-button 
+                      text 
+                      type="primary" 
+                      size="small"
+                      @click="router.push('/tasks')"
+                    >
+                      查看全部
+                    </el-button>
+                  </div>
+                  <div class="tasks-list-content">
+                    <div 
+                      v-for="task in processingTasks" 
+                      :key="task.id"
+                      class="task-item"
+                    >
+                      <div class="task-info">
+                        <div class="task-type">{{ getTaskTypeName(task.type) }}</div>
+                        <div class="task-time">{{ formatTaskTime(task.created_at) }}</div>
+                      </div>
+                      <el-progress 
+                        :percentage="0" 
+                        :indeterminate="true"
+                        :stroke-width="3"
+                        style="margin-top: 8px;"
+                      />
+                    </div>
+                    <div v-if="processingTasks.length === 0" class="tasks-empty">
+                      <el-icon :size="32" color="var(--text-muted)"><Document /></el-icon>
+                      <p>暂无进行中的任务</p>
+                    </div>
+                  </div>
+                </div>
+              </el-popover>
+            </div>
+            
+            <!-- 健康状态 -->
+            <div class="header-item health-indicator" :class="healthStatusClass">
+              <el-icon class="health-icon">
+                <SuccessFilled v-if="healthStatus === 'healthy'" />
+                <CircleCloseFilled v-else-if="healthStatus === 'error'" />
+                <Loading v-else class="is-loading" />
+              </el-icon>
+              <span class="health-text">
+                {{ healthStatusText }}
+              </span>
+            </div>
           </div>
         </header>
         
@@ -58,12 +128,22 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
+import { healthCheck, getTasks } from '@/api'
+import { useAppStore } from '@/stores/app'
 
 const route = useRoute()
+const router = useRouter()
+const appStore = useAppStore()
 const sidebarCollapsed = ref(false)
+
+const theme = computed(() => appStore.theme)
+
+const toggleTheme = () => {
+  appStore.toggleTheme()
+}
 
 const menuItems = [
   { path: '/', label: '仪表盘', icon: 'HomeFilled' },
@@ -80,93 +160,146 @@ const pageTitle = computed(() => {
   const item = menuItems.find(m => m.path === route.path)
   return item?.label || 'ImgTag'
 })
+
+// 健康状态
+const healthStatus = ref('checking') // checking, healthy, error
+const healthStatusClass = computed(() => healthStatus.value)
+const healthStatusText = computed(() => {
+  const map = {
+    checking: '检查中...',
+    healthy: '服务正常',
+    error: '服务异常'
+  }
+  return map[healthStatus.value] || '未知'
+})
+
+// 进行中的任务
+const processingTasks = ref([])
+
+// 获取健康状态
+const checkHealth = async () => {
+  try {
+    const result = await healthCheck()
+    healthStatus.value = result.status === 'healthy' ? 'healthy' : 'error'
+  } catch (e) {
+    healthStatus.value = 'error'
+  }
+}
+
+// 获取进行中的任务
+const fetchProcessingTasks = async () => {
+  try {
+    const res = await getTasks({ 
+      limit: 5, 
+      status: 'processing' 
+    })
+    processingTasks.value = res.tasks || []
+  } catch (e) {
+    console.error('获取进行中任务失败:', e)
+    processingTasks.value = []
+  }
+}
+
+// 任务类型名称映射
+const getTaskTypeName = (type) => {
+  const map = {
+    'add_to_collection': '添加到收藏夹',
+    'vectorize_batch': '批量向量化',
+    'analyze_image': '图片分析'
+  }
+  return map[type] || type
+}
+
+// 格式化任务时间
+const formatTaskTime = (dateStr) => {
+  if (!dateStr) return ''
+  const date = new Date(dateStr)
+  const now = new Date()
+  const diff = Math.floor((now - date) / 1000) // 秒
+  
+  if (diff < 60) return `${diff}秒前`
+  if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`
+  return date.toLocaleDateString()
+}
+
+// 定时刷新
+let healthTimer = null
+let tasksTimer = null
+
+onMounted(() => {
+  // 初始化主题
+  appStore.initTheme()
+  
+  checkHealth()
+  fetchProcessingTasks()
+  
+  // 每5秒刷新健康状态
+  healthTimer = setInterval(checkHealth, 5000)
+  // 每3秒刷新进行中的任务
+  tasksTimer = setInterval(fetchProcessingTasks, 3000)
+})
+
+onUnmounted(() => {
+  if (healthTimer) clearInterval(healthTimer)
+  if (tasksTimer) clearInterval(tasksTimer)
+})
 </script>
 
 <style scoped>
 .app-container {
   display: flex;
   min-height: 100vh;
-  background: var(--bg-primary);
   position: relative;
+  z-index: 1;
 }
 
 /* 环境光效果 */
-.app-container::before {
-  content: '';
-  position: fixed;
-  top: -200px;
-  right: -200px;
-  width: 600px;
-  height: 600px;
-  background: radial-gradient(circle, rgba(139, 92, 246, 0.06) 0%, transparent 70%);
-  border-radius: 50%;
-  pointer-events: none;
-  z-index: 0;
-}
-
+/* Removed ambient glow */
+.app-container::before,
 .app-container::after {
-  content: '';
-  position: fixed;
-  bottom: -200px;
-  left: -200px;
-  width: 500px;
-  height: 500px;
-  background: radial-gradient(circle, rgba(212, 165, 116, 0.05) 0%, transparent 70%);
-  border-radius: 50%;
-  pointer-events: none;
-  z-index: 0;
+  display: none;
 }
 
 /* 侧边栏 - 深色毛玻璃 */
 .sidebar {
   width: 240px;
-  background: linear-gradient(180deg, #0f0d13 0%, #1a1625 50%, #2d2640 100%);
+  background: var(--bg-sidebar);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   display: flex;
   flex-direction: column;
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: width 0.3s ease, background var(--transition-normal);
   position: fixed;
   left: 0;
   top: 0;
   bottom: 0;
   z-index: 100;
-  border-right: 1px solid rgba(139, 92, 246, 0.1);
-  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.15);
+  border-right: 1px solid var(--border-color);
 }
 
 .sidebar.collapsed {
   width: 72px;
 }
 
+/* Logo - Clean */
 .logo {
-  height: 72px;
+  height: 60px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 12px;
-  color: white;
-  border-bottom: 1px solid rgba(139, 92, 246, 0.15);
+  color: var(--text-primary);
+  /* border-bottom: 1px solid var(--border-color-light); */
   position: relative;
-}
-
-/* 金色微光效果 */
-.logo::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 20%;
-  right: 20%;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(212, 165, 116, 0.5), transparent);
+  margin-bottom: 12px;
 }
 
 .logo-text {
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  background: linear-gradient(135deg, #fff 0%, #d4a574 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  color: var(--text-primary);
 }
 
 .sidebar-nav {
@@ -180,40 +313,25 @@ const pageTitle = computed(() => {
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 14px 18px;
-  border-radius: 14px;
-  color: rgba(255, 255, 255, 0.6);
+  gap: 12px;
+  padding: 10px 16px;
+  margin: 2px 12px;
+  border-radius: 8px;
+  color: var(--text-secondary);
   text-decoration: none;
   font-size: 14px;
   font-weight: 500;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-  position: relative;
+  transition: all 0.2s ease;
 }
 
 .nav-item:hover {
-  background: rgba(139, 92, 246, 0.15);
-  color: rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-primary);
 }
 
 .nav-item.active {
-  background: linear-gradient(135deg, #8b5cf6 0%, #a78bfa 100%);
-  color: white;
-  box-shadow: 0 4px 16px rgba(139, 92, 246, 0.4), 0 0 40px rgba(139, 92, 246, 0.15);
-}
-
-/* 活动项金色点缀 */
-.nav-item.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 24px;
-  background: linear-gradient(180deg, #d4a574 0%, #e8c9a4 100%);
-  border-radius: 0 3px 3px 0;
-  box-shadow: 0 0 12px rgba(212, 165, 116, 0.5);
+  background: rgba(0, 113, 227, 0.1);
+  color: var(--primary-color);
 }
 
 .sidebar.collapsed .nav-item {
@@ -222,8 +340,39 @@ const pageTitle = computed(() => {
 }
 
 .sidebar-footer {
-  padding: 16px;
-  border-top: 1px solid rgba(139, 92, 246, 0.1);
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-color-light);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  color: var(--text-sidebar-muted);
+  cursor: pointer;
+  transition: all 0.25s ease;
+  margin: 2px 12px;
+}
+
+.theme-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--primary-color);
+}
+
+.theme-text {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.sidebar.collapsed .theme-toggle {
+  justify-content: center;
+  padding: 10px;
+  margin: 2px;
 }
 
 .collapse-btn {
@@ -232,14 +381,19 @@ const pageTitle = computed(() => {
   justify-content: center;
   padding: 10px;
   border-radius: 10px;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--text-sidebar-muted);
   cursor: pointer;
   transition: all 0.25s ease;
+  margin: 2px 12px;
 }
 
 .collapse-btn:hover {
-  background: rgba(139, 92, 246, 0.15);
-  color: white;
+  background: var(--bg-hover);
+  color: var(--primary-color);
+}
+
+.sidebar.collapsed .collapse-btn {
+  margin: 2px;
 }
 
 /* 主内容区 */
@@ -252,6 +406,7 @@ const pageTitle = computed(() => {
   min-height: 100vh;
   position: relative;
   z-index: 1;
+  background: transparent;
 }
 
 .sidebar.collapsed + .main-content,
@@ -261,18 +416,20 @@ const pageTitle = computed(() => {
 
 /* 头部 - 毛玻璃效果 */
 .header {
-  height: 72px;
+  min-height: 64px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 36px;
-  background: rgba(255, 255, 255, 0.7);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border-bottom: 1px solid rgba(139, 92, 246, 0.08);
+  padding: 0 32px;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-bottom: 1px solid var(--border-color-light);
   position: sticky;
   top: 0;
   z-index: 50;
+  box-shadow: var(--shadow-sm);
+  transition: background var(--transition-normal), border-color var(--transition-normal);
 }
 
 .page-title {
@@ -286,17 +443,200 @@ const pageTitle = computed(() => {
 .header-right {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
 }
 
-.status-icon {
-  margin-right: 4px;
+/* 头部状态项 */
+.header-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color-light);
+  transition: all var(--transition-fast);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: default;
+}
+
+.header-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+/* 任务指示器 */
+.tasks-indicator {
+  color: var(--primary-color);
+  cursor: pointer;
+}
+
+.tasks-icon {
+  font-size: 18px;
+  color: var(--primary-color);
+}
+
+.tasks-text {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.tasks-count {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--primary-color);
+}
+
+.tasks-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.tasks-arrow {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: 4px;
+  cursor: pointer;
+  transition: transform var(--transition-fast);
+}
+
+.tasks-indicator:hover .tasks-arrow {
+  transform: translateY(2px);
+}
+
+/* 健康状态指示器 */
+.health-indicator {
+  color: var(--text-primary);
+}
+
+.health-indicator.healthy {
+  color: var(--success-color);
+  background: rgba(52, 199, 89, 0.1);
+  border-color: rgba(52, 199, 89, 0.2);
+}
+
+.health-indicator.error {
+  color: var(--danger-color);
+  background: rgba(255, 59, 48, 0.1);
+  border-color: rgba(255, 59, 48, 0.2);
+}
+
+.health-indicator.checking {
+  color: var(--text-secondary);
+}
+
+.health-icon {
+  font-size: 18px;
+}
+
+.health-text {
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* 任务列表弹窗 */
+:deep(.tasks-popover) {
+  padding: 0 !important;
+}
+
+.tasks-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.tasks-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color-light);
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.tasks-list-content {
+  padding: 8px;
+}
+
+.task-item {
+  padding: 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  margin-bottom: 8px;
+  transition: all var(--transition-fast);
+}
+
+.task-item:hover {
+  background: var(--bg-hover);
+}
+
+.task-item:last-child {
+  margin-bottom: 0;
+}
+
+.task-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.task-type {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.task-time {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.tasks-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  color: var(--text-muted);
+}
+
+.tasks-empty p {
+  margin: 12px 0 0 0;
+  font-size: 13px;
+}
+
+/* 响应式 */
+@media (max-width: 768px) {
+  .header-right {
+    gap: 8px;
+  }
+  
+  .header-item {
+    padding: 6px 12px;
+    font-size: 12px;
+  }
+  
+  .tasks-label,
+  .health-text {
+    display: none;
+  }
+  
+  .tasks-count {
+    font-size: 14px;
+  }
 }
 
 .content-wrapper {
   flex: 1;
   padding: 32px 36px;
   overflow-y: auto;
+  position: relative;
+  z-index: 1;
 }
 
 /* 页面切换动画 */

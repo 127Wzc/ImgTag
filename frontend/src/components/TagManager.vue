@@ -235,7 +235,8 @@ watch(visible, (val) => {
 :deep(.el-dialog__title) {
   font-weight: 700;
   font-size: 18px;
-  background: linear-gradient(135deg, #8b5cf6 0%, #d4a574 100%);
+  color: var(--text-primary);
+  /* background: linear-gradient(135deg, #D4AF37 0%, #F3E5AB 100%); */
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;

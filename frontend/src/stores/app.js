@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { getImages, getSystemStatus } from '@/api'
 
 export const useAppStore = defineStore('app', () => {
@@ -13,6 +13,54 @@ export const useAppStore = defineStore('app', () => {
     const totalImages = ref(0)
     const currentPage = ref(1)
     const pageSize = ref(20)
+
+    // 主题管理
+    const theme = ref(localStorage.getItem('theme') || 'light') // light, dark
+
+    // 初始化主题
+    function initTheme() {
+        const savedTheme = localStorage.getItem('theme')
+        if (savedTheme) {
+            theme.value = savedTheme
+        } else {
+            // 如果没有保存的主题，使用系统偏好
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+            theme.value = prefersDark ? 'dark' : 'light'
+        }
+        applyTheme(theme.value)
+    }
+
+    // 应用主题
+    function applyTheme(newTheme) {
+        const html = document.documentElement
+        if (newTheme === 'dark') {
+            html.classList.add('dark-theme')
+            html.classList.remove('light-theme')
+        } else {
+            html.classList.add('light-theme')
+            html.classList.remove('dark-theme')
+        }
+        localStorage.setItem('theme', newTheme)
+    }
+
+    // 切换主题
+    function toggleTheme() {
+        theme.value = theme.value === 'light' ? 'dark' : 'light'
+        applyTheme(theme.value)
+    }
+
+    // 设置主题
+    function setTheme(newTheme) {
+        if (newTheme === 'light' || newTheme === 'dark') {
+            theme.value = newTheme
+            applyTheme(newTheme)
+        }
+    }
+
+    // 监听主题变化
+    watch(theme, (newTheme) => {
+        applyTheme(newTheme)
+    })
 
     // 获取系统状态
     async function fetchSystemStatus() {
@@ -59,6 +107,10 @@ export const useAppStore = defineStore('app', () => {
         totalImages,
         currentPage,
         pageSize,
+        theme,
+        initTheme,
+        toggleTheme,
+        setTheme,
         fetchSystemStatus,
         fetchImages,
         setPage

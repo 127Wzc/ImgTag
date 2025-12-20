@@ -26,10 +26,13 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
 
 
+import uuid
+
 @dataclass
 class AnalysisTask:
     """分析任务"""
     image_id: int
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
     status: TaskStatus = TaskStatus.PENDING
     error: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.now)
@@ -77,8 +80,20 @@ class TaskQueueService:
                 if image_id in self._processing:
                     continue
                 
+                # 创建任务对象
                 task = AnalysisTask(image_id=image_id)
                 self._queue.append(task)
+                
+                # 持久化到数据库
+                try:
+                    db.create_task(
+                        task_id=task.id,
+                        task_type="analyze_image",
+                        payload={"image_id": image_id}
+                    )
+                except Exception as e:
+                    logger.error(f"创建任务记录失败: {str(e)}")
+                    
                 added += 1
             
             logger.info(f"添加了 {added} 个任务到队列")
@@ -100,15 +115,15 @@ class TaskQueueService:
                 "processing_count": len(processing),
                 "completed_count": len(self._completed),
                 "pending": [
-                    {"image_id": t.image_id, "status": t.status.value}
+                    {"image_id": t.image_id, "status": t.status.value, "task_id": t.id}
                     for t in pending[:20]
                 ],
                 "processing": [
-                    {"image_id": t.image_id, "status": t.status.value, "started_at": t.started_at.isoformat() if t.started_at else None}
+                    {"image_id": t.image_id, "status": t.status.value, "started_at": t.started_at.isoformat() if t.started_at else None, "task_id": t.id}
                     for t in processing
                 ],
                 "recent_completed": [
-                    {"image_id": t.image_id, "status": t.status.value, "error": t.error}
+                    {"image_id": t.image_id, "status": t.status.value, "error": t.error, "task_id": t.id}
                     for t in recent_completed[-10:]
                 ]
             }
@@ -164,6 +179,12 @@ class TaskQueueService:
                 task.error = str(e)
                 task.completed_at = datetime.now()
                 
+                # 更新数据库状态
+                try:
+                    db.update_task_status(task.id, "failed", error=str(e))
+                except Exception as db_e:
+                    logger.error(f"更新任务 {task.id} 状态失败: {str(db_e)}")
+                
                 with self._lock:
                     if task.image_id in self._processing:
                         del self._processing[task.image_id]
@@ -181,6 +202,18 @@ class TaskQueueService:
             task.status = TaskStatus.PROCESSING
             task.started_at = datetime.now()
             self._processing[task.image_id] = task
+            
+            # 更新数据库状态
+            try:
+                # 在锁内或者锁外更新？最好快速释放锁。
+                # 这里为了简单直接更新，注意不要阻塞太久。
+                # 实际上 db 操作可能较慢，建议移出锁外。
+                # 但移出锁外需要重构 _get_next_task 逻辑，这里先这样。
+                # 另起一个线程/任务更新？
+                pass 
+            except Exception:
+                pass
+            
             return task
     
     async def _process_task(self, task: AnalysisTask, worker_id: int):
@@ -188,6 +221,12 @@ class TaskQueueService:
         from imgtag.services import vision_service, embedding_service
         
         logger.info(f"Worker {worker_id} 处理图片 ID: {task.image_id}")
+        
+        # 更新处理中状态
+        try:
+            db.update_task_status(task.id, "processing")
+        except Exception as e:
+            logger.error(f"更新任务 {task.id} 状态失败: {str(e)}")
         
         try:
             # 获取图片信息
@@ -204,6 +243,13 @@ class TaskQueueService:
                     image["description"],
                     image["tags"]
                 )
+                
+                # 更新图片
+                db.update_image(
+                    image_id=task.image_id,
+                    embedding=embedding
+                )
+                
             else:
                 # 分析图片
                 if image_url.startswith("/uploads/"):
@@ -246,6 +292,20 @@ class TaskQueueService:
             task.status = TaskStatus.COMPLETED
             task.completed_at = datetime.now()
             
+            # 更新数据库状态
+            try:
+                db.update_task_status(
+                    task.id, 
+                    "completed", 
+                    result={
+                        "image_id": task.image_id,
+                        "tags": analysis.tags if 'analysis' in locals() else image.get("tags"),
+                        "description": analysis.description if 'analysis' in locals() else image.get("description")
+                    }
+                )
+            except Exception as e:
+                logger.error(f"更新任务 {task.id} 状态失败: {str(e)}")
+            
             with self._lock:
                 if task.image_id in self._processing:
                     del self._processing[task.image_id]
@@ -258,6 +318,12 @@ class TaskQueueService:
             task.status = TaskStatus.FAILED
             task.error = str(e)
             task.completed_at = datetime.now()
+            
+            # 更新数据库状态
+            try:
+                db.update_task_status(task.id, "failed", error=str(e))
+            except Exception as db_e:
+                logger.error(f"更新任务 {task.id} 状态失败: {str(db_e)}")
             
             with self._lock:
                 if task.image_id in self._processing:

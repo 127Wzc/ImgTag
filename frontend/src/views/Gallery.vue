@@ -123,23 +123,62 @@
       
       <template v-else>
         <!-- 批量操作栏 -->
-        <div v-if="images.length > 0" class="batch-bar">
-          <el-checkbox 
-            v-model="selectMode" 
-            label="批量选择"
-            @change="handleSelectModeChange"
-          />
-          <template v-if="selectMode && selectedIds.length > 0">
-            <span class="selected-count">已选 {{ selectedIds.length }} 张</span>
-            <el-button type="primary" size="small" @click="openAddToCollectionDialog">
-              <el-icon><FolderAdd /></el-icon>
-              添加到收藏夹
-            </el-button>
-            <el-button type="primary" size="small" @click="handleBatchAnalyze" :loading="batchLoading">
-              批量分析
-            </el-button>
-            <el-button size="small" @click="clearSelection">取消选择</el-button>
-          </template>
+        <div v-if="images.length > 0 && selectMode" class="batch-bar">
+          <div class="batch-bar-left">
+            <el-checkbox 
+              v-model="selectMode" 
+              label="批量选择"
+              @change="handleSelectModeChange"
+            />
+            <div class="batch-actions-group">
+              <el-button 
+                size="small" 
+                @click="selectAll"
+                :disabled="isAllSelected"
+              >
+                全选
+              </el-button>
+              <el-button 
+                size="small" 
+                @click="invertSelection"
+                :disabled="images.length === 0"
+              >
+                反选
+              </el-button>
+            </div>
+          </div>
+          <div class="batch-bar-right">
+            <div v-if="selectedIds.length > 0" class="selected-count-badge">
+              <span class="selected-count-number">{{ selectedIds.length }}</span>
+              <span class="selected-count-text">张已选</span>
+            </div>
+            <div v-else class="selected-count-badge empty">
+              <span class="selected-count-text">未选择</span>
+            </div>
+            <div v-if="selectedIds.length > 0" class="batch-actions">
+              <el-button type="primary" size="small" @click="openAddToCollectionDialog">
+                <el-icon><FolderAdd /></el-icon>
+                添加到收藏夹
+              </el-button>
+              <el-button type="primary" size="small" @click="handleBatchAnalyze" :loading="batchLoading">
+                批量分析
+              </el-button>
+              <el-button size="small" @click="clearSelection">取消选择</el-button>
+            </div>
+          </div>
+        </div>
+        
+        <!-- 批量选择模式提示 -->
+        <div v-if="images.length > 0 && !selectMode" class="batch-mode-hint">
+          <el-button 
+            type="primary" 
+            size="default"
+            @click="selectMode = true"
+            class="batch-mode-btn"
+          >
+            <el-icon><Select /></el-icon>
+            进入批量选择模式
+          </el-button>
         </div>
         
         <div v-if="images.length === 0" class="empty-container">
@@ -158,14 +197,6 @@
             :class="{ selected: selectedIds.includes(image.id), 'no-tags': !image.description && !image.tags?.length }"
             @click="handleCardClick(image)"
           >
-            <!-- 选择框 -->
-            <div v-if="selectMode" class="select-checkbox" @click.stop>
-              <el-checkbox 
-                :model-value="selectedIds.includes(image.id)"
-                @change="(val) => toggleSelect(image.id, val)"
-              />
-            </div>
-            
             <!-- 处理中标记 -->
             <div v-if="processingIds.includes(image.id)" class="processing-badge">
               <el-icon class="is-loading"><Loading /></el-icon>
@@ -178,6 +209,14 @@
             <!-- 未分析标记 -->
             <div v-else-if="!image.description && !image.tags?.length" class="untagged-badge">
               待分析
+            </div>
+            
+            <!-- 选择框 -->
+            <div v-if="selectMode" class="select-checkbox" @click.stop>
+              <el-checkbox 
+                :model-value="selectedIds.includes(image.id)"
+                @change="(val) => toggleSelect(image.id, val)"
+              />
             </div>
             
             <div class="image-wrapper">
@@ -401,8 +440,8 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { FolderAdd, Setting } from '@element-plus/icons-vue'
-import { getImages, updateImage, deleteImage, addToQueue, getQueueStatus, getCollections, createCollection, addImageToCollection, getCollectionImages, getTags } from '@/api'
+import { FolderAdd, Setting, Select } from '@element-plus/icons-vue'
+import { getImages, updateImage, deleteImage, addToQueue, getQueueStatus, getCollections, createCollection, addImageToCollection, getCollectionImages, getTags, searchSimilar } from '@/api'
 
 import TagManager from '@/components/TagManager.vue'
 
@@ -466,6 +505,16 @@ const saving = ref(false)
 const selectMode = ref(false)
 const selectedIds = ref([])
 const batchLoading = ref(false)
+
+// 全选状态计算属性
+const isAllSelected = computed(() => {
+  return images.value.length > 0 && selectedIds.value.length === images.value.length
+})
+
+// 部分选中状态
+const isIndeterminate = computed(() => {
+  return selectedIds.value.length > 0 && selectedIds.value.length < images.value.length
+})
 
 // 队列状态
 const queueStatus = ref(null)
@@ -584,14 +633,14 @@ const fetchImages = async () => {
       total.value = result.total
     } else if (filters.descriptionContains) {
       // 语义搜索
-      const res = await api.post('/search/similar', {
-        text: filters.descriptionContains,
-        tags: filters.tags.length > 0 ? filters.tags : undefined,
-        limit: pageSize.value,
-        threshold: 0.3, // 默认阈值
-        vector_weight: vectorWeight.value,
-        tag_weight: tagWeight.value
-      })
+      const res = await searchSimilar(
+        filters.descriptionContains,
+        filters.tags.length > 0 ? filters.tags : [],
+        pageSize.value,
+        0.3, // 默认阈值
+        vectorWeight.value,
+        tagWeight.value
+      )
       images.value = res.images
       total.value = res.total
     } else {
@@ -638,7 +687,10 @@ const handleSelectModeChange = (val) => {
 
 const toggleSelect = (id, val) => {
   if (val) {
-    selectedIds.value.push(id)
+    // 避免重复添加
+    if (!selectedIds.value.includes(id)) {
+      selectedIds.value.push(id)
+    }
   } else {
     selectedIds.value = selectedIds.value.filter(i => i !== id)
   }
@@ -646,6 +698,19 @@ const toggleSelect = (id, val) => {
 
 const clearSelection = () => {
   selectedIds.value = []
+}
+
+// 全选当前页
+const selectAll = () => {
+  selectedIds.value = images.value.map(img => img.id)
+}
+
+// 反选当前页
+const invertSelection = () => {
+  const currentPageIds = images.value.map(img => img.id)
+  const newSelected = currentPageIds.filter(id => !selectedIds.value.includes(id))
+  const keepSelected = selectedIds.value.filter(id => !currentPageIds.includes(id))
+  selectedIds.value = [...keepSelected, ...newSelected]
 }
 
 const handleCardClick = (image) => {
@@ -978,8 +1043,9 @@ onUnmounted(() => {
 
 .image-card {
   cursor: pointer;
-  transition: transform 0.2s;
+  transition: all var(--transition-normal);
   position: relative;
+  transform-origin: center;
 }
 
 .image-wrapper {
@@ -1040,21 +1106,145 @@ onUnmounted(() => {
 .batch-bar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 16px;
-  padding: 12px 16px;
-  background: var(--bg-card);
-  border-radius: var(--radius-md);
-  margin-bottom: 16px;
+  padding: 14px 20px;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-radius: var(--radius-lg);
+  margin-bottom: 20px;
+  border: 1px solid var(--border-color-light);
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-normal);
 }
 
-.selected-count {
+.batch-bar:hover {
+  box-shadow: var(--shadow-md);
+  border-color: var(--border-color);
+}
+
+.batch-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.batch-actions-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 16px;
+  border-left: 1px solid var(--border-color-light);
+}
+
+.batch-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.selected-count-badge {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 6px 14px;
+  background: rgba(0, 113, 227, 0.1);
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(0, 113, 227, 0.2);
+  transition: all var(--transition-fast);
+}
+
+.selected-count-badge.empty {
+  background: var(--bg-secondary);
+  border-color: var(--border-color-light);
+}
+
+.selected-count-number {
+  font-size: 18px;
+  font-weight: 700;
   color: var(--primary-color);
+  line-height: 1;
+}
+
+.selected-count-text {
+  font-size: 13px;
+  color: var(--text-secondary);
   font-weight: 500;
 }
 
+.selected-count-badge.empty .selected-count-text {
+  color: var(--text-muted);
+}
+
+.batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.batch-mode-hint {
+  margin-bottom: 16px;
+  padding: 8px 0;
+}
+
+.batch-mode-btn {
+  font-weight: 500;
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-fast);
+}
+
+.batch-mode-btn:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.image-card {
+  transition: all var(--transition-normal);
+}
+
 .image-card.selected {
-  outline: 3px solid var(--primary-color);
-  outline-offset: -3px;
+  transform: scale(1.02);
+  box-shadow: 0 0 0 3px var(--primary-color), 
+              0 8px 24px rgba(0, 113, 227, 0.25),
+              var(--shadow-lg);
+  border-radius: var(--radius-lg);
+  z-index: 5;
+  position: relative;
+  animation: selectPulse 0.3s ease-out;
+}
+
+@keyframes selectPulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(0, 113, 227, 0.4);
+  }
+  50% {
+    transform: scale(1.03);
+    box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.2);
+  }
+  100% {
+    transform: scale(1.02);
+    box-shadow: 0 0 0 3px var(--primary-color), 
+                0 8px 24px rgba(0, 113, 227, 0.25),
+                var(--shadow-lg);
+  }
+}
+
+.image-card.selected .image-wrapper {
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.image-card.selected .image-wrapper::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 113, 227, 0.1);
+  z-index: 1;
+  pointer-events: none;
 }
 
 .image-card.no-tags {
@@ -1063,30 +1253,71 @@ onUnmounted(() => {
 
 .select-checkbox {
   position: absolute;
-  top: 8px;
-  left: 8px;
-  z-index: 10;
-  background: white;
-  border-radius: 4px;
-  padding: 2px;
+  top: 10px;
+  right: 10px;
+  z-index: 15;
+  background: transparent;
+  border-radius: var(--radius-md);
+  padding: 4px;
+  transition: all var(--transition-fast);
+}
+
+.select-checkbox:hover {
+  transform: scale(1.1);
+}
+
+.select-checkbox :deep(.el-checkbox) {
+  --el-checkbox-bg-color: transparent;
+}
+
+.select-checkbox :deep(.el-checkbox__input) {
+  background: transparent;
+}
+
+.select-checkbox :deep(.el-checkbox__inner) {
+  background-color: transparent;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.select-checkbox :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+  background-color: var(--primary-color);
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.3),
+              0 2px 8px rgba(0, 113, 227, 0.4);
+}
+
+.select-checkbox :deep(.el-checkbox__input.is-checked .el-checkbox__inner::after) {
+  border-color: white;
+}
+
+.image-card.selected .select-checkbox :deep(.el-checkbox__inner) {
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.5),
+              0 0 0 4px rgba(0, 113, 227, 0.3),
+              0 4px 12px rgba(0, 113, 227, 0.4);
 }
 
 .untagged-badge {
   position: absolute;
-  top: 8px;
-  right: 8px;
+  top: 10px;
+  left: 10px;
   z-index: 10;
   background: #f59e0b;
   color: white;
   font-size: 11px;
-  padding: 2px 8px;
+  padding: 4px 10px;
   border-radius: 10px;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3);
 }
 
 .processing-badge {
   position: absolute;
-  top: 8px;
-  right: 8px;
+  top: 10px;
+  left: 10px;
   z-index: 10;
   background: var(--primary-color);
   color: white;
@@ -1096,18 +1327,22 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 4px;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(0, 113, 227, 0.3);
 }
 
 .pending-badge {
   position: absolute;
-  top: 8px;
-  right: 8px;
+  top: 10px;
+  left: 10px;
   z-index: 10;
   background: #6b7280;
   color: white;
   font-size: 11px;
-  padding: 2px 8px;
+  padding: 4px 10px;
   border-radius: 10px;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(107, 114, 128, 0.3);
 }
 
 .pagination-container {
@@ -1239,6 +1474,41 @@ onUnmounted(() => {
 @media (max-width: 600px) {
   .images-grid {
     grid-template-columns: 1fr;
+  }
+  
+  .batch-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  
+  .batch-bar-left {
+    flex-wrap: wrap;
+  }
+  
+  .batch-actions-group {
+    padding-left: 0;
+    border-left: none;
+    border-top: 1px solid var(--border-color-light);
+    padding-top: 12px;
+    width: 100%;
+    justify-content: flex-start;
+  }
+  
+  .batch-bar-right {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  
+  .batch-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  
+  .selected-count-badge {
+    width: 100%;
+    justify-content: center;
   }
 }
 </style>

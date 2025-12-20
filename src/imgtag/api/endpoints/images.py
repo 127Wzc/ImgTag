@@ -9,7 +9,7 @@
 import time
 from typing import Dict, Any
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
 
 from imgtag.db import db
 from imgtag.services import vision_service, embedding_service, upload_service
@@ -69,34 +69,40 @@ async def create_image_manual(image: ImageCreateManual):
         raise HTTPException(status_code=500, detail=f"创建图像失败: {str(e)}")
 
 
+
 @router.post("/analyze-url", response_model=UploadAnalyzeResponse, status_code=201)
-async def analyze_and_create_from_url(request: ImageCreateByUrl):
-    """通过 URL 分析图像并创建记录"""
+async def analyze_and_create_from_url(request: ImageCreateByUrl, background_tasks: BackgroundTasks):
+    """通过 URL 分析图像并创建记录（异步处理）"""
+    from imgtag.db import config_db
+    from imgtag.services.task_queue import task_queue
+    
     start_time = time.time()
-    logger.info(f"分析远程图像: {request.image_url}")
+    logger.info(f"添加远程图像任务: {request.image_url}")
     
     try:
-        # 决定标签和描述来源
-        if request.auto_analyze:
-            # 使用视觉模型分析
-            analysis = await vision_service.analyze_image_url(request.image_url)
-            tags = analysis.tags
-            description = analysis.description
+        # 获取向量维度用于创建零向量
+        mode = config_db.get("embedding_mode", "local")
+        if mode == "local":
+            model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
+            if "small" in model_name:
+                dim = 512
+            elif "base" in model_name:
+                dim = 768
+            else:
+                dim = 512
         else:
-            tags = request.tags or []
-            description = request.description or ""
+            dim = config_db.get_int("embedding_dimensions", 1536)
         
-        # 生成向量嵌入
-        embedding_vector = await embedding_service.get_embedding_combined(
-            description, 
-            tags
-        )
+        zero_vector = [0.0] * dim
         
-        # 插入数据库
+        # 1. 插入初始记录（未分析状态）
+        tags = request.tags or []
+        description = request.description or ""
+        
         new_id = db.insert_image(
             image_url=request.image_url,
             tags=tags,
-            embedding=embedding_vector,
+            embedding=zero_vector,
             description=description,
             source_type="url",
             original_url=request.image_url
@@ -104,9 +110,16 @@ async def analyze_and_create_from_url(request: ImageCreateByUrl):
         
         if not new_id:
             raise HTTPException(status_code=500, detail="数据库插入失败")
+            
+        # 2. 如果需要自动分析，添加到任务队列
+        if request.auto_analyze:
+            task_queue.add_tasks([new_id])
+            # 启动后台处理
+            if not task_queue._running:
+                background_tasks.add_task(task_queue.start_processing)
         
         total_time = time.time() - start_time
-        perf_logger.info(f"URL 图像分析和创建总耗时: {total_time:.4f}秒")
+        perf_logger.info(f"URL 图像添加任务耗时: {total_time:.4f}秒")
         
         return UploadAnalyzeResponse(
             id=new_id,
@@ -116,21 +129,25 @@ async def analyze_and_create_from_url(request: ImageCreateByUrl):
             process_time=f"{total_time:.4f}秒"
         )
     except Exception as e:
-        logger.error(f"分析 URL 图像失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"分析图像失败: {str(e)}")
+        logger.error(f"添加图像任务失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"添加任务失败: {str(e)}")
 
 
 @router.post("/upload", response_model=UploadAnalyzeResponse, status_code=201)
 async def upload_and_analyze(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="上传的图片文件"),
     auto_analyze: bool = Form(default=True, description="是否自动分析"),
     skip_analyze: bool = Form(default=False, description="跳过分析，只上传"),
     tags: str = Form(default="", description="手动标签，逗号分隔"),
     description: str = Form(default="", description="手动描述")
 ):
-    """上传图片文件并分析（支持只上传不分析）"""
+    """上传图片文件并分析（异步处理）"""
+    from imgtag.db import config_db
+    from imgtag.services.task_queue import task_queue
+    
     start_time = time.time()
-    logger.info(f"上传文件: {file.filename}, skip_analyze={skip_analyze}")
+    logger.info(f"上传文件: {file.filename}, auto_analyze={auto_analyze}")
     
     try:
         # 读取文件内容
@@ -142,55 +159,29 @@ async def upload_and_analyze(
             file.filename
         )
         
-        final_tags = []
-        final_description = ""
-        embedding_vector = None
-        
-        # 如果跳过分析，只保存文件，使用零向量
-        if skip_analyze:
-            # 获取当前向量维度
-            from imgtag.db import config_db
-            mode = config_db.get("embedding_mode", "local")
-            if mode == "local":
-                model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
-                if "small" in model_name:
-                    dim = 512
-                elif "base" in model_name:
-                    dim = 768
-                else:
-                    dim = 512
+        # 获取向量维度
+        mode = config_db.get("embedding_mode", "local")
+        if mode == "local":
+            model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
+            if "small" in model_name:
+                dim = 512
+            elif "base" in model_name:
+                dim = 768
             else:
-                dim = config_db.get_int("embedding_dimensions", 1536)
-            
-            embedding_vector = [0.0] * dim
-        elif auto_analyze:
-            # 获取 MIME 类型
-            mime_type = upload_service.get_mime_type(file.filename)
-            # 使用视觉模型分析
-            analysis = await vision_service.analyze_image_base64(file_content, mime_type)
-            final_tags = analysis.tags
-            final_description = analysis.description
-            
-            # 生成向量嵌入
-            embedding_vector = await embedding_service.get_embedding_combined(
-                final_description, 
-                final_tags
-            )
+                dim = 512
         else:
-            final_tags = [t.strip() for t in tags.split(",") if t.strip()]
-            final_description = description
-            
-            # 生成向量嵌入
-            embedding_vector = await embedding_service.get_embedding_combined(
-                final_description, 
-                final_tags
-            )
+            dim = config_db.get_int("embedding_dimensions", 1536)
         
-        # 插入数据库
+        zero_vector = [0.0] * dim
+        
+        final_tags = [t.strip() for t in tags.split(",") if t.strip()]
+        final_description = description
+        
+        # 1. 插入记录
         new_id = db.insert_image(
             image_url=access_url,
             tags=final_tags,
-            embedding=embedding_vector,
+            embedding=zero_vector,
             description=final_description,
             source_type="local",
             file_path=file_path
@@ -199,8 +190,15 @@ async def upload_and_analyze(
         if not new_id:
             raise HTTPException(status_code=500, detail="数据库插入失败")
         
+        # 2. 添加到分析队列
+        if auto_analyze and not skip_analyze:
+            task_queue.add_tasks([new_id])
+            # 启动后台处理
+            if not task_queue._running:
+                background_tasks.add_task(task_queue.start_processing)
+        
         total_time = time.time() - start_time
-        perf_logger.info(f"上传图像{'(跳过分析)' if skip_analyze else ''}创建总耗时: {total_time:.4f}秒")
+        perf_logger.info(f"上传并添加任务耗时: {total_time:.4f}秒")
         
         return UploadAnalyzeResponse(
             id=new_id,
@@ -210,8 +208,8 @@ async def upload_and_analyze(
             process_time=f"{total_time:.4f}秒"
         )
     except Exception as e:
-        logger.error(f"上传和分析图像失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"上传图像失败: {str(e)}")
+        logger.error(f"上传和添加任务失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
 
 
 @router.post("/upload-zip", response_model=Dict[str, Any], status_code=201)

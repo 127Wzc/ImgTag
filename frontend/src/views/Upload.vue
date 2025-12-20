@@ -3,7 +3,7 @@
     <!-- 上传区域 -->
     <div class="card upload-card">
       <div class="card-header">
-        <el-icon :size="22" color="#8b5cf6"><Upload /></el-icon>
+        <el-icon :size="22" color="var(--primary-color)"><Upload /></el-icon>
         <h2>图片上传</h2>
       </div>
       

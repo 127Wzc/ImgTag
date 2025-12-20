@@ -3,7 +3,7 @@
     <!-- 模型配置 -->
     <div class="card config-card">
       <div class="card-header">
-        <el-icon :size="22" color="#8b5cf6"><Setting /></el-icon>
+        <el-icon :size="22" color="var(--primary-color)"><Setting /></el-icon>
         <h2>模型配置</h2>
       </div>
       
@@ -12,7 +12,7 @@
         <span>加载中...</span>
       </div>
       
-      <el-form v-else :model="configForm" label-width="140px" class="config-form">
+      <el-form v-else :model="configForm" label-width="120px" class="config-form">
         <div class="form-section">
           <h3>
             <el-icon><View /></el-icon>
@@ -453,24 +453,62 @@ onUnmounted(() => {
 .settings-page {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  max-width: 800px;
+  gap: 32px;
+  max-width: 1200px;
+  width: 100%;
 }
 
+/* 卡片头部 - 现代化设计 */
 .card-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 24px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--border-color);
+  gap: 14px;
+  margin-bottom: 28px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border-color-light);
+}
+
+.card-header .el-icon {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  background: rgba(0, 113, 227, 0.08);
+  color: var(--primary-color);
+}
+
+/* 不同卡片的图标颜色 */
+.vector-card .card-header .el-icon {
+  background: rgba(245, 158, 11, 0.1);
+  color: #f59e0b;
+}
+
+.tag-card .card-header .el-icon {
+  background: rgba(245, 158, 11, 0.1);
+  color: #f59e0b;
+}
+
+.health-card .card-header .el-icon {
+  background: rgba(34, 197, 94, 0.1);
+  color: #22c55e;
 }
 
 .card-header h2 {
   margin: 0;
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 600;
   color: var(--text-primary);
+  letter-spacing: -0.3px;
+}
+
+/* 卡片描述 */
+.card-description {
+  margin: 0 0 24px 0;
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.6;
 }
 
 /* 加载状态 */
@@ -479,93 +517,147 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  padding: 48px;
+  padding: 64px 48px;
   color: var(--text-secondary);
 }
 
 /* 表单样式 */
 .config-form {
-  max-width: 600px;
+  width: 100%;
 }
 
 .form-section {
-  margin-bottom: 32px;
+  margin-bottom: 40px;
+  padding: 24px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-color-light);
+}
+
+.form-section:last-of-type {
+  margin-bottom: 0;
 }
 
 .form-section h3 {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 15px;
+  gap: 10px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 20px;
-  padding-bottom: 10px;
-  border-bottom: 1px dashed var(--border-color);
+  margin: 0 0 24px 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color-light);
+}
+
+.form-section h3 .el-icon {
+  color: var(--primary-color);
+  font-size: 18px;
+}
+
+.form-section :deep(.el-form-item) {
+  margin-bottom: 22px;
+}
+
+.form-section :deep(.el-form-item__label) {
+  font-weight: 500;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+@media (max-width: 768px) {
+  .config-form :deep(.el-form-item__label) {
+    width: 100% !important;
+    text-align: left !important;
+    margin-bottom: 8px;
+  }
 }
 
 .form-hint {
-  margin-top: 8px;
-  font-size: 12px;
+  margin-top: 10px;
+  font-size: 13px;
   color: var(--text-muted);
-  line-height: 1.5;
+  line-height: 1.6;
+  padding: 12px 16px;
+  background: rgba(0, 113, 227, 0.05);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--primary-color);
 }
 
 .form-actions {
   display: flex;
-  gap: 12px;
-  padding-top: 20px;
-  border-top: 1px solid var(--border-color);
+  gap: 14px;
+  padding-top: 24px;
+  margin-top: 32px;
+  border-top: 1px solid var(--border-color-light);
 }
 
-/* 向量管理 */
+/* 向量管理 - 网格布局 */
 .vector-info {
-  display: flex;
-  gap: 32px;
-  margin-bottom: 20px;
-  padding: 16px 20px;
-  background: var(--bg-primary);
-  border-radius: var(--radius-md);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 20px;
+  margin-bottom: 24px;
+  padding: 0;
 }
 
 .info-row {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
+  padding: 20px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-color-light);
+  transition: all var(--transition-fast);
+}
+
+.info-row:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
 }
 
 .info-row .label {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-secondary);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .info-row .value {
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 600;
   color: var(--text-primary);
+  line-height: 1.4;
 }
 
 .info-row .value.text-error {
-  color: #ef4444;
+  color: var(--danger-color);
 }
 
 .rebuild-progress {
-  margin-bottom: 20px;
-  padding: 16px;
-  background: var(--bg-primary);
-  border-radius: var(--radius-md);
+  margin-bottom: 24px;
+  padding: 24px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-color-light);
 }
 
 .progress-text {
-  margin-top: 8px;
-  font-size: 13px;
+  margin-top: 12px;
+  font-size: 14px;
   color: var(--text-secondary);
   text-align: center;
+  font-weight: 500;
 }
 
 .vector-actions {
   display: flex;
-  gap: 12px;
+  gap: 14px;
+  flex-wrap: wrap;
 }
 
 /* 健康检查 */
@@ -573,49 +665,115 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
 }
 
 .status-indicator {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 16px 20px;
-  border-radius: var(--radius-md);
-  background: var(--bg-primary);
+  gap: 16px;
+  padding: 20px 24px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color-light);
+  flex: 1;
+  min-width: 200px;
+  transition: all var(--transition-fast);
 }
 
-.status-indicator.healthy {
+.status-indicator:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
+}
+
+.status-indicator .el-icon {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  background: rgba(52, 199, 89, 0.1);
+}
+
+.status-indicator.healthy .el-icon {
+  background: rgba(52, 199, 89, 0.1);
   color: var(--success-color);
 }
 
-.status-indicator.error {
-  color: var(--error-color);
+.status-indicator.error .el-icon {
+  background: rgba(255, 59, 48, 0.1);
+  color: var(--danger-color);
 }
 
-.status-indicator.checking {
+.status-indicator.checking .el-icon {
+  background: rgba(134, 134, 139, 0.1);
   color: var(--text-secondary);
 }
 
 .status-text {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .status-label {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-secondary);
   font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .status-value {
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Alert 样式优化 */
+:deep(.el-alert) {
+  border-radius: var(--radius-lg) !important;
+  border: 1px solid var(--border-color-light) !important;
+  margin-bottom: 24px !important;
+}
+
+/* 按钮样式优化 */
+:deep(.el-button) {
+  font-weight: 500;
+  padding: 10px 20px;
+}
+
+:deep(.el-button.is-round) {
+  padding: 10px 24px;
+}
+
+/* 响应式布局 */
+@media (max-width: 1024px) {
+  .settings-page {
+    max-width: 100%;
+  }
+  
+  .vector-info {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
 @media (max-width: 768px) {
+  .settings-page {
+    gap: 24px;
+  }
+  
+  .form-section {
+    padding: 20px;
+    margin-bottom: 32px;
+  }
+  
   .vector-info {
-    flex-direction: column;
+    grid-template-columns: 1fr;
     gap: 16px;
   }
   
@@ -623,10 +781,43 @@ onUnmounted(() => {
     flex-direction: column;
   }
   
+  .vector-actions .el-button {
+    width: 100%;
+  }
+  
   .health-status {
     flex-direction: column;
     gap: 16px;
     align-items: stretch;
+  }
+  
+  .status-indicator {
+    min-width: auto;
+  }
+  
+  .form-actions {
+    flex-direction: column;
+  }
+  
+  .form-actions .el-button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .card-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  
+  .card-header .el-icon {
+    width: 36px;
+    height: 36px;
+  }
+  
+  .form-section {
+    padding: 16px;
   }
 }
 </style>

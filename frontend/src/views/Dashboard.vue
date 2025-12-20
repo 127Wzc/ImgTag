@@ -214,7 +214,7 @@ onMounted(async () => {
   gap: 16px;
   padding: 20px;
   border-radius: var(--radius-lg);
-  background: var(--bg-primary);
+  background: var(--bg-card);
   text-decoration: none;
   transition: all 0.3s ease;
   border: 1px solid transparent;
@@ -238,19 +238,19 @@ onMounted(async () => {
 }
 
 .action-icon.upload {
-  background: linear-gradient(135deg, #8b5cf6 0%, #a78bfa 100%);
+  background: var(--primary-color);
 }
 
 .action-icon.search {
-  background: linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%);
+  background: #3b82f6;
 }
 
 .action-icon.gallery {
-  background: linear-gradient(135deg, #22c55e 0%, #4ade80 100%);
+  background: #22c55e;
 }
 
 .action-icon.settings {
-  background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);
+  background: #f59e0b;
 }
 
 .action-info {
