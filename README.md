@@ -34,6 +34,7 @@
 - 用户注册与登录（JWT 认证）
 - 管理员审批新用户
 - 角色权限控制（admin/user）
+- **用户管理界面**：管理员可创建/禁用/删除用户、修改密码
 - 默认管理员账号：`admin` / `admin`
 
 ### ⚡ 批量操作
@@ -49,6 +50,9 @@
 - 现代化毛玻璃 UI 设计
 - 深色模式支持
 - **启动时自动恢复未完成任务**
+- **数据备份与恢复**：导出/导入数据库记录（JSON 格式）
+- **重复图片检测**：基于文件 MD5 哈希检测并筛选重复图片
+- **动态模型选择**：从 API 实时获取可用模型列表
 
 ---
 
@@ -75,7 +79,7 @@ ImgTag/
 
 ```
 images              # 图片表
-├── id, image_url, description, embedding, ...
+├── id, image_url, description, embedding, file_hash, ...
 
 tags                # 标签表
 ├── id, name, source, usage_count, parent_id
@@ -208,7 +212,12 @@ pnpm dev
 | `/api/v1/queue/add` | POST | 添加到分析队列 |
 | `/api/v1/auth/login` | POST | 用户登录 |
 | `/api/v1/auth/register` | POST | 用户注册 |
+| `/api/v1/auth/users` | GET/POST/PUT/DELETE | 用户管理（管理员） |
 | `/api/v1/approvals/` | GET | 待审批用户列表 |
+| `/api/v1/system/export` | GET | 导出数据库（管理员） |
+| `/api/v1/system/import` | POST | 导入数据库（管理员） |
+| `/api/v1/system/duplicates` | GET | 查找重复图片（管理员） |
+| `/api/v1/system/models` | GET | 获取可用模型列表 |
 
 完整文档：http://localhost:8000/docs
 
