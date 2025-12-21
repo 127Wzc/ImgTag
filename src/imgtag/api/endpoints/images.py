@@ -178,14 +178,19 @@ async def upload_and_analyze(
         final_tags = [t.strip() for t in tags.split(",") if t.strip()]
         final_description = description
         
+        # 计算文件哈希
+        import hashlib
+        file_hash = hashlib.md5(file_content).hexdigest()
+        
         # 1. 插入记录
         new_id = db.insert_image(
             image_url=access_url,
             tags=final_tags,
             embedding=zero_vector,
             description=final_description,
-            source_type="local",
-            file_path=file_path
+            source_type="upload",
+            file_path=file_path,
+            file_hash=file_hash
         )
         
         if not new_id:
@@ -355,6 +360,7 @@ async def search_images(request: ImageSearchRequest):
             url_contains=request.url_contains,
             description_contains=request.description_contains,
             pending_only=request.pending_only,
+            duplicates_only=request.duplicates_only,
             limit=request.limit,
             offset=request.offset,
             sort_by=request.sort_by,

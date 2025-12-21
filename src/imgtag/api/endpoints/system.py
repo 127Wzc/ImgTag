@@ -245,3 +245,87 @@ async def import_database(
     except Exception as e:
         logger.error(f"导入失败: {str(e)}")
         return {"error": str(e)}
+
+
+# ========== 重复检测 API ==========
+
+import hashlib
+import os
+
+@router.get("/duplicates")
+async def get_duplicate_images(admin: Dict = Depends(require_admin)):
+    """获取重复的图片列表（管理员）"""
+    logger.info("扫描重复图片")
+    
+    try:
+        duplicates = db.find_duplicate_images()
+        no_hash_count = db.count_images_without_hash()
+        
+        return {
+            "duplicate_groups": duplicates,
+            "total_groups": len(duplicates),
+            "total_duplicates": sum(d['count'] - 1 for d in duplicates),
+            "images_without_hash": no_hash_count
+        }
+    except Exception as e:
+        logger.error(f"扫描重复图片失败: {str(e)}")
+        return {"error": str(e)}
+
+
+@router.post("/duplicates/calculate-hashes")
+async def calculate_missing_hashes(
+    limit: int = 100,
+    admin: Dict = Depends(require_admin)
+):
+    """批量计算缺失的文件哈希（管理员）"""
+    logger.info(f"开始计算文件哈希，限制 {limit} 张")
+    
+    try:
+        images = db.get_images_without_hash(limit)
+        
+        processed = 0
+        errors = []
+        
+        for img in images:
+            try:
+                file_hash = None
+                
+                # 本地文件
+                if img.get('source_type') == 'upload' and img.get('file_path'):
+                    file_path = img['file_path']
+                    if os.path.exists(file_path):
+                        with open(file_path, 'rb') as f:
+                            file_hash = hashlib.md5(f.read()).hexdigest()
+                
+                # URL 图片 - 下载并计算哈希
+                elif img.get('image_url'):
+                    url = img['image_url']
+                    # 处理相对 URL
+                    if url.startswith('/'):
+                        base_url = config_db.get("base_url", "http://localhost:8000")
+                        url = base_url.rstrip('/') + url
+                    
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        response = await client.get(url)
+                        if response.status_code == 200:
+                            file_hash = hashlib.md5(response.content).hexdigest()
+                
+                if file_hash:
+                    db.update_image_hash(img['id'], file_hash)
+                    processed += 1
+                    
+            except Exception as e:
+                errors.append(f"图片 {img['id']}: {str(e)}")
+        
+        remaining = db.count_images_without_hash()
+        
+        return {
+            "message": f"已处理 {processed} 张图片",
+            "processed": processed,
+            "remaining": remaining,
+            "errors": errors[:10]
+        }
+    except Exception as e:
+        logger.error(f"计算哈希失败: {str(e)}")
+        return {"error": str(e)}
+

@@ -347,6 +347,58 @@
         </div>
       </el-tab-pane>
       
+      <!-- 重复检测 Tab -->
+      <el-tab-pane label="重复检测" name="duplicates">
+        <div class="tab-content">
+          <p class="card-description">检测和管理重复的图片（基于文件 MD5 哈希）</p>
+          
+          <div class="duplicate-stats" v-if="duplicateInfo">
+            <div class="info-row">
+              <span class="label">重复组数:</span>
+              <span class="value">{{ duplicateInfo.total_groups }}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">可删除数量:</span>
+              <span class="value text-warning">{{ duplicateInfo.total_duplicates }}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">未计算哈希:</span>
+              <span class="value">{{ duplicateInfo.images_without_hash }}</span>
+            </div>
+          </div>
+          
+          <div class="duplicate-actions" style="margin: 20px 0; display: flex; gap: 12px;">
+            <el-button type="primary" round @click="scanDuplicates" :loading="scanningDuplicates">
+              <el-icon><Search /></el-icon>
+              扫描重复
+            </el-button>
+            <el-button round @click="calcHashes" :loading="calculatingHashes" v-if="duplicateInfo?.images_without_hash > 0">
+              <el-icon><Refresh /></el-icon>
+              计算缺失哈希 ({{ duplicateInfo.images_without_hash }})
+            </el-button>
+          </div>
+          
+          <!-- 重复组列表 -->
+          <div v-if="duplicateGroups.length > 0" class="duplicate-groups">
+            <div v-for="group in duplicateGroups" :key="group.file_hash" class="duplicate-group">
+              <div class="group-header">
+                <span>哈希: {{ group.file_hash.slice(0, 8) }}...</span>
+                <el-tag type="warning" size="small">{{ group.count }} 张重复</el-tag>
+              </div>
+              <div class="group-images">
+                <div v-for="img in group.images" :key="img.id" class="dup-image-item">
+                  <span class="img-id">#{{ img.id }}</span>
+                  <span class="img-url" :title="img.image_url">{{ img.image_url.split('/').pop() }}</span>
+                  <el-button size="small" type="danger" plain @click="handleDeleteImage(img.id)">删除</el-button>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <el-empty v-else-if="!scanningDuplicates && duplicateInfo" description="没有重复的图片" />
+        </div>
+      </el-tab-pane>
+      
       <!-- 用户管理 Tab -->
       <el-tab-pane label="用户管理" name="users">
         <div class="tab-content">
@@ -461,7 +513,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Plus, Refresh, Download, Upload } from '@element-plus/icons-vue'
+import { Plus, Refresh, Download, Upload, Search } from '@element-plus/icons-vue'
 import { 
   getAllConfigs, 
   updateConfigs, 
@@ -478,7 +530,10 @@ import {
   changeUserPassword,
   exportDatabase,
   importDatabase,
-  getAvailableModels
+  getAvailableModels,
+  getDuplicates,
+  calculateHashes,
+  deleteImage
 } from '@/api'
 import TagManager from '@/components/TagManager.vue'
 
@@ -525,6 +580,12 @@ const importing = ref(false)
 const availableModels = ref([])
 const loadingModels = ref(false)
 const modelsError = ref('')
+
+// 重复检测
+const duplicateInfo = ref(null)
+const duplicateGroups = ref([])
+const scanningDuplicates = ref(false)
+const calculatingHashes = ref(false)
 
 const configForm = reactive({
   vision_api_base_url: '',
@@ -883,6 +944,58 @@ const handleImportSelect = async (uploadFile) => {
   }
 }
 
+// 重复检测功能
+const scanDuplicates = async () => {
+  scanningDuplicates.value = true
+  try {
+    const result = await getDuplicates()
+    if (result.error) {
+      ElMessage.error(result.error)
+    } else {
+      duplicateInfo.value = result
+      duplicateGroups.value = result.duplicate_groups || []
+      if (result.total_duplicates > 0) {
+        ElMessage.warning(`发现 ${result.total_duplicates} 张重复图片`)
+      } else {
+        ElMessage.success('没有发现重复图片')
+      }
+    }
+  } catch (e) {
+    ElMessage.error('扫描失败: ' + e.message)
+  } finally {
+    scanningDuplicates.value = false
+  }
+}
+
+const calcHashes = async () => {
+  calculatingHashes.value = true
+  try {
+    const result = await calculateHashes(100)
+    if (result.error) {
+      ElMessage.error(result.error)
+    } else {
+      ElMessage.success(result.message)
+      // 重新扫描更新结果
+      await scanDuplicates()
+    }
+  } catch (e) {
+    ElMessage.error('计算失败: ' + e.message)
+  } finally {
+    calculatingHashes.value = false
+  }
+}
+
+const handleDeleteImage = async (imageId) => {
+  try {
+    await deleteImage(imageId)
+    ElMessage.success('删除成功')
+    // 重新扫描
+    await scanDuplicates()
+  } catch (e) {
+    ElMessage.error('删除失败: ' + e.message)
+  }
+}
+
 onMounted(() => {
   fetchConfig()
   checkHealth()
@@ -924,6 +1037,68 @@ onUnmounted(() => {
 
 .backup-section h3 {
   margin-bottom: 8px;
+}
+
+/* 重复检测样式 */
+.duplicate-stats {
+  background: var(--card-bg);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.duplicate-groups {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.duplicate-group {
+  background: var(--card-bg);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.group-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.group-images {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dup-image-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 8px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 4px;
+}
+
+.dup-image-item .img-id {
+  color: var(--text-muted);
+  font-size: 12px;
+  min-width: 40px;
+}
+
+.dup-image-item .img-url {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.text-warning {
+  color: var(--el-color-warning);
 }
 
 :deep(.el-tabs__header) {

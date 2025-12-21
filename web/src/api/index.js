@@ -45,6 +45,7 @@ export const getImages = (params = {}) => {
         url_contains: params.urlContains || null,
         description_contains: params.descriptionContains || null,
         pending_only: params.pendingOnly || false,
+        duplicates_only: params.duplicatesOnly || false,
         limit: params.limit || 20,
         offset: params.offset || 0,
         sort_by: params.sortBy || 'id',
@@ -157,6 +158,16 @@ export const importDatabase = (file) => {
 // 获取可用模型列表
 export const getAvailableModels = () => {
     return api.get('/system/models')
+}
+
+// 获取重复图片
+export const getDuplicates = () => {
+    return api.get('/system/duplicates')
+}
+
+// 计算缺失的文件哈希
+export const calculateHashes = (limit = 100) => {
+    return api.post('/system/duplicates/calculate-hashes', null, { params: { limit } })
 }
 
 // ============ 配置管理 API ============

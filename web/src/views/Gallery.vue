@@ -53,6 +53,10 @@
             <el-checkbox v-model="filters.pendingOnly">待分析</el-checkbox>
           </el-form-item>
           
+          <el-form-item v-if="authStore.isAdmin">
+            <el-checkbox v-model="filters.duplicatesOnly">重复图片</el-checkbox>
+          </el-form-item>
+          
           <el-form-item>
             <el-button type="primary" @click="handleSearch">
               <el-icon><Search /></el-icon>
@@ -550,7 +554,8 @@ const tagWeight = ref(0.3)
 const filters = reactive({
   tags: [],
   descriptionContains: '',
-  pendingOnly: false
+  pendingOnly: false,
+  duplicatesOnly: false
 })
 
 // 收藏夹相关
@@ -816,6 +821,7 @@ const fetchImages = async () => {
         tags: filters.tags.length > 0 ? filters.tags : null,
         descriptionContains: null, // Ensure this is null for non-semantic search
         pendingOnly: filters.pendingOnly,
+        duplicatesOnly: filters.duplicatesOnly,
         limit: pageSize.value,
         offset: (currentPage.value - 1) * pageSize.value,
         sortDesc: true
@@ -839,6 +845,7 @@ const resetFilters = () => {
   filters.tags = []
   filters.descriptionContains = ''
   filters.pendingOnly = false
+  filters.duplicatesOnly = false
   currentPage.value = 1
   fetchImages()
 }

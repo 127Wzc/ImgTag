@@ -120,6 +120,7 @@ class PGVectorDB:
                     source_type VARCHAR(20) DEFAULT 'url',
                     file_path TEXT,
                     original_url TEXT,
+                    file_hash VARCHAR(64),
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 );
@@ -385,6 +386,7 @@ class PGVectorDB:
             ("original_url", "TEXT"),
             ("updated_at", "TIMESTAMP WITH TIME ZONE DEFAULT NOW()"),
             ("uploaded_by", "INTEGER"),  # 逻辑外键，不加约束
+            ("file_hash", "VARCHAR(64)"),  # 文件 MD5 哈希，用于去重
         ]
         
         for col_name, col_type in images_columns:
@@ -478,7 +480,8 @@ class PGVectorDB:
         source_type: str = "url",
         file_path: str = None,
         original_url: str = None,
-        tag_source: str = "ai"
+        tag_source: str = "ai",
+        file_hash: str = None
     ) -> Optional[int]:
         """插入一条图像记录"""
         start_time = time.time()
@@ -489,8 +492,8 @@ class PGVectorDB:
             
             # 不再存储 tags 到 images 表
             query = """
-            INSERT INTO images (image_url, embedding, description, source_type, file_path, original_url)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO images (image_url, embedding, description, source_type, file_path, original_url, file_hash)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING id;
             """
             
@@ -498,7 +501,7 @@ class PGVectorDB:
                 with conn.cursor() as cursor:
                     cursor.execute(query, (
                         image_url, f"[{vector_str}]", description,
-                        source_type, file_path, original_url
+                        source_type, file_path, original_url, file_hash
                     ))
                     new_id = cursor.fetchone()[0]
                 conn.commit()
@@ -791,6 +794,7 @@ class PGVectorDB:
         url_contains: str = None,
         description_contains: str = None,
         pending_only: bool = False,
+        duplicates_only: bool = False,
         limit: int = 10,
         offset: int = 0,
         sort_by: str = "id",
@@ -798,7 +802,7 @@ class PGVectorDB:
     ) -> Dict[str, Any]:
         """高级图像搜索"""
         start_time = time.time()
-        logger.info(f"高级图像搜索: 标签:{tags}, URL包含:{url_contains}, 待分析:{pending_only}")
+        logger.info(f"高级图像搜索: 标签:{tags}, URL包含:{url_contains}, 待分析:{pending_only}, 重复:{duplicates_only}")
         
         try:
             conditions = []
@@ -808,6 +812,16 @@ class PGVectorDB:
             if pending_only:
                 conditions.append("""
                     i.id NOT IN (SELECT DISTINCT image_id FROM image_tags)
+                """)
+            
+            # 重复图片过滤：只显示有重复 hash 的图片
+            if duplicates_only:
+                conditions.append("""
+                    i.file_hash IN (
+                        SELECT file_hash FROM images 
+                        WHERE file_hash IS NOT NULL AND file_hash != ''
+                        GROUP BY file_hash HAVING COUNT(*) > 1
+                    )
                 """)
             
             # 标签过滤：使用子查询
@@ -1800,6 +1814,109 @@ class PGVectorDB:
         except Exception as e:
             logger.error(f"修改密码失败: {str(e)}")
             return False
+    
+    # ========== 重复检测 ==========
+    
+    def update_image_hash(self, image_id: int, file_hash: str) -> bool:
+        """更新图片的文件哈希"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE images SET file_hash = %s WHERE id = %s",
+                        (file_hash, image_id)
+                    )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"更新图片哈希失败: {str(e)}")
+            return False
+    
+    def find_image_by_hash(self, file_hash: str) -> Optional[Dict]:
+        """根据哈希查找图片"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        "SELECT id, image_url, description FROM images WHERE file_hash = %s LIMIT 1",
+                        (file_hash,)
+                    )
+                    return cur.fetchone()
+        except Exception as e:
+            logger.error(f"查找图片哈希失败: {str(e)}")
+            return None
+    
+    def find_duplicate_images(self) -> List[Dict]:
+        """查找重复的图片（按 file_hash 分组）"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    # 查找有重复 hash 的图片
+                    cur.execute("""
+                        SELECT file_hash, COUNT(*) as count
+                        FROM images 
+                        WHERE file_hash IS NOT NULL AND file_hash != ''
+                        GROUP BY file_hash
+                        HAVING COUNT(*) > 1
+                        ORDER BY count DESC
+                    """)
+                    duplicate_hashes = cur.fetchall()
+                    
+                    result = []
+                    for item in duplicate_hashes:
+                        # 获取每组重复的详细信息
+                        cur.execute("""
+                            SELECT id, image_url, description, created_at
+                            FROM images
+                            WHERE file_hash = %s
+                            ORDER BY created_at ASC
+                        """, (item['file_hash'],))
+                        images = cur.fetchall()
+                        
+                        result.append({
+                            'file_hash': item['file_hash'],
+                            'count': item['count'],
+                            'images': [dict(img) for img in images]
+                        })
+                    
+                    return result
+        except Exception as e:
+            logger.error(f"查找重复图片失败: {str(e)}")
+            return []
+    
+    def get_images_without_hash(self, limit: int = 100) -> List[Dict]:
+        """获取没有哈希的图片（用于批量计算）"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("""
+                        SELECT id, image_url, file_path, source_type
+                        FROM images
+                        WHERE file_hash IS NULL OR file_hash = ''
+                        ORDER BY id
+                        LIMIT %s
+                    """, (limit,))
+                    return cur.fetchall()
+        except Exception as e:
+            logger.error(f"获取无哈希图片失败: {str(e)}")
+            return []
+    
+    def count_images_without_hash(self) -> int:
+        """统计没有哈希的图片数量"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT COUNT(*) FROM images
+                        WHERE file_hash IS NULL OR file_hash = ''
+                    """)
+                    return cur.fetchone()[0]
+        except Exception as e:
+            logger.error(f"统计无哈希图片失败: {str(e)}")
+            return 0
     
     # ========== 数据导出导入 ==========
     

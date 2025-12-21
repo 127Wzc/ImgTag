@@ -76,6 +76,7 @@ class ImageSearchRequest(BaseModel):
     url_contains: Optional[str] = Field(default=None, description="URL 包含的文本")
     description_contains: Optional[str] = Field(default=None, description="描述包含的文本")
     pending_only: bool = Field(default=False, description="仅显示待分析的图片（无标签）")
+    duplicates_only: bool = Field(default=False, description="仅显示重复的图片")
     limit: int = Field(default=10, ge=1, le=100, description="返回结果数量")
     offset: int = Field(default=0, ge=0, description="结果偏移量")
     sort_by: str = Field(default="id", description="排序字段")
