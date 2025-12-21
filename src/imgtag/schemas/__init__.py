@@ -15,6 +15,7 @@ from .image import (
     ImageSearchResponse,
     SimilarSearchResponse,
     UploadAnalyzeResponse,
+    TagWithSource,
 )
 from .collection import (
     CollectionBase,
@@ -36,6 +37,21 @@ from .task import (
     Task,
     TaskResponse,
 )
+from .user import (
+    UserBase,
+    UserCreate,
+    UserLogin,
+    UserResponse,
+    Token,
+    TokenPayload,
+)
+from .approval import (
+    ApprovalCreate,
+    ApprovalResponse,
+    ApprovalList,
+    ApprovalAction,
+    BatchApproveRequest,
+)
 
 __all__ = [
     "ImageAnalysisResult",
@@ -49,6 +65,7 @@ __all__ = [
     "ImageSearchResponse",
     "SimilarSearchResponse",
     "UploadAnalyzeResponse",
+    "TagWithSource",
     "CollectionBase",
     "CollectionCreate",
     "CollectionUpdate",
@@ -63,4 +80,16 @@ __all__ = [
     "TaskCreate",
     "Task",
     "TaskResponse",
+    "UserBase",
+    "UserCreate",
+    "UserLogin",
+    "UserResponse",
+    "Token",
+    "TokenPayload",
+    "ApprovalCreate",
+    "ApprovalResponse",
+    "ApprovalList",
+    "ApprovalAction",
+    "BatchApproveRequest",
 ]
+

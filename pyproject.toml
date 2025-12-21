@@ -33,6 +33,9 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pillow>=10.0.0",
     "numpy>=1.24.0",
+    
+    # 认证
+    "pyjwt>=2.8.0",
 ]
 
 [project.optional-dependencies]

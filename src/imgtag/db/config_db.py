@@ -50,6 +50,7 @@ class ConfigDB:
         
         # 队列配置
         "queue_max_workers": "2",  # 最大并发线程数
+        "queue_batch_interval": "1",  # 每个任务完成后的间隔（秒）
     }
     
     def __new__(cls):

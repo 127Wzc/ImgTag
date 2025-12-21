@@ -1,6 +1,6 @@
 <template>
   <el-config-provider :locale="zhCn">
-    <div class="app-container">
+    <div class="app-container" v-if="!isLoginPage">
       <!-- 侧边栏 -->
       <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
         <div class="logo">
@@ -9,16 +9,23 @@
         </div>
         
         <nav class="sidebar-nav">
-          <router-link 
-            v-for="item in menuItems" 
-            :key="item.path"
-            :to="item.path" 
-            class="nav-item"
-            :class="{ active: currentRoute === item.path }"
-          >
-            <el-icon :size="20"><component :is="item.icon" /></el-icon>
-            <span v-if="!sidebarCollapsed">{{ item.label }}</span>
-          </router-link>
+          <template v-for="(item, index) in menuItems" :key="item.path || item.divider">
+            <!-- 分组分隔线 -->
+            <div v-if="item.divider" class="nav-divider">
+              <span v-if="!sidebarCollapsed" class="divider-label">{{ item.label }}</span>
+              <div v-else class="divider-line"></div>
+            </div>
+            <!-- 菜单项 -->
+            <router-link 
+              v-else
+              :to="item.path" 
+              class="nav-item"
+              :class="{ active: currentRoute === item.path }"
+            >
+              <el-icon :size="20"><component :is="item.icon" /></el-icon>
+              <span v-if="!sidebarCollapsed">{{ item.label }}</span>
+            </router-link>
+          </template>
         </nav>
         
         <div class="sidebar-footer">
@@ -112,6 +119,18 @@
                 {{ healthStatusText }}
               </span>
             </div>
+            
+            <!-- 用户状态 -->
+            <div v-if="authStore.isLoggedIn" class="header-item user-info">
+              <el-icon><User /></el-icon>
+              <span class="user-name">{{ authStore.username }}</span>
+              <el-tag v-if="authStore.isAdmin" size="small" type="warning">管理员</el-tag>
+              <el-button text type="danger" size="small" @click="handleLogout">登出</el-button>
+            </div>
+            <router-link v-else to="/login" class="header-item login-btn">
+              <el-icon><User /></el-icon>
+              <span>登录</span>
+            </router-link>
           </div>
         </header>
         
@@ -124,6 +143,9 @@
         </div>
       </main>
     </div>
+    
+    <!-- 登录页单独渲染 -->
+    <router-view v-else />
   </el-config-provider>
 </template>
 
@@ -133,11 +155,16 @@ import { useRoute, useRouter } from 'vue-router'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import { healthCheck, getTasks } from '@/api'
 import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
 const router = useRouter()
 const appStore = useAppStore()
+const authStore = useAuthStore()
 const sidebarCollapsed = ref(false)
+
+// 是否登录页
+const isLoginPage = computed(() => route.meta?.hideNav === true)
 
 const theme = computed(() => appStore.theme)
 
@@ -145,19 +172,43 @@ const toggleTheme = () => {
   appStore.toggleTheme()
 }
 
-const menuItems = [
-  { path: '/', label: '仪表盘', icon: 'HomeFilled' },
-  { path: '/gallery', label: '图片库', icon: 'Picture' },
-  { path: '/upload', label: '上传图片', icon: 'Upload' },
-  { path: '/search', label: '智能搜索', icon: 'Search' },
-  { path: '/tasks', label: '任务队列', icon: 'List' },
-  { path: '/settings', label: '系统设置', icon: 'Setting' },
-]
+const menuItems = computed(() => {
+  const items = []
+  
+  // 基础菜单项 - 所有用户可见
+  items.push(
+    { path: '/', label: '仪表盘', icon: 'HomeFilled' },
+    { path: '/gallery', label: '图片库', icon: 'Picture' },
+  )
+  
+  // 登录用户可以看到更多功能
+  if (authStore.isLoggedIn) {
+    items.push(
+      { divider: true, label: '功能菜单' },
+      { path: '/upload', label: '上传图片', icon: 'Upload' },
+      { path: '/search', label: '智能搜索', icon: 'Search' },
+      { path: '/tasks', label: '任务队列', icon: 'List' },
+      { path: '/collections', label: '我的收藏', icon: 'Star' },
+    )
+  }
+  
+  // 管理员可以看到系统设置、标签管理和审批管理
+  if (authStore.isAdmin) {
+    items.push(
+      { divider: true, label: '管理功能' },
+      { path: '/settings', label: '系统设置', icon: 'Setting' },
+      { path: '/tags', label: '标签管理', icon: 'CollectionTag' },
+      { path: '/approvals', label: '审批管理', icon: 'Check' },
+    )
+  }
+  
+  return items
+})
 
 const currentRoute = computed(() => route.path)
 
 const pageTitle = computed(() => {
-  const item = menuItems.find(m => m.path === route.path)
+  const item = menuItems.value.find(m => m.path === route.path)
   return item?.label || 'ImgTag'
 })
 
@@ -223,21 +274,30 @@ const formatTaskTime = (dateStr) => {
   return date.toLocaleDateString()
 }
 
+// 登出处理
+const handleLogout = async () => {
+  await authStore.logout()
+  router.push('/login')
+}
+
 // 定时刷新
 let healthTimer = null
 let tasksTimer = null
 
-onMounted(() => {
+onMounted(async () => {
   // 初始化主题
   appStore.initTheme()
+  
+  // 初始化认证状态
+  await authStore.init()
   
   checkHealth()
   fetchProcessingTasks()
   
-  // 每5秒刷新健康状态
-  healthTimer = setInterval(checkHealth, 5000)
-  // 每3秒刷新进行中的任务
-  tasksTimer = setInterval(fetchProcessingTasks, 3000)
+  // 每30秒刷新健康状态
+  healthTimer = setInterval(checkHealth, 30000)
+  // 每10秒刷新进行中的任务
+  tasksTimer = setInterval(fetchProcessingTasks, 10000)
 })
 
 onUnmounted(() => {
@@ -337,6 +397,30 @@ onUnmounted(() => {
 .sidebar.collapsed .nav-item {
   justify-content: center;
   padding: 14px;
+}
+
+/* 菜单分组分隔线 */
+.nav-divider {
+  margin: 12px 12px 6px 12px;
+  padding: 0 16px;
+}
+
+.divider-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.divider-line {
+  height: 1px;
+  background: var(--border-color-light);
+  margin: 8px 0;
+}
+
+.sidebar.collapsed .nav-divider {
+  padding: 0 8px;
 }
 
 .sidebar-footer {
@@ -653,5 +737,27 @@ onUnmounted(() => {
 .fade-slide-leave-to {
   opacity: 0;
   transform: translateY(-12px);
+}
+
+/* 用户信息 */
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.user-name {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.login-btn {
+  text-decoration: none;
+  color: var(--primary-color);
+  cursor: pointer;
+}
+
+.login-btn:hover {
+  background: rgba(0, 113, 227, 0.1);
 }
 </style>

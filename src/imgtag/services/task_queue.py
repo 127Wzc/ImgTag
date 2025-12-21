@@ -69,6 +69,10 @@ class TaskQueueService:
         """获取最大并发数"""
         return config_db.get_int("queue_max_workers", 2)
     
+    def get_batch_interval(self) -> float:
+        """获取任务间隔时间（秒）"""
+        return float(config_db.get("queue_batch_interval", "1") or "1")
+    
     def add_tasks(self, image_ids: List[int]) -> int:
         """添加任务到队列"""
         with self._lock:
@@ -125,7 +129,8 @@ class TaskQueueService:
                 "recent_completed": [
                     {"image_id": t.image_id, "status": t.status.value, "error": t.error, "task_id": t.id}
                     for t in recent_completed[-10:]
-                ]
+                ],
+                "batch_interval": self.get_batch_interval()
             }
     
     async def start_processing(self):
@@ -189,6 +194,11 @@ class TaskQueueService:
                     if task.image_id in self._processing:
                         del self._processing[task.image_id]
                     self._completed.append(task)
+            
+            # 任务完成后等待间隔
+            interval = self.get_batch_interval()
+            if interval > 0:
+                await asyncio.sleep(interval)
         
         logger.info(f"Worker {worker_id} 停止")
     
@@ -286,7 +296,8 @@ class TaskQueueService:
                     image_id=task.image_id,
                     tags=analysis.tags,
                     description=analysis.description,
-                    embedding=embedding
+                    embedding=embedding,
+                    tag_source="ai"
                 )
             
             task.status = TaskStatus.COMPLETED

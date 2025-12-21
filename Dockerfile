@@ -1,14 +1,14 @@
 # 多阶段构建：前端 + 后端合并为单一镜像
-FROM node:20-slim AS frontend-builder
+FROM node:20-slim AS web-builder
 
-WORKDIR /app/frontend
+WORKDIR /app/web
 
 # 安装依赖
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+COPY web/package.json web/pnpm-lock.yaml ./
 RUN npm install -g pnpm && pnpm install --frozen-lockfile
 
 # 构建前端
-COPY frontend/ .
+COPY web/ .
 RUN pnpm build
 
 # -----------------------------------------------------------
@@ -35,7 +35,7 @@ RUN uv sync --extra local
 COPY src/ ./src/
 
 # 复制前端构建产物到 static 目录
-COPY --from=frontend-builder /app/frontend/dist ./static
+COPY --from=web-builder /app/web/dist ./static
 
 # 创建上传目录
 RUN mkdir -p /app/uploads

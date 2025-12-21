@@ -9,10 +9,24 @@ from fastapi import APIRouter
 
 from imgtag.api.endpoints import (
     images, search, system, config, vectors, queue, collections, tags,
-    tasks,
+    tasks, auth, approvals,
 )
 
 api_router = APIRouter()
+
+# 注册认证相关路由
+api_router.include_router(
+    auth.router,
+    prefix="/auth",
+    tags=["认证"]
+)
+
+# 注册审批管理路由
+api_router.include_router(
+    approvals.router,
+    prefix="/approvals",
+    tags=["审批管理"]
+)
 
 # 注册图像相关路由
 api_router.include_router(
@@ -76,3 +90,4 @@ api_router.include_router(
     prefix="/tasks", 
     tags=["任务管理"]
 )
+

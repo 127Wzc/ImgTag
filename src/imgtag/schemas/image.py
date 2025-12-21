@@ -37,11 +37,18 @@ class ImageCreateManual(BaseModel):
 
 # ============= 图像响应 =============
 
+class TagWithSource(BaseModel):
+    """带来源的标签"""
+    name: str = Field(..., description="标签名称")
+    source: str = Field(default="ai", description="标签来源: user/ai")
+
+
 class ImageResponse(BaseModel):
     """图像响应"""
     id: int = Field(..., description="图像 ID")
     image_url: str = Field(..., description="图像 URL")
-    tags: List[str] = Field(default_factory=list, description="标签列表")
+    tags: List[str] = Field(default_factory=list, description="标签列表（向后兼容）")
+    tags_with_source: List[TagWithSource] = Field(default_factory=list, description="带来源的标签列表")
     description: Optional[str] = Field(default=None, description="图像描述")
     source_type: str = Field(default="url", description="来源类型: local/url")
     original_url: Optional[str] = Field(default=None, description="原始 URL")
@@ -68,6 +75,7 @@ class ImageSearchRequest(BaseModel):
     tags: Optional[List[str]] = Field(default=None, description="标签列表（包含任一即匹配）")
     url_contains: Optional[str] = Field(default=None, description="URL 包含的文本")
     description_contains: Optional[str] = Field(default=None, description="描述包含的文本")
+    pending_only: bool = Field(default=False, description="仅显示待分析的图片（无标签）")
     limit: int = Field(default=10, ge=1, le=100, description="返回结果数量")
     offset: int = Field(default=0, ge=0, description="结果偏移量")
     sort_by: str = Field(default="id", description="排序字段")

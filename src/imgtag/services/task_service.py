@@ -70,53 +70,35 @@ class TaskService:
             raise ValueError(f"未知的任务类型: {task_type}")
 
     async def _handle_add_to_collection(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """处理添加到收藏夹任务"""
+        """处理添加到收藏夹任务
+        
+        注意：收藏夹仅做关联，不修改标签和向量
+        标签管理由专门的标签功能处理
+        """
         collection_id = payload.get("collection_id")
         image_id = payload.get("image_id")
         
         if not collection_id or not image_id:
             raise ValueError("缺少 collection_id 或 image_id")
-            
-        # 1. 添加到收藏夹 (这一步通常很快，但为了原子性也可以放在这里，或者在 API 层先做)
-        # 在 API 层已经做了 add_image_to_collection，这里主要处理耗时的向量化
-        # 但为了保证一致性，我们可以在这里检查一下
         
-        # 获取收藏夹信息
+        # 验证收藏夹和图片存在
         collection = db.get_collection(collection_id)
         if not collection:
             raise ValueError(f"收藏夹 {collection_id} 不存在")
-            
-        collection_name = collection["name"]
         
-        # 获取图片信息
         image = db.get_image(image_id)
         if not image:
             raise ValueError(f"图片 {image_id} 不存在")
-            
-        current_tags = image.get("tags", [])
         
-        # 如果标签不存在，则添加
-        if collection_name not in current_tags:
-            new_tags = current_tags + [collection_name]
-            description = image.get("description", "")
-            
-            logger.info(f"正在为图片 {image_id} 重新生成向量 (添加标签: {collection_name})")
-            
-            # 重新计算向量
-            embedding = await embedding_service.get_embedding_combined(
-                description,
-                new_tags
-            )
-            
-            # 更新图片
-            db.update_image(
-                image_id=image_id,
-                tags=new_tags,
-                embedding=embedding
-            )
-            return {"updated": True, "tag_added": collection_name}
+        # 收藏夹仅做关联，不修改标签和向量
+        # 关联已在 API 层 add_image_to_collection 完成
+        logger.info(f"图片 {image_id} 已添加到收藏夹 {collection['name']}")
         
-        return {"updated": False, "message": "标签已存在"}
+        return {
+            "success": True,
+            "collection_name": collection["name"],
+            "message": "收藏夹关联成功（不修改标签和向量）"
+        }
 
     async def _handle_vectorize_batch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """处理批量向量化任务"""

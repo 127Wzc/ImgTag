@@ -7,11 +7,12 @@
 """
 
 import time
-from typing import Dict, Any
+from typing import Dict, Any, List
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends, Header
 
 from imgtag.db import db
+from imgtag.api.endpoints.auth import get_current_user_optional
 from imgtag.services import vision_service, embedding_service, upload_service
 from imgtag.schemas import (
     ImageCreateByUrl,
@@ -327,6 +328,10 @@ async def get_image(image_id: int):
         if not image_data:
             raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
         
+        # 获取带来源的标签
+        tags_with_source = db.get_image_tags_with_source(image_id)
+        image_data["tags_with_source"] = tags_with_source
+        
         process_time = time.time() - start_time
         perf_logger.info(f"获取图像耗时: {process_time:.4f}秒")
         
@@ -349,13 +354,15 @@ async def search_images(request: ImageSearchRequest):
             tags=request.tags,
             url_contains=request.url_contains,
             description_contains=request.description_contains,
+            pending_only=request.pending_only,
             limit=request.limit,
             offset=request.offset,
             sort_by=request.sort_by,
             sort_desc=request.sort_desc
         )
         
-        images = [ImageResponse(**img) for img in results["images"]]
+        # 列表页不查询标签来源（性能优化），只在详情页查询
+        images = [ImageResponse(**img, tags_with_source=[]) for img in results["images"]]
         
         response = ImageSearchResponse(
             images=images,
@@ -374,20 +381,24 @@ async def search_images(request: ImageSearchRequest):
 
 
 @router.put("/{image_id}", response_model=Dict[str, Any])
-async def update_image(image_id: int, image_update: ImageUpdate):
+async def update_image(
+    image_id: int, 
+    image_update: ImageUpdate,
+    current_user: Dict = Depends(get_current_user_optional)
+):
     """更新图像信息"""
     start_time = time.time()
     logger.info(f"更新图像: ID {image_id}")
     
     try:
+        # 获取当前图像信息
+        current_image = db.get_image(image_id)
+        if not current_image:
+            raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
+        
         # 检查是否需要重新计算向量
         embedding_vector = None
         if image_update.tags is not None or image_update.description is not None:
-            # 获取当前图像信息
-            current_image = db.get_image(image_id)
-            if not current_image:
-                raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
-            
             description = image_update.description if image_update.description is not None else current_image.get("description", "")
             tags = image_update.tags if image_update.tags is not None else current_image.get("tags", [])
             
@@ -397,12 +408,16 @@ async def update_image(image_id: int, image_update: ImageUpdate):
                 tags
             )
         
+        user_id = current_user.get("id") if current_user else None
+        
         success = db.update_image(
             image_id=image_id,
             image_url=image_update.image_url,
             tags=image_update.tags,
             description=image_update.description,
-            embedding=embedding_vector
+            embedding=embedding_vector,
+            tag_source="user",
+            user_id=user_id
         )
         
         if not success:
@@ -468,3 +483,185 @@ async def delete_image(image_id: int):
     except Exception as e:
         logger.error(f"删除图像失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"删除图像失败: {str(e)}")
+
+
+@router.post("/batch/delete", response_model=Dict[str, Any])
+async def batch_delete_images(image_ids: List[int]):
+    """批量删除图像"""
+    import os
+    
+    start_time = time.time()
+    logger.info(f"批量删除图像: {len(image_ids)} 张")
+    
+    success_count = 0
+    fail_count = 0
+    
+    for image_id in image_ids:
+        try:
+            image_data = db.get_image(image_id)
+            if not image_data:
+                fail_count += 1
+                continue
+            
+            # 删除本地文件
+            file_path = image_data.get("file_path")
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+            
+            if db.delete_image(image_id):
+                success_count += 1
+            else:
+                fail_count += 1
+        except Exception as e:
+            logger.error(f"删除图像 {image_id} 失败: {str(e)}")
+            fail_count += 1
+    
+    process_time = time.time() - start_time
+    perf_logger.info(f"批量删除耗时: {process_time:.4f}秒")
+    
+    return {
+        "message": f"批量删除完成: 成功 {success_count} 张，失败 {fail_count} 张",
+        "success_count": success_count,
+        "fail_count": fail_count,
+        "process_time": f"{process_time:.4f}秒"
+    }
+
+from pydantic import BaseModel
+
+class BatchUpdateTagsRequest(BaseModel):
+    image_ids: List[int]
+    tags: List[str]
+    mode: str = "add"  # add: 追加, replace: 替换
+
+
+@router.post("/batch/update-tags", response_model=Dict[str, Any])
+async def batch_update_tags(
+    request: BatchUpdateTagsRequest,
+    current_user: Dict = Depends(get_current_user_optional)
+):
+    """批量更新图像标签"""
+    start_time = time.time()
+    user_id = current_user.get("id") if current_user else None
+    logger.info(f"批量更新标签: {len(request.image_ids)} 张, 模式: {request.mode}, 用户: {user_id}")
+    
+    success_count = 0
+    fail_count = 0
+    
+    for image_id in request.image_ids:
+        try:
+            image = db.get_image(image_id)
+            if not image:
+                fail_count += 1
+                continue
+            
+            if request.mode == "add":
+                new_tags = list(set((image.get("tags") or []) + request.tags))
+            else:
+                new_tags = list(request.tags)
+            
+            # 生成新向量
+            description = image.get("description", "")
+            embedding = await embedding_service.get_embedding_combined(description, new_tags)
+            
+            if db.update_image(image_id, tags=new_tags, embedding=embedding, tag_source="user", user_id=user_id):
+                success_count += 1
+            else:
+                fail_count += 1
+        except Exception as e:
+            logger.error(f"更新图像 {image_id} 标签失败: {str(e)}")
+            fail_count += 1
+    
+    process_time = time.time() - start_time
+    perf_logger.info(f"批量更新标签耗时: {process_time:.4f}秒")
+    
+    return {
+        "message": f"批量更新完成: 成功 {success_count} 张，失败 {fail_count} 张",
+        "success_count": success_count,
+        "fail_count": fail_count,
+        "process_time": f"{process_time:.4f}秒"
+    }
+
+
+@router.get("/random")
+async def random_images(
+    tags: List[str] = [],
+    count: int = 1,
+    include_full_url: bool = True,
+    api_key: str = None,
+    x_api_key: str = Header(None, alias="X-API-Key")
+):
+    """
+    根据标签获取随机图片（外部 API）
+    
+    - **tags**: 标签列表，支持多个标签（AND 关系）
+    - **count**: 返回图片数量，默认 1，最大 50
+    - **include_full_url**: 是否返回完整 URL（拼接 base_url）
+    - **api_key**: 鉴权密钥（参数方式）
+    - **X-API-Key**: 鉴权密钥（Header 方式）
+    
+    返回示例：
+    ```json
+    {
+        "images": [
+            {
+                "id": 1,
+                "url": "http://example.com/uploads/xxx.jpg",
+                "description": "图片描述",
+                "tags": ["标签1", "标签2"]
+            }
+        ],
+        "count": 1
+    }
+    ```
+    """
+    start_time = time.time()
+    logger.info(f"随机图片请求: tags={tags}, count={count}")
+    
+    # 获取配置
+    from imgtag.db import config_db
+    
+    # 验证密钥
+    expected_key = config_db.get_string("external_api_key", "")
+    if expected_key:  # 如果配置了密钥，则需要验证
+        provided_key = api_key or x_api_key
+        if not provided_key or provided_key != expected_key:
+            raise HTTPException(status_code=401, detail="无效的 API 密钥")
+    
+    # 限制数量
+    count = min(count, 50)
+    
+    try:
+        # 获取 base_url 配置
+        base_url = ""
+        if include_full_url:
+            base_url = config_db.get_string("base_url", "")
+        
+        # 查询随机图片
+        result = db.get_random_images_by_tags(tags, count)
+        
+        images = []
+        for img in result:
+            url = img.get("image_url", "")
+            if include_full_url and base_url and url.startswith("/"):
+                url = base_url.rstrip("/") + url
+            
+            images.append({
+                "id": img.get("id"),
+                "url": url,
+                "description": img.get("description", ""),
+                "tags": img.get("tags", [])
+            })
+        
+        process_time = time.time() - start_time
+        perf_logger.info(f"随机图片查询耗时: {process_time:.4f}秒")
+        
+        return {
+            "images": images,
+            "count": len(images)
+        }
+    except Exception as e:
+        logger.error(f"随机图片查询失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"随机图片查询失败: {str(e)}")

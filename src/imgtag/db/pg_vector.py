@@ -142,8 +142,6 @@ class PGVectorDB:
                 logger.info("images 表创建成功")
             else:
                 logger.info("images 表已存在")
-                # 检查并添加新字段
-                self._check_and_add_columns(cursor)
             
             # 检查 collections 表
             cursor.execute("""
@@ -199,15 +197,22 @@ class PGVectorDB:
             """)
             
             if not cursor.fetchone()[0]:
-                logger.info("创建 tags 表")
+                logger.info("创建 tags 表（带层级支持）")
                 cursor.execute("""
                 CREATE TABLE public.tags (
                     id SERIAL PRIMARY KEY,
                     name VARCHAR(100) UNIQUE NOT NULL,
+                    parent_id INTEGER REFERENCES tags(id) ON DELETE SET NULL,
+                    source VARCHAR(20) DEFAULT 'system',
+                    description TEXT,
+                    level INTEGER DEFAULT 1,
                     usage_count INTEGER DEFAULT 0,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    sort_order INTEGER DEFAULT 0,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 );
                 """)
+                cursor.execute("CREATE INDEX idx_tags_parent ON public.tags(parent_id);")
                 logger.info("tags 表创建成功")
             
             # 检查 tasks 表
@@ -235,6 +240,135 @@ class PGVectorDB:
                 """)
                 logger.info("tasks 表创建成功")
             
+            # 检查 users 表
+            cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name = 'users'
+            );
+            """)
+            
+            if not cursor.fetchone()[0]:
+                logger.info("创建 users 表")
+                cursor.execute("""
+                CREATE TABLE public.users (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(50) UNIQUE NOT NULL,
+                    email VARCHAR(100) UNIQUE,
+                    password_hash VARCHAR(255) NOT NULL,
+                    role VARCHAR(20) NOT NULL DEFAULT 'user',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    last_login_at TIMESTAMP WITH TIME ZONE
+                );
+                """)
+                cursor.execute("CREATE INDEX idx_users_role ON public.users(role);")
+                
+                # 插入默认管理员账号 (密码: admin123)
+                import hashlib
+                import secrets
+                salt = secrets.token_hex(16)
+                pw_hash = hashlib.pbkdf2_hmac(
+                    'sha256', 
+                    'admin'.encode('utf-8'), 
+                    salt.encode('utf-8'), 
+                    100000
+                )
+                password_hash = f"{salt}${pw_hash.hex()}"
+                cursor.execute("""
+                INSERT INTO users (username, password_hash, role)
+                VALUES ('admin', %s, 'admin')
+                ON CONFLICT (username) DO NOTHING;
+                """, (password_hash,))
+                logger.info("users 表创建成功，默认管理员账号已创建 (admin/admin)")
+            
+            # 检查 approvals 表
+            cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name = 'approvals'
+            );
+            """)
+            
+            if not cursor.fetchone()[0]:
+                logger.info("创建 approvals 表")
+                cursor.execute("""
+                CREATE TABLE public.approvals (
+                    id SERIAL PRIMARY KEY,
+                    type VARCHAR(50) NOT NULL,
+                    status VARCHAR(20) DEFAULT 'pending',
+                    requester_id INTEGER REFERENCES users(id),
+                    target_type VARCHAR(50),
+                    target_ids INTEGER[],
+                    payload JSONB NOT NULL,
+                    reviewer_id INTEGER REFERENCES users(id),
+                    review_comment TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    reviewed_at TIMESTAMP WITH TIME ZONE
+                );
+                """)
+                cursor.execute("CREATE INDEX idx_approvals_status ON public.approvals(status);")
+                cursor.execute("CREATE INDEX idx_approvals_requester ON public.approvals(requester_id);")
+                logger.info("approvals 表创建成功")
+            
+            # 检查 audit_logs 表
+            cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name = 'audit_logs'
+            );
+            """)
+            
+            if not cursor.fetchone()[0]:
+                logger.info("创建 audit_logs 表")
+                cursor.execute("""
+                CREATE TABLE public.audit_logs (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER REFERENCES users(id),
+                    action VARCHAR(50) NOT NULL,
+                    target_type VARCHAR(50),
+                    target_id INTEGER,
+                    old_value JSONB,
+                    new_value JSONB,
+                    ip_address VARCHAR(45),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+                """)
+                cursor.execute("CREATE INDEX idx_audit_logs_user ON public.audit_logs(user_id);")
+                cursor.execute("CREATE INDEX idx_audit_logs_action ON public.audit_logs(action);")
+                logger.info("audit_logs 表创建成功")
+            
+            # 检查 image_tags 表
+            cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name = 'image_tags'
+            );
+            """)
+            
+            if not cursor.fetchone()[0]:
+                logger.info("创建 image_tags 表")
+                cursor.execute("""
+                CREATE TABLE public.image_tags (
+                    image_id INTEGER REFERENCES images(id) ON DELETE CASCADE,
+                    tag_id INTEGER REFERENCES tags(id) ON DELETE CASCADE,
+                    source VARCHAR(20) NOT NULL DEFAULT 'ai',
+                    added_by INTEGER REFERENCES users(id),
+                    added_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    PRIMARY KEY (image_id, tag_id)
+                );
+                """)
+                cursor.execute("CREATE INDEX idx_image_tags_source ON public.image_tags(source);")
+                cursor.execute("CREATE INDEX idx_image_tags_tag_id ON public.image_tags(tag_id);")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_name ON public.tags(name);")
+                logger.info("image_tags 表创建成功")
+            
+            # 所有表创建完成后，检查并添加新列
+            self._check_and_add_columns(cursor)
+            
+            # 确保默认 admin 账号存在
+            self._ensure_default_admin(cursor)
+            
             init_time = time.time() - start_time
             perf_logger.info(f"表结构初始化耗时: {init_time:.4f}秒")
             
@@ -244,14 +378,16 @@ class PGVectorDB:
     
     def _check_and_add_columns(self, cursor):
         """检查并添加新列"""
-        new_columns = [
+        # images 表新列（注意：uploaded_by 不使用外键约束以避免顺序问题）
+        images_columns = [
             ("source_type", "VARCHAR(20) DEFAULT 'url'"),
             ("file_path", "TEXT"),
             ("original_url", "TEXT"),
             ("updated_at", "TIMESTAMP WITH TIME ZONE DEFAULT NOW()"),
+            ("uploaded_by", "INTEGER"),  # 逻辑外键，不加约束
         ]
         
-        for col_name, col_type in new_columns:
+        for col_name, col_type in images_columns:
             cursor.execute("""
             SELECT EXISTS (
                 SELECT 1 FROM information_schema.columns 
@@ -262,8 +398,76 @@ class PGVectorDB:
             """, (col_name,))
             
             if not cursor.fetchone()[0]:
-                logger.info(f"添加新列: {col_name}")
+                logger.info(f"添加 images 表新列: {col_name}")
                 cursor.execute(f"ALTER TABLE images ADD COLUMN {col_name} {col_type};")
+        
+        # tags 表新列（针对已存在的旧表）
+        tags_columns = [
+            ("parent_id", "INTEGER REFERENCES tags(id) ON DELETE SET NULL"),
+            ("source", "VARCHAR(20) DEFAULT 'system'"),
+            ("description", "TEXT"),
+            ("level", "INTEGER DEFAULT 1"),
+            ("sort_order", "INTEGER DEFAULT 0"),
+            ("updated_at", "TIMESTAMP WITH TIME ZONE DEFAULT NOW()"),
+        ]
+        
+        for col_name, col_type in tags_columns:
+            cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_schema = 'public' 
+                AND table_name = 'tags' 
+                AND column_name = %s
+            );
+            """, (col_name,))
+            
+            if not cursor.fetchone()[0]:
+                logger.info(f"添加 tags 表新列: {col_name}")
+                cursor.execute(f"ALTER TABLE tags ADD COLUMN {col_name} {col_type};")
+        
+        # collections 表新列（用户关联）
+        cursor.execute("""
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns 
+            WHERE table_schema = 'public' 
+            AND table_name = 'collections' 
+            AND column_name = 'user_id'
+        );
+        """)
+        if not cursor.fetchone()[0]:
+            logger.info("添加 collections 表新列: user_id")
+            cursor.execute("ALTER TABLE collections ADD COLUMN user_id INTEGER;")
+            # 设置现有收藏夹归属于管理员（user_id=1）
+            cursor.execute("UPDATE collections SET user_id = 1 WHERE user_id IS NULL;")
+        
+        # 确保性能索引存在
+        try:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_image_tags_tag_id ON public.image_tags(tag_id);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_name ON public.tags(name);")
+        except Exception:
+            pass  # 索引可能已存在
+    
+    def _ensure_default_admin(self, cursor):
+        """确保默认管理员账号存在"""
+        cursor.execute("SELECT COUNT(*) FROM users WHERE username = 'admin'")
+        if cursor.fetchone()[0] == 0:
+            import hashlib
+            import secrets
+            salt = secrets.token_hex(16)
+            pw_hash = hashlib.pbkdf2_hmac(
+                'sha256', 
+                'admin'.encode('utf-8'), 
+                salt.encode('utf-8'), 
+                100000
+            )
+            password_hash = f"{salt}${pw_hash.hex()}"
+            cursor.execute("""
+            INSERT INTO users (username, password_hash, role)
+            VALUES ('admin', %s, 'admin');
+            """, (password_hash,))
+            logger.info("默认管理员账号已创建 (admin/admin)")
+        else:
+            logger.info("默认管理员账号已存在")
     
     def insert_image(
         self,
@@ -273,7 +477,8 @@ class PGVectorDB:
         description: str = None,
         source_type: str = "url",
         file_path: str = None,
-        original_url: str = None
+        original_url: str = None,
+        tag_source: str = "ai"
     ) -> Optional[int]:
         """插入一条图像记录"""
         start_time = time.time()
@@ -282,20 +487,25 @@ class PGVectorDB:
         try:
             vector_str = ','.join(map(str, embedding))
             
+            # 不再存储 tags 到 images 表
             query = """
-            INSERT INTO images (image_url, tags, embedding, description, source_type, file_path, original_url)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO images (image_url, embedding, description, source_type, file_path, original_url)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id;
             """
             
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(query, (
-                        image_url, tags, f"[{vector_str}]", description,
+                        image_url, f"[{vector_str}]", description,
                         source_type, file_path, original_url
                     ))
                     new_id = cursor.fetchone()[0]
                 conn.commit()
+            
+            # 使用关联表存储标签
+            if tags and len(tags) > 0:
+                self.set_image_tags(new_id, tags, source=tag_source)
             
             process_time = time.time() - start_time
             logger.info(f"插入成功，ID: {new_id}, 耗时: {process_time:.4f}秒")
@@ -304,6 +514,85 @@ class PGVectorDB:
         except Exception as e:
             logger.error(f"插入失败: {str(e)}")
             return None
+    
+    def set_image_tags(self, image_id: int, tags: List[str], source: str = "ai", user_id: int = None):
+        """设置图片的标签（智能更新：保留现有标签来源，新标签用指定来源）"""
+        if not tags:
+            # 如果传空列表，删除所有标签并减少计数
+            try:
+                with self._get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        # 先减少被删除标签的计数
+                        cursor.execute("""
+                            UPDATE tags SET usage_count = usage_count - 1
+                            WHERE id IN (SELECT tag_id FROM image_tags WHERE image_id = %s);
+                        """, (image_id,))
+                        cursor.execute("DELETE FROM image_tags WHERE image_id = %s", (image_id,))
+                    conn.commit()
+            except Exception as e:
+                logger.error(f"删除图片标签失败: {str(e)}")
+            return
+        
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    tag_names = [t.strip() for t in tags if t.strip()]
+                    if not tag_names:
+                        conn.commit()
+                        return
+                    
+                    # 获取当前图片的所有标签及来源
+                    cursor.execute("""
+                    SELECT t.name, it.source FROM image_tags it
+                    JOIN tags t ON it.tag_id = t.id
+                    WHERE it.image_id = %s;
+                    """, (image_id,))
+                    existing_tags = {row[0]: row[1] for row in cursor.fetchall()}
+                    
+                    # 计算需要删除和添加的标签
+                    new_tag_set = set(tag_names)
+                    existing_tag_set = set(existing_tags.keys())
+                    
+                    tags_to_delete = existing_tag_set - new_tag_set
+                    tags_to_add = new_tag_set - existing_tag_set
+                    
+                    # 删除不再需要的标签关联，并减少计数
+                    if tags_to_delete:
+                        placeholders = ','.join(['%s'] * len(tags_to_delete))
+                        # 先减少被删除标签的计数
+                        cursor.execute(f"""
+                            UPDATE tags SET usage_count = usage_count - 1
+                            WHERE name IN ({placeholders});
+                        """, list(tags_to_delete))
+                        cursor.execute(f"""
+                        DELETE FROM image_tags WHERE image_id = %s AND tag_id IN (
+                            SELECT id FROM tags WHERE name IN ({placeholders})
+                        );
+                        """, [image_id] + list(tags_to_delete))
+                    
+                    # 只为新增的标签创建关联
+                    if tags_to_add:
+                        for tag_name in tags_to_add:
+                            # 确保标签存在
+                            cursor.execute("""
+                            INSERT INTO tags (name, source)
+                            VALUES (%s, %s)
+                            ON CONFLICT (name) DO UPDATE SET usage_count = tags.usage_count + 1
+                            RETURNING id;
+                            """, (tag_name, source))
+                            tag_id = cursor.fetchone()[0]
+                            
+                            # 插入关联
+                            cursor.execute("""
+                            INSERT INTO image_tags (image_id, tag_id, source, added_by)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (image_id, tag_id) DO NOTHING;
+                            """, (image_id, tag_id, source, user_id))
+                    
+                conn.commit()
+            logger.info(f"更新图片 {image_id} 标签: +{len(tags_to_add)} -{len(tags_to_delete)}, 新标签来源: {source}")
+        except Exception as e:
+            logger.error(f"设置图片标签失败: {str(e)}")
     
     def search_by_tags(self, tags: List[str], limit: int = None) -> List[Dict]:
         """通过标签搜索图像"""
@@ -501,6 +790,7 @@ class PGVectorDB:
         tags: List[str] = None,
         url_contains: str = None,
         description_contains: str = None,
+        pending_only: bool = False,
         limit: int = 10,
         offset: int = 0,
         sort_by: str = "id",
@@ -508,66 +798,97 @@ class PGVectorDB:
     ) -> Dict[str, Any]:
         """高级图像搜索"""
         start_time = time.time()
-        logger.info(f"高级图像搜索: 标签:{tags}, URL包含:{url_contains}")
+        logger.info(f"高级图像搜索: 标签:{tags}, URL包含:{url_contains}, 待分析:{pending_only}")
         
         try:
             conditions = []
             params = []
             
+            # 待分析过滤：无标签的图片
+            if pending_only:
+                conditions.append("""
+                    i.id NOT IN (SELECT DISTINCT image_id FROM image_tags)
+                """)
+            
+            # 标签过滤：使用子查询
             if tags and len(tags) > 0:
-                conditions.append("tags && %s")
-                params.append(tags)
+                tag_placeholders = ','.join(['%s'] * len(tags))
+                conditions.append(f"""
+                    i.id IN (
+                        SELECT it.image_id FROM image_tags it
+                        JOIN tags t ON it.tag_id = t.id
+                        WHERE t.name IN ({tag_placeholders})
+                        GROUP BY it.image_id
+                        HAVING COUNT(DISTINCT t.name) = %s
+                    )
+                """)
+                params.extend(tags)
+                params.append(len(tags))
             
             if url_contains:
-                conditions.append("image_url ILIKE %s")
+                conditions.append("i.image_url ILIKE %s")
                 params.append(f"%{url_contains}%")
             
             if description_contains:
-                conditions.append("description ILIKE %s")
+                conditions.append("i.description ILIKE %s")
                 params.append(f"%{description_contains}%")
             
-            valid_sort_fields = {"id": "id", "url": "image_url", "created_at": "created_at"}
-            sort_field = valid_sort_fields.get(sort_by, "id")
+            valid_sort_fields = {"id": "i.id", "url": "i.image_url", "created_at": "i.created_at"}
+            sort_field = valid_sort_fields.get(sort_by, "i.id")
             sort_order = "DESC" if sort_desc else "ASC"
             
             where_clause = " AND ".join(conditions) if conditions else "1=1"
             
+            # 获取图片列表
             query = f"""
-            SELECT id, image_url, tags, description, source_type, original_url
-            FROM images
+            SELECT i.id, i.image_url, i.description, i.source_type, i.original_url
+            FROM images i
             WHERE {where_clause}
             ORDER BY {sort_field} {sort_order}
             LIMIT %s OFFSET %s;
             """
             
-            params.append(limit)
-            params.append(offset)
+            query_params = params + [limit, offset]
             
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(query, params)
+                    cursor.execute(query, query_params)
                     results = cursor.fetchall()
+                    
+                    # 批量获取标签
+                    image_ids = [row[0] for row in results]
+                    tags_map = {}
+                    if image_ids:
+                        cursor.execute("""
+                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.added_at)
+                        FROM image_tags it
+                        JOIN tags t ON it.tag_id = t.id
+                        WHERE it.image_id = ANY(%s)
+                        GROUP BY it.image_id;
+                        """, (image_ids,))
+                        for row in cursor.fetchall():
+                            tags_map[row[0]] = row[1]
             
             images = []
             for row in results:
                 images.append({
                     "id": row[0],
                     "image_url": row[1],
-                    "tags": row[2],
-                    "description": row[3],
-                    "source_type": row[4],
-                    "original_url": row[5]
+                    "tags": tags_map.get(row[0], []),
+                    "description": row[2],
+                    "source_type": row[3],
+                    "original_url": row[4]
                 })
             
             # 获取总数
             count_query = f"""
-            SELECT COUNT(*) FROM images WHERE {where_clause};
+            SELECT COUNT(*) FROM images i WHERE {where_clause};
             """
             
             total_count = 0
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(count_query, params[:-2] if len(params) > 2 else [])
+                    cursor.execute(count_query, params)
                     total_count = cursor.fetchone()[0]
             
             process_time = time.time() - start_time
@@ -583,29 +904,96 @@ class PGVectorDB:
             logger.error(f"高级搜索失败: {str(e)}")
             return {"images": [], "total": 0, "limit": limit, "offset": offset}
 
+    def get_random_images_by_tags(self, tags: List[str], count: int = 1) -> List[Dict]:
+        """根据标签获取随机图片"""
+        start_time = time.time()
+        logger.info(f"随机图片查询: 标签={tags}, 数量={count}")
+        
+        try:
+            conditions = []
+            params = []
+            
+            # 标签过滤
+            if tags and len(tags) > 0:
+                tag_placeholders = ','.join(['%s'] * len(tags))
+                conditions.append(f"""
+                    i.id IN (
+                        SELECT it.image_id FROM image_tags it
+                        JOIN tags t ON it.tag_id = t.id
+                        WHERE t.name IN ({tag_placeholders})
+                        GROUP BY it.image_id
+                        HAVING COUNT(DISTINCT t.name) = %s
+                    )
+                """)
+                params.extend(tags)
+                params.append(len(tags))
+            
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            
+            # 随机查询
+            query = f"""
+            SELECT i.id, i.image_url, i.description
+            FROM images i
+            WHERE {where_clause}
+            ORDER BY RANDOM()
+            LIMIT %s;
+            """
+            params.append(count)
+            
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, params)
+                    results = cursor.fetchall()
+                    
+                    # 获取标签
+                    image_ids = [row[0] for row in results]
+                    tags_map = {}
+                    if image_ids:
+                        cursor.execute("""
+                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.added_at)
+                        FROM image_tags it
+                        JOIN tags t ON it.tag_id = t.id
+                        WHERE it.image_id = ANY(%s)
+                        GROUP BY it.image_id;
+                        """, (image_ids,))
+                        for row in cursor.fetchall():
+                            tags_map[row[0]] = row[1]
+            
+            images = []
+            for row in results:
+                images.append({
+                    "id": row[0],
+                    "image_url": row[1],
+                    "description": row[2],
+                    "tags": tags_map.get(row[0], [])
+                })
+            
+            process_time = time.time() - start_time
+            logger.info(f"随机图片查询完成，找到 {len(images)} 条记录，耗时: {process_time:.4f}秒")
+            
+            return images
+        except Exception as e:
+            logger.error(f"随机图片查询失败: {str(e)}")
+            return []
+
     def sync_tags(self) -> int:
-        """同步 tags 表与 images 表中的标签"""
+        """同步 tags 表与 image_tags 关联表中的标签计数"""
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
-                    # 1. 清空 tags 表计数
+                    # 1. 先将所有标签计数重置为 0
                     cursor.execute("UPDATE tags SET usage_count = 0;")
                     
-                    # 2. 从 images 表聚合标签并插入/更新 tags 表
+                    # 2. 从 image_tags 关联表重新计算每个标签的使用次数
                     cursor.execute("""
-                    WITH all_tags AS (
-                        SELECT unnest(tags) as tag_name
-                        FROM images
-                    ),
-                    tag_counts AS (
-                        SELECT tag_name, COUNT(*) as count
-                        FROM all_tags
-                        GROUP BY tag_name
-                    )
-                    INSERT INTO tags (name, usage_count)
-                    SELECT tag_name, count FROM tag_counts
-                    ON CONFLICT (name) 
-                    DO UPDATE SET usage_count = EXCLUDED.usage_count;
+                    UPDATE tags
+                    SET usage_count = tag_counts.count
+                    FROM (
+                        SELECT tag_id, COUNT(*) as count
+                        FROM image_tags
+                        GROUP BY tag_id
+                    ) AS tag_counts
+                    WHERE tags.id = tag_counts.tag_id;
                     """)
                     
                     return cursor.rowcount
@@ -691,7 +1079,9 @@ class PGVectorDB:
         image_url: str = None,
         tags: List[str] = None,
         description: str = None,
-        embedding: List[float] = None
+        embedding: List[float] = None,
+        tag_source: str = "user",
+        user_id: int = None
     ) -> bool:
         """更新图像信息"""
         start_time = time.time()
@@ -705,9 +1095,9 @@ class PGVectorDB:
                 update_fields.append("image_url = %s")
                 params.append(image_url)
                 
+            # 标签通过 set_image_tags 更新，不再存到 images 表
             if tags is not None:
-                update_fields.append("tags = %s")
-                params.append(tags)
+                self.set_image_tags(image_id, tags, source=tag_source, user_id=user_id)
                 
             if description is not None:
                 update_fields.append("description = %s")
@@ -721,8 +1111,10 @@ class PGVectorDB:
             update_fields.append("updated_at = NOW()")
             
             if len(update_fields) == 1:
-                logger.info("没有提供要更新的字段")
-                return True
+                # 只有 updated_at，跳过
+                if tags is None:
+                    logger.info("没有提供要更新的字段")
+                    return True
             
             query = f"""
             UPDATE images
@@ -735,7 +1127,7 @@ class PGVectorDB:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(query, params)
-                    if cursor.rowcount == 0:
+                    if cursor.rowcount == 0 and len(update_fields) > 1:
                         logger.warning(f"未找到 ID 为 {image_id} 的图像记录")
                         return False
                 conn.commit()
@@ -748,21 +1140,70 @@ class PGVectorDB:
             logger.error(f"图像信息更新失败: {str(e)}")
             return False
     
+    def sync_user_tags(self, image_id: int, tags: List[str], source: str = "user", user_id: int = None):
+        """同步用户添加的标签到 image_tags 表"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    for tag_name in tags:
+                        # 确保 tag 存在于 tags 表
+                        cursor.execute("""
+                        INSERT INTO tags (name, source)
+                        VALUES (%s, %s)
+                        ON CONFLICT (name) DO UPDATE SET usage_count = tags.usage_count + 1
+                        RETURNING id;
+                        """, (tag_name, source))
+                        tag_id = cursor.fetchone()[0]
+                        
+                        # 插入或更新 image_tags
+                        cursor.execute("""
+                        INSERT INTO image_tags (image_id, tag_id, source, added_by)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (image_id, tag_id) DO UPDATE SET source = %s, added_by = %s;
+                        """, (image_id, tag_id, source, user_id, source, user_id))
+                conn.commit()
+            logger.info(f"同步 {len(tags)} 个 {source} 标签到图片 {image_id}")
+        except Exception as e:
+            logger.error(f"同步用户标签失败: {str(e)}")
+    
+    def get_image_tags_with_source(self, image_id: int) -> List[Dict]:
+        """获取图片标签及来源信息"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                    SELECT t.name, it.source
+                    FROM image_tags it
+                    JOIN tags t ON it.tag_id = t.id
+                    WHERE it.image_id = %s
+                    ORDER BY CASE WHEN it.source = 'user' THEN 0 ELSE 1 END, t.name;
+                    """, (image_id,))
+                    results = cursor.fetchall()
+            return [{"name": r[0], "source": r[1]} for r in results]
+        except Exception as e:
+            logger.error(f"获取图片标签来源失败: {str(e)}")
+            return []
+    
     def delete_image(self, image_id: int) -> bool:
-        """删除图像"""
+        """删除图像（同时更新标签计数）"""
         start_time = time.time()
         logger.info(f"删除图像 ID:{image_id}")
         
         try:
-            query = """
-            DELETE FROM images
-            WHERE id = %s
-            RETURNING id;
-            """
-            
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(query, (image_id,))
+                    # 1. 先减少该图片关联标签的计数
+                    cursor.execute("""
+                        UPDATE tags SET usage_count = usage_count - 1
+                        WHERE id IN (SELECT tag_id FROM image_tags WHERE image_id = %s);
+                    """, (image_id,))
+                    
+                    # 2. 删除图片（image_tags 会通过 ON DELETE CASCADE 自动删除）
+                    cursor.execute("""
+                        DELETE FROM images
+                        WHERE id = %s
+                        RETURNING id;
+                    """, (image_id,))
                     result = cursor.fetchone()
                 conn.commit()
             
@@ -784,8 +1225,9 @@ class PGVectorDB:
         logger.info(f"获取图像 ID:{image_id}")
         
         try:
+            # 获取图片基本信息
             query = """
-            SELECT id, image_url, tags, description, source_type, file_path, original_url
+            SELECT id, image_url, description, source_type, file_path, original_url
             FROM images
             WHERE id = %s;
             """
@@ -794,19 +1236,28 @@ class PGVectorDB:
                 with conn.cursor() as cursor:
                     cursor.execute(query, (image_id,))
                     result = cursor.fetchone()
-            
-            if not result:
-                logger.warning(f"未找到 ID 为 {image_id} 的图像记录")
-                return None
+                    
+                    if not result:
+                        logger.warning(f"未找到 ID 为 {image_id} 的图像记录")
+                        return None
+                    
+                    # 从关联表获取标签
+                    cursor.execute("""
+                    SELECT t.name FROM image_tags it
+                    JOIN tags t ON it.tag_id = t.id
+                    WHERE it.image_id = %s
+                    ORDER BY it.added_at;
+                    """, (image_id,))
+                    tags = [row[0] for row in cursor.fetchall()]
             
             image = {
                 "id": result[0],
                 "image_url": result[1],
-                "tags": result[2],
-                "description": result[3],
-                "source_type": result[4],
-                "file_path": result[5],
-                "original_url": result[6]
+                "tags": tags,  # 从关联表获取
+                "description": result[2],
+                "source_type": result[3],
+                "file_path": result[4],
+                "original_url": result[5]
             }
             
             process_time = time.time() - start_time
@@ -1210,6 +1661,542 @@ class PGVectorDB:
         except Exception as e:
             logger.error(f"清理旧任务失败: {str(e)}")
             return 0
+
+    # ========== 用户管理 ==========
+    
+    def create_user(self, username: str, password_hash: str, email: str = None, role: str = "user") -> Optional[int]:
+        """创建用户"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                    INSERT INTO users (username, password_hash, email, role)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id;
+                    """, (username, password_hash, email, role))
+                    new_id = cur.fetchone()[0]
+                conn.commit()
+                return new_id
+        except Exception as e:
+            logger.error(f"创建用户失败: {str(e)}")
+            return None
+    
+    def get_user_by_username(self, username: str) -> Optional[Dict]:
+        """根据用户名获取用户"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("SELECT * FROM users WHERE username = %s", (username,))
+                    return cur.fetchone()
+        except Exception as e:
+            logger.error(f"获取用户失败: {str(e)}")
+            return None
+    
+    def get_user_by_id(self, user_id: int) -> Optional[Dict]:
+        """根据 ID 获取用户"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+                    return cur.fetchone()
+        except Exception as e:
+            logger.error(f"获取用户失败: {str(e)}")
+            return None
+    
+    def update_user_last_login(self, user_id: int) -> bool:
+        """更新用户最后登录时间"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE users SET last_login_at = NOW() WHERE id = %s",
+                        (user_id,)
+                    )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"更新登录时间失败: {str(e)}")
+            return False
+    
+    def get_all_users(self) -> List[Dict]:
+        """获取所有用户列表"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("""
+                        SELECT id, username, email, role, is_active, created_at, last_login_at
+                        FROM users ORDER BY created_at DESC
+                    """)
+                    return cur.fetchall()
+        except Exception as e:
+            logger.error(f"获取用户列表失败: {str(e)}")
+            return []
+    
+    def update_user(self, user_id: int, is_active: bool = None, role: str = None) -> bool:
+        """更新用户信息"""
+        try:
+            updates = []
+            params = []
+            if is_active is not None:
+                updates.append("is_active = %s")
+                params.append(is_active)
+            if role is not None:
+                updates.append("role = %s")
+                params.append(role)
+            
+            if not updates:
+                return True
+            
+            params.append(user_id)
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"""
+                        UPDATE users SET {', '.join(updates)} WHERE id = %s
+                    """, params)
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"更新用户失败: {str(e)}")
+            return False
+    
+    def delete_user(self, user_id: int) -> bool:
+        """删除用户"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"删除用户失败: {str(e)}")
+            return False
+    
+    def change_user_password(self, user_id: int, new_password: str) -> bool:
+        """修改用户密码"""
+        try:
+            import secrets
+            import hashlib
+            
+            salt = secrets.token_hex(16)
+            pw_hash = hashlib.pbkdf2_hmac(
+                'sha256', 
+                new_password.encode('utf-8'), 
+                salt.encode('utf-8'), 
+                100000
+            )
+            password_hash = f"{salt}${pw_hash.hex()}"
+            
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE users SET password_hash = %s WHERE id = %s",
+                        (password_hash, user_id)
+                    )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"修改密码失败: {str(e)}")
+            return False
+    
+    # ========== 数据导出导入 ==========
+    
+    def export_all_images(self) -> List[Dict]:
+        """导出所有图片数据（不含向量）"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("""
+                        SELECT 
+                            i.id,
+                            i.image_url,
+                            i.description,
+                            i.source_type,
+                            i.original_url,
+                            i.file_path,
+                            i.created_at,
+                            i.updated_at,
+                            ARRAY(
+                                SELECT t.name FROM tags t
+                                JOIN image_tags it ON t.id = it.tag_id
+                                WHERE it.image_id = i.id
+                            ) as tags
+                        FROM images i
+                        ORDER BY i.id
+                    """)
+                    results = cur.fetchall()
+                    # 转换 datetime 为字符串
+                    images = []
+                    for row in results:
+                        img = dict(row)
+                        if img.get('created_at'):
+                            img['created_at'] = img['created_at'].isoformat()
+                        if img.get('updated_at'):
+                            img['updated_at'] = img['updated_at'].isoformat()
+                        images.append(img)
+                    return images
+        except Exception as e:
+            logger.error(f"导出图片失败: {str(e)}")
+            return []
+    
+    def export_all_tags(self) -> List[Dict]:
+        """导出所有标签"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("SELECT id, name FROM tags ORDER BY id")
+                    return cur.fetchall()
+        except Exception as e:
+            logger.error(f"导出标签失败: {str(e)}")
+            return []
+    
+    def export_all_collections(self) -> List[Dict]:
+        """导出所有收藏夹（含关联图片）"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("""
+                        SELECT 
+                            c.id,
+                            c.name,
+                            c.description,
+                            c.is_public,
+                            c.user_id,
+                            c.parent_id,
+                            c.created_at,
+                            ARRAY(
+                                SELECT ic.image_id FROM image_collections ic
+                                WHERE ic.collection_id = c.id
+                            ) as image_ids
+                        FROM collections c
+                        ORDER BY c.id
+                    """)
+                    results = cur.fetchall()
+                    collections = []
+                    for row in results:
+                        col = dict(row)
+                        if col.get('created_at'):
+                            col['created_at'] = col['created_at'].isoformat()
+                        collections.append(col)
+                    return collections
+        except Exception as e:
+            logger.error(f"导出收藏夹失败: {str(e)}")
+            return []
+    
+    def export_all_users(self) -> List[Dict]:
+        """导出所有用户（不含密码）"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("""
+                        SELECT id, username, email, role, is_active, created_at
+                        FROM users ORDER BY id
+                    """)
+                    results = cur.fetchall()
+                    users = []
+                    for row in results:
+                        user = dict(row)
+                        if user.get('created_at'):
+                            user['created_at'] = user['created_at'].isoformat()
+                        users.append(user)
+                    return users
+        except Exception as e:
+            logger.error(f"导出用户失败: {str(e)}")
+            return []
+    
+    def import_image(self, img_data: Dict) -> bool:
+        """导入单张图片"""
+        try:
+            from imgtag.db import config_db
+            
+            # 获取向量维度用于创建零向量
+            mode = config_db.get("embedding_mode", "local")
+            if mode == "local":
+                model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
+                if "small" in model_name:
+                    dim = 512
+                elif "base" in model_name:
+                    dim = 768
+                else:
+                    dim = 512
+            else:
+                dim = config_db.get_int("embedding_dimensions", 1536)
+            
+            zero_vector = [0.0] * dim
+            
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # 插入图片（使用 ON CONFLICT 避免重复）
+                    cur.execute("""
+                        INSERT INTO images (image_url, description, embedding, source_type, original_url, file_path)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (image_url) DO UPDATE SET
+                            description = EXCLUDED.description,
+                            source_type = EXCLUDED.source_type,
+                            original_url = EXCLUDED.original_url,
+                            file_path = EXCLUDED.file_path
+                        RETURNING id
+                    """, (
+                        img_data.get('image_url'),
+                        img_data.get('description', ''),
+                        zero_vector,
+                        img_data.get('source_type', 'url'),
+                        img_data.get('original_url'),
+                        img_data.get('file_path')
+                    ))
+                    image_id = cur.fetchone()[0]
+                    
+                    # 导入标签关联
+                    tags = img_data.get('tags', [])
+                    for tag_name in tags:
+                        # 确保标签存在
+                        cur.execute("""
+                            INSERT INTO tags (name) VALUES (%s)
+                            ON CONFLICT (name) DO NOTHING
+                        """, (tag_name,))
+                        cur.execute("SELECT id FROM tags WHERE name = %s", (tag_name,))
+                        tag_id = cur.fetchone()[0]
+                        cur.execute("""
+                            INSERT INTO image_tags (image_id, tag_id, source)
+                            VALUES (%s, %s, 'import')
+                            ON CONFLICT DO NOTHING
+                        """, (image_id, tag_id))
+                    
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"导入图片失败: {str(e)}")
+            return False
+    
+    def import_tag(self, tag_data: Dict) -> bool:
+        """导入标签"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO tags (name) VALUES (%s)
+                        ON CONFLICT (name) DO NOTHING
+                    """, (tag_data.get('name'),))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"导入标签失败: {str(e)}")
+            return False
+    
+    def import_collection(self, col_data: Dict) -> bool:
+        """导入收藏夹"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # 插入收藏夹
+                    cur.execute("""
+                        INSERT INTO collections (name, description, is_public, user_id, parent_id)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                        RETURNING id
+                    """, (
+                        col_data.get('name'),
+                        col_data.get('description', ''),
+                        col_data.get('is_public', True),
+                        col_data.get('user_id'),
+                        col_data.get('parent_id')
+                    ))
+                    result = cur.fetchone()
+                    if result:
+                        collection_id = result[0]
+                        # 关联图片
+                        for image_id in col_data.get('image_ids', []):
+                            cur.execute("""
+                                INSERT INTO image_collections (collection_id, image_id)
+                                VALUES (%s, %s)
+                                ON CONFLICT DO NOTHING
+                            """, (collection_id, image_id))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"导入收藏夹失败: {str(e)}")
+            return False
+    
+    # ========== 审批管理 ==========
+    
+    def create_approval(
+        self,
+        type: str,
+        requester_id: int,
+        payload: Dict,
+        target_type: str = None,
+        target_ids: List[int] = None
+    ) -> Optional[int]:
+        """创建审批请求"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                    INSERT INTO approvals (type, requester_id, target_type, target_ids, payload)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id;
+                    """, (type, requester_id, target_type, target_ids, Json(payload)))
+                    new_id = cur.fetchone()[0]
+                conn.commit()
+                return new_id
+        except Exception as e:
+            logger.error(f"创建审批请求失败: {str(e)}")
+            return None
+    
+    def get_pending_approvals(self, limit: int = 50, offset: int = 0) -> Dict:
+        """获取待审批列表"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    # 获取总数
+                    cur.execute("SELECT COUNT(*) FROM approvals WHERE status = 'pending'")
+                    total = cur.fetchone()["count"]
+                    
+                    # 获取列表
+                    cur.execute("""
+                    SELECT a.*, u.username as requester_name
+                    FROM approvals a
+                    LEFT JOIN users u ON a.requester_id = u.id
+                    WHERE a.status = 'pending'
+                    ORDER BY a.created_at DESC
+                    LIMIT %s OFFSET %s
+                    """, (limit, offset))
+                    approvals = cur.fetchall()
+                    
+                    return {
+                        "approvals": [dict(a) for a in approvals],
+                        "total": total,
+                        "limit": limit,
+                        "offset": offset
+                    }
+        except Exception as e:
+            logger.error(f"获取待审批列表失败: {str(e)}")
+            return {"approvals": [], "total": 0}
+    
+    def approve_request(self, approval_id: int, reviewer_id: int, comment: str = None) -> bool:
+        """批准审批请求"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                    UPDATE approvals 
+                    SET status = 'approved', reviewer_id = %s, review_comment = %s, reviewed_at = NOW()
+                    WHERE id = %s AND status = 'pending'
+                    """, (reviewer_id, comment, approval_id))
+                    success = cur.rowcount > 0
+                conn.commit()
+                return success
+        except Exception as e:
+            logger.error(f"批准请求失败: {str(e)}")
+            return False
+    
+    def reject_request(self, approval_id: int, reviewer_id: int, comment: str = None) -> bool:
+        """拒绝审批请求"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                    UPDATE approvals 
+                    SET status = 'rejected', reviewer_id = %s, review_comment = %s, reviewed_at = NOW()
+                    WHERE id = %s AND status = 'pending'
+                    """, (reviewer_id, comment, approval_id))
+                    success = cur.rowcount > 0
+                conn.commit()
+                return success
+        except Exception as e:
+            logger.error(f"拒绝请求失败: {str(e)}")
+            return False
+    
+    def get_approval(self, approval_id: int) -> Optional[Dict]:
+        """获取审批详情"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("SELECT * FROM approvals WHERE id = %s", (approval_id,))
+                    return cur.fetchone()
+        except Exception as e:
+            logger.error(f"获取审批详情失败: {str(e)}")
+            return None
+    
+    # ========== 审计日志 ==========
+    
+    def add_audit_log(
+        self,
+        user_id: int,
+        action: str,
+        target_type: str = None,
+        target_id: int = None,
+        old_value: Dict = None,
+        new_value: Dict = None,
+        ip_address: str = None
+    ) -> Optional[int]:
+        """添加审计日志"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                    INSERT INTO audit_logs (user_id, action, target_type, target_id, old_value, new_value, ip_address)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id;
+                    """, (
+                        user_id, action, target_type, target_id,
+                        Json(old_value) if old_value else None,
+                        Json(new_value) if new_value else None,
+                        ip_address
+                    ))
+                    new_id = cur.fetchone()[0]
+                conn.commit()
+                return new_id
+        except Exception as e:
+            logger.error(f"添加审计日志失败: {str(e)}")
+            return None
+    
+    def get_audit_logs(self, limit: int = 50, offset: int = 0, user_id: int = None) -> Dict:
+        """获取审计日志"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    where_clause = ""
+                    params = []
+                    
+                    if user_id:
+                        where_clause = "WHERE user_id = %s"
+                        params.append(user_id)
+                    
+                    # 获取总数
+                    cur.execute(f"SELECT COUNT(*) FROM audit_logs {where_clause}", params)
+                    total = cur.fetchone()["count"]
+                    
+                    # 获取列表
+                    params.extend([limit, offset])
+                    cur.execute(f"""
+                    SELECT a.*, u.username
+                    FROM audit_logs a
+                    LEFT JOIN users u ON a.user_id = u.id
+                    {where_clause}
+                    ORDER BY a.created_at DESC
+                    LIMIT %s OFFSET %s
+                    """, params)
+                    logs = cur.fetchall()
+                    
+                    return {
+                        "logs": [dict(l) for l in logs],
+                        "total": total,
+                        "limit": limit,
+                        "offset": offset
+                    }
+        except Exception as e:
+            logger.error(f"获取审计日志失败: {str(e)}")
+            return {"logs": [], "total": 0}
 
     @classmethod
     def close_pool(cls):

@@ -1,0 +1,43 @@
+"""用户相关 Schema"""
+
+from typing import Optional, List
+from datetime import datetime
+from pydantic import BaseModel, Field
+
+
+class UserBase(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    email: Optional[str] = None
+
+
+class UserCreate(UserBase):
+    password: str = Field(..., min_length=6)
+
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+
+class UserResponse(UserBase):
+    id: int
+    role: str
+    is_active: bool
+    created_at: datetime
+    last_login_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int  # seconds
+
+
+class TokenPayload(BaseModel):
+    sub: str  # user_id
+    username: str
+    role: str
+    exp: datetime

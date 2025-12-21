@@ -39,6 +39,41 @@ async def lifespan(app: FastAPI):
     if STATIC_DIR:
         logger.info(f"前端静态文件目录: {STATIC_DIR}")
     
+    # 恢复未完成的任务
+    try:
+        from imgtag.services.task_queue import task_queue
+        
+        # 获取未完成的任务（pending 或 processing 状态）
+        pending_tasks = db.get_tasks(limit=1000, status="pending")
+        processing_tasks = db.get_tasks(limit=100, status="processing")
+        
+        pending_image_ids = []
+        for task in pending_tasks.get("tasks", []):
+            payload = task.get("payload", {})
+            if isinstance(payload, dict):
+                image_id = payload.get("image_id")
+                if image_id:
+                    pending_image_ids.append(image_id)
+        
+        # processing 状态的任务可能是中断的，也恢复
+        for task in processing_tasks.get("tasks", []):
+            payload = task.get("payload", {})
+            if isinstance(payload, dict):
+                image_id = payload.get("image_id")
+                if image_id:
+                    pending_image_ids.append(image_id)
+        
+        if pending_image_ids:
+            logger.info(f"恢复 {len(pending_image_ids)} 个未完成的任务")
+            task_queue.add_tasks(pending_image_ids)
+            # 启动处理
+            import asyncio
+            asyncio.create_task(task_queue.start_processing())
+        else:
+            logger.info("没有未完成的任务需要恢复")
+    except Exception as e:
+        logger.error(f"恢复未完成任务失败: {str(e)}")
+    
     yield
     
     # 应用关闭时释放资源

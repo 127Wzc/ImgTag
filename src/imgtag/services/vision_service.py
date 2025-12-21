@@ -78,6 +78,16 @@ class VisionService:
             model = self._get_model()
             prompt = self._get_prompt()
             
+            # DEBUG: 打印请求参数
+            from imgtag.db import config_db
+            api_base = config_db.get("vision_api_base_url", "https://api.openai.com/v1")
+            logger.debug(f"视觉模型 API 请求参数:")
+            logger.debug(f"  - API Base: {api_base}")
+            logger.debug(f"  - Model: {model}")
+            logger.debug(f"  - Image URL: {image_url}")
+            logger.debug(f"  - Prompt: {prompt[:100]}...")
+            logger.debug(f"  - stream: False")
+            
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
@@ -89,8 +99,15 @@ class VisionService:
                         ]
                     }
                 ],
-                max_tokens=1000,
+                stream=False,  # 明确禁用流式响应
             )
+            
+            # DEBUG: 打印响应元数据
+            logger.debug(f"视觉模型 API 响应:")
+            logger.debug(f"  - Model: {response.model}")
+            logger.debug(f"  - Finish Reason: {response.choices[0].finish_reason}")
+            if response.usage:
+                logger.debug(f"  - Usage: prompt_tokens={response.usage.prompt_tokens}, completion_tokens={response.usage.completion_tokens}, total={response.usage.total_tokens}")
             
             content = response.choices[0].message.content
             return self._parse_response(content)
@@ -111,6 +128,16 @@ class VisionService:
             base64_image = base64.b64encode(image_data).decode("utf-8")
             data_url = f"data:{mime_type};base64,{base64_image}"
             
+            # DEBUG: 打印请求参数
+            from imgtag.db import config_db
+            api_base = config_db.get("vision_api_base_url", "https://api.openai.com/v1")
+            logger.debug(f"视觉模型 API 请求参数:")
+            logger.debug(f"  - API Base: {api_base}")
+            logger.debug(f"  - Model: {model}")
+            logger.debug(f"  - Image: Base64 ({len(image_data)} bytes, {mime_type})")
+            logger.debug(f"  - Prompt: {prompt[:100]}...")
+            logger.debug(f"  - stream: False")
+            
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
@@ -122,8 +149,15 @@ class VisionService:
                         ]
                     }
                 ],
-                max_tokens=1000,
+                stream=False,  # 明确禁用流式响应
             )
+            
+            # DEBUG: 打印响应元数据
+            logger.debug(f"视觉模型 API 响应:")
+            logger.debug(f"  - Model: {response.model}")
+            logger.debug(f"  - Finish Reason: {response.choices[0].finish_reason}")
+            if response.usage:
+                logger.debug(f"  - Usage: prompt_tokens={response.usage.prompt_tokens}, completion_tokens={response.usage.completion_tokens}, total={response.usage.total_tokens}")
             
             content = response.choices[0].message.content
             return self._parse_response(content)
@@ -134,21 +168,29 @@ class VisionService:
     
     def _parse_response(self, content: str) -> ImageAnalysisResult:
         """解析模型响应"""
+        # DEBUG: 打印原始响应内容
+        logger.debug(f"视觉模型原始响应内容:\n{content}")
+        
         try:
             # 尝试提取 JSON
             json_match = re.search(r'\{[\s\S]*\}', content)
             if json_match:
-                data = json.loads(json_match.group())
+                json_str = json_match.group()
+                logger.debug(f"提取到的 JSON 字符串:\n{json_str}")
+                data = json.loads(json_str)
+                logger.debug(f"JSON 解析成功: tags={len(data.get('tags', []))}个, description长度={len(data.get('description', ''))}")
                 return ImageAnalysisResult(
                     tags=data.get("tags", []),
                     description=data.get("description", ""),
                     raw_response=content
                 )
-        except json.JSONDecodeError:
-            pass
+            else:
+                logger.debug("未能从响应中提取到 JSON 格式内容")
+        except json.JSONDecodeError as e:
+            logger.debug(f"JSON 解析失败: {str(e)}")
         
         # 降级处理
-        logger.warning("无法解析 JSON 响应，使用降级处理")
+        logger.warning(f"无法解析 JSON 响应，使用降级处理。原始内容: {content[:200]}...")
         return ImageAnalysisResult(
             tags=[],
             description=content.strip(),

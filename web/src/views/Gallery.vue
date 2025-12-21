@@ -1,62 +1,6 @@
 <template>
-  <div class="gallery-layout">
-    <!-- 侧边栏 -->
-    <div class="sidebar card">
-      <div class="sidebar-header">
-        <h3>收藏夹</h3>
-        <el-button type="primary" size="small" circle @click="showCollectionDialog = true">
-          <el-icon><Plus /></el-icon>
-        </el-button>
-      </div>
-      <ul class="collection-list">
-        <li 
-          :class="{ active: activeCollectionId === null }"
-          @click="handleCollectionFilter(null)"
-        >
-          <div class="collection-info">
-            <el-icon><Picture /></el-icon>
-            <span>全部图片</span>
-          </div>
-        </li>
-        <!-- 根收藏夹 (parent_id === null) -->
-        <template v-for="c in rootCollections" :key="c.id">
-          <li 
-            :class="{ active: activeCollectionId === c.id }"
-            @click="handleCollectionFilter(c.id)"
-          >
-            <div class="collection-info">
-              <el-icon v-if="hasChildren(c.id)" 
-                @click.stop="toggleExpand(c.id)" 
-                class="expand-icon" 
-                :class="{ expanded: expandedIds.includes(c.id) }"
-              ><ArrowRight /></el-icon>
-              <el-icon v-else><Folder /></el-icon>
-              <span class="name">{{ c.name }}</span>
-            </div>
-            <span class="count" v-if="c.image_count > 0">{{ c.image_count }}</span>
-          </li>
-          <!-- 子收藏夹 -->
-          <template v-if="expandedIds.includes(c.id)">
-            <li 
-              v-for="child in getChildren(c.id)" 
-              :key="child.id"
-              :class="{ active: activeCollectionId === child.id }"
-              class="child-collection"
-              @click="handleCollectionFilter(child.id)"
-            >
-              <div class="collection-info">
-                <el-icon><Folder /></el-icon>
-                <span class="name">{{ child.name }}</span>
-              </div>
-              <span class="count" v-if="child.image_count > 0">{{ child.image_count }}</span>
-            </li>
-          </template>
-        </template>
-      </ul>
-    </div>
-
+  <div class="gallery-page">
     <!-- 主内容区 -->
-    <div class="gallery-main">
       <!-- 搜索筛选栏 -->
       <div class="card filter-bar">
         <el-form :inline="true" @submit.prevent="handleSearch">
@@ -71,9 +15,9 @@
             >
               <el-option
                 v-for="tag in suggestedTags"
-                :key="tag"
-                :label="tag"
-                :value="tag"
+                :key="tag.name"
+                :label="`${tag.name} (${tag.usage_count || 0})`"
+                :value="tag.name"
               />
             </el-select>
           </el-form-item>
@@ -103,6 +47,10 @@
               clearable
               style="width: 180px"
             />
+          </el-form-item>
+          
+          <el-form-item v-if="authStore.isAdmin">
+            <el-checkbox v-model="filters.pendingOnly">待分析</el-checkbox>
           </el-form-item>
           
           <el-form-item>
@@ -156,12 +104,32 @@
               <span class="selected-count-text">未选择</span>
             </div>
             <div v-if="selectedIds.length > 0" class="batch-actions">
-              <el-button type="primary" size="small" @click="openAddToCollectionDialog">
+              <el-button v-if="authStore.isLoggedIn" type="primary" size="small" @click="openAddToCollectionDialog">
                 <el-icon><FolderAdd /></el-icon>
                 添加到收藏夹
               </el-button>
-              <el-button type="primary" size="small" @click="handleBatchAnalyze" :loading="batchLoading">
+              <el-button type="success" size="small" @click="showBatchTagDialog = true">
+                <el-icon><CollectionTag /></el-icon>
+                批量打标签
+              </el-button>
+              <el-button 
+                v-if="authStore.isAdmin" 
+                type="primary" 
+                size="small" 
+                @click="handleBatchAnalyze" 
+                :loading="batchLoading"
+              >
                 批量分析
+              </el-button>
+              <el-button 
+                v-if="authStore.isAdmin" 
+                type="danger" 
+                size="small" 
+                @click="handleBatchDelete"
+                :loading="batchDeleting"
+              >
+                <el-icon><Delete /></el-icon>
+                批量删除
               </el-button>
               <el-button size="small" @click="clearSelection">取消选择</el-button>
             </div>
@@ -221,13 +189,17 @@
             
             <div class="image-wrapper">
               <img :src="getImageUrl(image.image_url)" :alt="image.description" />
-              <div v-if="!selectMode" class="image-overlay">
-                <el-button circle size="small" type="primary" @click.stop="selectedImage = image; openAddToCollectionDialog()">
-                  <el-icon><FolderAdd /></el-icon>
-                </el-button>
-                <el-button circle size="small" type="danger" @click.stop="confirmDelete(image)">
-                  <el-icon><Delete /></el-icon>
-                </el-button>
+              
+              <!-- 右下角收藏图标 -->
+              <div 
+                v-if="authStore.isLoggedIn"
+                class="favorite-icon" 
+                :class="{ collected: isImageCollected(image.id) }"
+                @click.stop="openCollectionDialogForImage(image)"
+                :title="isImageCollected(image.id) ? '已收藏' : '添加到收藏夹'"
+              >
+                <el-icon v-if="isImageCollected(image.id)"><Star /></el-icon>
+                <el-icon v-else><StarFilled /></el-icon>
               </div>
             </div>
             <div class="image-card-content">
@@ -260,7 +232,6 @@
           />
         </div>
       </template>
-    </div>
 
     <!-- 创建收藏夹弹窗 -->
     <el-dialog v-model="showCollectionDialog" title="创建收藏夹" width="400px">
@@ -288,6 +259,9 @@
       :title="isEditing ? '编辑图片' : '图片详情'"
       fullscreen
       class="fullscreen-dialog"
+      :show-close="true"
+      :close-on-click-modal="true"
+      :close-on-press-escape="true"
     >
       <div v-if="selectedImage" class="fullscreen-content">
         <!-- 左侧：大图展示 -->
@@ -311,6 +285,9 @@
                 <el-icon><Check /></el-icon>
                 保存并更新向量
               </el-button>
+              <el-button circle @click="fullscreenVisible = false">
+                <el-icon><Close /></el-icon>
+              </el-button>
             </div>
           </div>
           
@@ -322,16 +299,37 @@
             </div>
             
             <div class="info-section">
-              <h3>标签</h3>
+              <h3 class="section-title ai-title">
+                <el-icon><Monitor /></el-icon>
+                AI 标签
+              </h3>
               <div class="tags-display">
                 <el-tag 
-                  v-for="tag in selectedImage.tags" 
-                  :key="tag"
+                  v-for="tag in aiTags" 
+                  :key="'ai-' + tag.name"
+                  size="large"
+                  type="info"
+                  class="ai-tag"
+                >
+                  {{ tag.name }}
+                </el-tag>
+                <span v-if="!aiTags.length && !userTags.length" class="no-tags">暂无标签</span>
+              </div>
+            </div>
+            
+            <div class="info-section" v-if="userTags.length > 0">
+              <h3 class="section-title user-title">
+                <el-icon><User /></el-icon>
+                用户自定义标签
+              </h3>
+              <div class="tags-display">
+                <el-tag 
+                  v-for="tag in userTags" 
+                  :key="'user-' + tag.name"
                   size="large"
                 >
-                  {{ tag }}
+                  {{ tag.name }}
                 </el-tag>
-                <span v-if="!selectedImage.tags?.length" class="no-tags">暂无标签</span>
               </div>
             </div>
             
@@ -344,7 +342,7 @@
               </el-input>
             </div>
 
-            <div class="info-section">
+            <div v-if="authStore.isLoggedIn" class="info-section">
               <h3>操作</h3>
               <el-button @click="openAddToCollectionDialog">
                 <el-icon><FolderAdd /></el-icon>
@@ -366,24 +364,51 @@
             </div>
             
             <div class="info-section">
-              <h3>标签</h3>
-              <el-select
-                v-model="editForm.tags"
-                multiple
-                filterable
-                allow-create
-                default-first-option
-                placeholder="添加标签，回车确认"
-                style="width: 100%"
-              >
-                <el-option
-                  v-for="tag in editForm.tags"
-                  :key="tag"
-                  :label="tag"
-                  :value="tag"
+              <h3 class="section-title ai-title">
+                <el-icon><Monitor /></el-icon>
+                AI 标签
+                <span class="title-hint">（可删除）</span>
+              </h3>
+              <div class="tags-display">
+                <el-tag 
+                  v-for="tag in editForm.aiTags" 
+                  :key="'edit-ai-' + tag"
+                  size="large"
+                  type="info"
+                  closable
+                  @close="removeAiTag(tag)"
+                >
+                  {{ tag }}
+                </el-tag>
+                <span v-if="!editForm.aiTags?.length" class="no-tags">暂无 AI 标签</span>
+              </div>
+            </div>
+            
+            <div class="info-section">
+              <h3 class="section-title user-title">
+                <el-icon><User /></el-icon>
+                用户自定义标签
+              </h3>
+              <div class="tags-display">
+                <el-tag 
+                  v-for="tag in editForm.userTags" 
+                  :key="'edit-user-' + tag"
+                  size="large"
+                  closable
+                  @close="removeUserTag(tag)"
+                >
+                  {{ tag }}
+                </el-tag>
+              </div>
+              <div class="add-tag-row">
+                <el-input
+                  v-model="newUserTag"
+                  placeholder="输入新标签，回车添加"
+                  @keyup.enter="addUserTag"
+                  style="flex: 1;"
                 />
-              </el-select>
-              <p class="edit-hint">输入后按回车添加标签</p>
+                <el-button type="primary" @click="addUserTag" :disabled="!newUserTag.trim()">添加</el-button>
+              </div>
             </div>
           </div>
           
@@ -423,12 +448,67 @@
             />
           </el-select>
         </el-form-item>
+        
+        <!-- 新建收藏夹展开项 -->
+        <el-divider>
+          <el-button text type="primary" @click="showInlineNewCollection = !showInlineNewCollection">
+            <el-icon><Plus /></el-icon>
+            {{ showInlineNewCollection ? '收起' : '新建收藏夹' }}
+          </el-button>
+        </el-divider>
+        
+        <template v-if="showInlineNewCollection">
+          <el-form-item label="收藏夹名称">
+            <el-input v-model="newCollectionName" placeholder="输入新收藏夹名称" />
+          </el-form-item>
+          <el-form-item>
+            <el-button type="success" @click="createAndSelectCollection" :loading="creatingCollection">
+              创建并选择
+            </el-button>
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <span class="dialog-footer">
           <el-button @click="showAddToCollectionDialog = false">取消</el-button>
           <el-button type="primary" @click="confirmAddToCollection">确定</el-button>
         </span>
+      </template>
+    </el-dialog>
+
+    <!-- 批量打标签弹窗 -->
+    <el-dialog v-model="showBatchTagDialog" title="批量打标签" width="500px">
+      <el-form label-width="80px">
+        <el-form-item label="选择标签">
+          <el-select
+            v-model="batchTags"
+            multiple
+            filterable
+            allow-create
+            default-first-option
+            placeholder="输入或选择标签"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="tag in suggestedTags"
+              :key="tag.name"
+              :label="`${tag.name} (${tag.usage_count || 0})`"
+              :value="tag.name"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="操作模式">
+          <el-radio-group v-model="batchTagMode">
+            <el-radio value="add">追加标签</el-radio>
+            <el-radio value="replace">替换标签</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showBatchTagDialog = false">取消</el-button>
+        <el-button type="primary" @click="handleBatchTag" :loading="batchTagLoading">
+          应用到 {{ selectedIds.length }} 张图片
+        </el-button>
       </template>
     </el-dialog>
 
@@ -440,10 +520,13 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { FolderAdd, Setting, Select } from '@element-plus/icons-vue'
-import { getImages, updateImage, deleteImage, addToQueue, getQueueStatus, getCollections, createCollection, addImageToCollection, getCollectionImages, getTags, searchSimilar } from '@/api'
+import { FolderAdd, Setting, Select, Close, CollectionTag, User, Delete, Monitor, Star, StarFilled, Plus } from '@element-plus/icons-vue'
+import { getImages, getImage, updateImage, deleteImage, batchDeleteImages, batchUpdateTags, addToQueue, getQueueStatus, getCollections, createCollection, addImageToCollection, getCollectionImages, getTags, searchSimilar, getAllConfigs } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 
 import TagManager from '@/components/TagManager.vue'
+
+const authStore = useAuthStore()
 
 const loading = ref(true)
 const images = ref([])
@@ -454,13 +537,20 @@ const pageSize = ref(20)
 const suggestedTags = ref([])
 const showTagManager = ref(false)
 
+// 批量打标签
+const showBatchTagDialog = ref(false)
+const batchTags = ref([])
+const batchTagMode = ref('add')
+const batchTagLoading = ref(false)
+
 // 搜索权重
 const vectorWeight = ref(0.7)
 const tagWeight = ref(0.3)
 
 const filters = reactive({
   tags: [],
-  descriptionContains: ''
+  descriptionContains: '',
+  pendingOnly: false
 })
 
 // 收藏夹相关
@@ -475,6 +565,11 @@ const activeCollectionId = ref(null)
 const showAddToCollectionDialog = ref(false)
 const targetCollectionId = ref(null)
 const expandedIds = ref([])
+
+// 新建收藏夹（内联）
+const showInlineNewCollection = ref(false)
+const newCollectionName = ref('')
+const creatingCollection = ref(false)
 
 // 层级收藏夹计算属性
 const rootCollections = computed(() => 
@@ -500,11 +595,29 @@ const selectedImage = ref(null)
 const isEditing = ref(false)
 const editForm = ref(null)
 const saving = ref(false)
+const detailLoading = ref(false) // 详情加载状态，避免标签跳动
+
+// 用户标签和 AI 标签计算属性
+const userTags = computed(() => {
+  const tagsWithSource = selectedImage.value?.tags_with_source || []
+  return tagsWithSource.filter(t => t.source === 'user')
+})
+
+const aiTags = computed(() => {
+  // 在加载详情时不显示标签，避免跳动
+  if (detailLoading.value) return []
+  
+  const tagsWithSource = selectedImage.value?.tags_with_source || []
+  
+  // 只使用 tags_with_source 中的 AI 标签
+  return tagsWithSource.filter(t => t.source !== 'user')
+})
 
 // 批量选择
 const selectMode = ref(false)
 const selectedIds = ref([])
 const batchLoading = ref(false)
+const batchDeleting = ref(false)
 
 // 全选状态计算属性
 const isAllSelected = computed(() => {
@@ -535,6 +648,18 @@ const getImageUrl = (url) => {
   return url
 }
 
+// 获取完整图片 URL（包含 base_url）
+const getFullImageUrl = async (url) => {
+  if (url.startsWith('http')) return url
+  try {
+    const config = await getAllConfigs()
+    const baseUrl = (config.base_url || '').replace(/\/$/, '')
+    return baseUrl ? `${baseUrl}${url}` : url
+  } catch (e) {
+    return url
+  }
+}
+
 // 收藏夹方法
 const fetchCollections = async () => {
   try {
@@ -548,7 +673,7 @@ const fetchCollections = async () => {
 const fetchTags = async () => {
   try {
     const tags = await getTags({ limit: 100, sort_by: 'usage_count' })
-    suggestedTags.value = tags.map(t => t.name)
+    suggestedTags.value = tags // 保存完整对象以显示数量
   } catch (error) {
     console.error('获取标签失败:', error)
   }
@@ -586,6 +711,19 @@ const openAddToCollectionDialog = () => {
   showAddToCollectionDialog.value = true
 }
 
+// 为单张图片打开收藏弹窗
+const openCollectionDialogForImage = (image) => {
+  selectedImage.value = image
+  selectedIds.value = [] // 清空批量选择，用于单图收藏
+  showAddToCollectionDialog.value = true
+}
+
+// 检测图片是否已收藏（暂时未实现真实检测，需后端 API 支持）
+const isImageCollected = (imageId) => {
+  // TODO: 实现真实的收藏状态检测
+  return false
+}
+
 const confirmAddToCollection = async () => {
   if (!targetCollectionId.value) {
     ElMessage.warning('请选择收藏夹')
@@ -608,15 +746,45 @@ const confirmAddToCollection = async () => {
     ElMessage.success(`已提交 ${successCount} 个添加到收藏夹的任务，正在后台处理`)
     showAddToCollectionDialog.value = false
     targetCollectionId.value = null
+    showInlineNewCollection.value = false
+    newCollectionName.value = ''
     clearSelection()
     
-    // 如果在详情页，刷新详情
-    if (selectedImage.value) {
-      // 简单刷新列表
-      fetchImages()
-    }
+    // 不再刷新列表，等待自动刷新即可
   } catch (error) {
     ElMessage.error('添加失败: ' + error.message)
+  }
+}
+
+// 内联创建收藏夹并选择
+const createAndSelectCollection = async () => {
+  if (!newCollectionName.value.trim()) {
+    ElMessage.warning('请输入收藏夹名称')
+    return
+  }
+  
+  creatingCollection.value = true
+  try {
+    const result = await createCollection({
+      name: newCollectionName.value.trim(),
+      is_public: true
+    })
+    
+    // 刷新收藏夹列表
+    await fetchCollections()
+    
+    // 选择新创建的收藏夹
+    targetCollectionId.value = result.id
+    
+    // 重置表单
+    showInlineNewCollection.value = false
+    newCollectionName.value = ''
+    
+    ElMessage.success('收藏夹创建成功')
+  } catch (error) {
+    ElMessage.error('创建失败: ' + error.message)
+  } finally {
+    creatingCollection.value = false
   }
 }
 
@@ -647,6 +815,7 @@ const fetchImages = async () => {
       result = await getImages({
         tags: filters.tags.length > 0 ? filters.tags : null,
         descriptionContains: null, // Ensure this is null for non-semantic search
+        pendingOnly: filters.pendingOnly,
         limit: pageSize.value,
         offset: (currentPage.value - 1) * pageSize.value,
         sortDesc: true
@@ -669,6 +838,7 @@ const handleSearch = () => {
 const resetFilters = () => {
   filters.tags = []
   filters.descriptionContains = ''
+  filters.pendingOnly = false
   currentPage.value = 1
   fetchImages()
 }
@@ -737,20 +907,78 @@ const handleBatchAnalyze = async () => {
   }
 }
 
-const openFullscreen = (image) => {
-  selectedImage.value = { ...image }
+const openFullscreen = async (image) => {
+  selectedImage.value = { ...image, tags_with_source: [] } // 初始化为空
   isEditing.value = false
   editForm.value = null
   fullscreenVisible.value = true
+  detailLoading.value = true
+  
+  // 获取详细信息（包含 tags_with_source）
+  try {
+    const detail = await getImage(image.id)
+    selectedImage.value = { ...selectedImage.value, ...detail }
+  } catch (e) {
+    console.error('获取图片详情失败:', e)
+  } finally {
+    detailLoading.value = false
+  }
 }
 
 const startEdit = () => {
+  // 检查登录状态
+  if (!authStore.isLoggedIn) {
+    ElMessage.warning('请先登录后再操作')
+    return
+  }
+  
+  // 分离 AI 标签和用户标签
+  const tagsWithSource = selectedImage.value?.tags_with_source || []
+  const aiTagNames = tagsWithSource.filter(t => t.source !== 'user').map(t => t.name)
+  const userTagNames = tagsWithSource.filter(t => t.source === 'user').map(t => t.name)
+  
   editForm.value = {
     id: selectedImage.value.id,
     description: selectedImage.value.description || '',
-    tags: [...(selectedImage.value.tags || [])]
+    aiTags: [...aiTagNames],
+    userTags: [...userTagNames]
   }
+  newUserTag.value = ''
   isEditing.value = true
+}
+
+// 新用户标签输入
+const newUserTag = ref('')
+
+// 删除 AI 标签
+const removeAiTag = (tag) => {
+  editForm.value.aiTags = editForm.value.aiTags.filter(t => t !== tag)
+}
+
+// 删除用户标签
+const removeUserTag = (tag) => {
+  editForm.value.userTags = editForm.value.userTags.filter(t => t !== tag)
+}
+
+// 添加用户标签（带重复检测）
+const addUserTag = () => {
+  const tag = newUserTag.value.trim()
+  if (!tag) return
+  
+  // 检测是否与 AI 标签重复
+  if (editForm.value.aiTags.includes(tag)) {
+    ElMessage.warning(`标签 "${tag}" 已存在于 AI 标签中`)
+    return
+  }
+  
+  // 检测是否与现有用户标签重复
+  if (editForm.value.userTags.includes(tag)) {
+    ElMessage.warning(`标签 "${tag}" 已存在`)
+    return
+  }
+  
+  editForm.value.userTags.push(tag)
+  newUserTag.value = ''
 }
 
 const cancelEdit = () => {
@@ -761,20 +989,34 @@ const cancelEdit = () => {
 const saveEdit = async () => {
   saving.value = true
   try {
+    // 合并 AI 标签和用户标签
+    const allTags = [...editForm.value.aiTags, ...editForm.value.userTags]
+    
     // 保存时后端会自动重建向量
     await updateImage(editForm.value.id, {
       description: editForm.value.description,
-      tags: editForm.value.tags
+      tags: allTags
     })
     ElMessage.success('保存成功，向量已更新')
     
     // 更新当前显示的数据
     selectedImage.value.description = editForm.value.description
-    selectedImage.value.tags = [...editForm.value.tags]
+    selectedImage.value.tags = allTags
+    
+    // 更新 tags_with_source 以便正确显示分类
+    selectedImage.value.tags_with_source = [
+      ...editForm.value.aiTags.map(name => ({ name, source: 'ai' })),
+      ...editForm.value.userTags.map(name => ({ name, source: 'user' }))
+    ]
+    
+    // 本地更新 images 数组中对应的项，避免刷新整个列表
+    const idx = images.value.findIndex(img => img.id === selectedImage.value.id)
+    if (idx !== -1) {
+      images.value[idx] = { ...images.value[idx], tags: allTags }
+    }
     
     isEditing.value = false
     editForm.value = null
-    fetchImages()
   } catch (e) {
     ElMessage.error('保存失败: ' + e.message)
   } finally {
@@ -782,12 +1024,83 @@ const saveEdit = async () => {
   }
 }
 
-const copyUrl = () => {
-  navigator.clipboard.writeText(selectedImage.value.image_url)
+const handleBatchTag = async () => {
+  if (batchTags.value.length === 0) {
+    ElMessage.warning('请选择或输入标签')
+    return
+  }
+  if (selectedIds.value.length === 0) {
+    ElMessage.warning('请先选择图片')
+    return
+  }
+  
+  const count = selectedIds.value.length
+  batchTagLoading.value = true
+  try {
+    const result = await batchUpdateTags(selectedIds.value, batchTags.value, batchTagMode.value)
+    ElMessage.success(`已为 ${count} 张图片${batchTagMode.value === 'add' ? '添加' : '替换'}标签`)
+    showBatchTagDialog.value = false
+    batchTags.value = []
+    clearSelection()
+    // 不刷新列表，等待自动刷新
+  } catch (e) {
+    ElMessage.error('批量打标签失败: ' + e.message)
+  } finally {
+    batchTagLoading.value = false
+  }
+}
+
+const handleBatchDelete = async () => {
+  if (selectedIds.value.length === 0) {
+    ElMessage.warning('请先选择图片')
+    return
+  }
+  
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除 ${selectedIds.value.length} 张图片吗？此操作不可撤销！`,
+      '批量删除确认',
+      {
+        confirmButtonText: '确定删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+  } catch {
+    return // 用户取消
+  }
+  
+  batchDeleting.value = true
+  const idsToDelete = new Set(selectedIds.value)
+  try {
+    const result = await batchDeleteImages(selectedIds.value)
+    ElMessage.success(result.message)
+    clearSelection()
+    // 本地删除已删除的图片，避免刷新整个列表
+    images.value = images.value.filter(img => !idsToDelete.has(img.id))
+    // 更新总数
+    totalCount.value -= result.success_count || 0
+  } catch (e) {
+    ElMessage.error('批量删除失败: ' + e.message)
+  } finally {
+    batchDeleting.value = false
+  }
+}
+
+const copyUrl = async () => {
+  // 使用 getFullImageUrl 获取完整 URL（包含 base_url）
+  const fullUrl = await getFullImageUrl(selectedImage.value.image_url)
+  navigator.clipboard.writeText(fullUrl)
   ElMessage.success('已复制到剪贴板')
 }
 
 const confirmDelete = (image) => {
+  // 检查管理员权限
+  if (!authStore.isAdmin) {
+    ElMessage.warning('只有管理员才能删除图片')
+    return
+  }
+  
   ElMessageBox.confirm(
     `确定要删除这张图片吗？此操作不可撤销。`,
     '确认删除',
@@ -800,7 +1113,9 @@ const confirmDelete = (image) => {
     try {
       await deleteImage(image.id)
       ElMessage.success('删除成功')
-      fetchImages()
+      // 本地移除已删除的图片
+      images.value = images.value.filter(img => img.id !== image.id)
+      totalCount.value -= 1
     } catch (e) {
       ElMessage.error('删除失败: ' + e.message)
     }
@@ -808,11 +1123,14 @@ const confirmDelete = (image) => {
 }
 
 const handleDeleteInFullscreen = async () => {
+  const imageId = selectedImage.value.id
   try {
-    await deleteImage(selectedImage.value.id)
+    await deleteImage(imageId)
     ElMessage.success('删除成功')
     fullscreenVisible.value = false
-    fetchImages()
+    // 本地移除已删除的图片
+    images.value = images.value.filter(img => img.id !== imageId)
+    totalCount.value -= 1
   } catch (e) {
     ElMessage.error('删除失败: ' + e.message)
   }
@@ -823,17 +1141,19 @@ const fetchQueueStatus = async () => {
   try {
     queueStatus.value = await getQueueStatus()
     
-    // 如果有任务完成，刷新图片列表
-    if (queueStatus.value?.running) {
-      // 继续轮询
-    } else if (queueStatus.value?.completed_count > 0) {
-      // 队列停止了，刷新图片列表
+    // 智能刷新：只有在队列从运行变为停止时才刷新
+    if (!queueStatus.value?.running && prevRunning) {
+      // 队列刚停止，刷新一次
       fetchImages()
     }
+    prevRunning = queueStatus.value?.running
   } catch (e) {
     console.error('获取队列状态失败:', e)
   }
 }
+
+// 记录上次队列状态
+let prevRunning = false
 
 // 启动队列状态轮询
 const startQueuePolling = () => {
@@ -841,7 +1161,7 @@ const startQueuePolling = () => {
   
   queueTimer = setInterval(async () => {
     await fetchQueueStatus()
-  }, 2000)
+  }, 5000) // 5 秒轮询间隔
 }
 
 onMounted(() => {
@@ -861,113 +1181,68 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.gallery-layout {
-  display: flex;
-  gap: 24px;
-  align-items: flex-start;
-}
-
-.sidebar {
-  width: 260px;
-  flex-shrink: 0;
-  position: sticky;
-  top: 24px;
-  max-height: calc(100vh - 48px);
-  overflow-y: auto;
-  padding: 0;
-}
-
-.gallery-main {
-  flex-grow: 1;
+.gallery-page {
   display: flex;
   flex-direction: column;
   gap: 24px;
-  min-width: 0; /* 防止 grid 溢出 */
 }
 
-.sidebar-header {
-  padding: 16px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 1px solid var(--border-color);
-  background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-light) 100%);
-  color: white;
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+.filter-bar {
+  background: var(--bg-card);
 }
 
-.sidebar-header h3 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-  color: white;
-}
-
-.collection-list {
-  list-style: none;
-  padding: 8px;
-  margin: 0;
-}
-
-.collection-list li {
-  padding: 10px 12px;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  transition: all 0.2s;
-  color: var(--text-secondary);
-  font-size: 14px;
-}
-
-.collection-list li:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.collection-list li.active {
-  background: var(--primary-color);
-  color: white;
-  font-weight: 500;
-  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
-}
-
-.collection-info {
+/* 标签区域标题样式 */
+.section-title {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-bottom: 12px;
+  font-size: 14px;
+  font-weight: 600;
 }
 
-.collection-info .el-icon {
-  font-size: 16px;
+/* AI 标签标题 - 灰色 */
+.ai-title {
+  color: #909399;
 }
 
-.expand-icon {
-  cursor: pointer;
-  transition: transform 0.2s;
+.ai-title .el-icon {
+  font-size: 18px;
 }
 
-.expand-icon.expanded {
-  transform: rotate(90deg);
+/* 用户标签标题 - 绿色 */
+.user-title {
+  color: #67c23a;
 }
 
-.child-collection {
-  padding-left: 32px !important;
-  background: var(--bg-secondary);
+.user-title .el-icon {
+  font-size: 18px;
 }
 
-.collection-list .count {
+/* AI 标签样式 */
+.tags-display .el-tag--info {
+  background: rgba(144, 147, 153, 0.15);
+  border-color: rgba(144, 147, 153, 0.3);
+  color: #909399;
+}
+
+.tags-display .el-tag {
+  margin-right: 8px;
+  margin-bottom: 8px;
+}
+
+/* 添加标签行 */
+.add-tag-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* 标题提示 */
+.title-hint {
+  font-weight: 400;
   font-size: 12px;
-  background: var(--bg-secondary);
-  padding: 2px 6px;
-  border-radius: 10px;
-  color: var(--text-muted);
-}
-
-.collection-list li.active .count {
-  background: rgba(255, 255, 255, 0.2);
-  color: white;
+  opacity: 0.7;
 }
 
 .collection-select-list {
@@ -1075,6 +1350,38 @@ onUnmounted(() => {
 
 .image-wrapper:hover .image-overlay {
   opacity: 1;
+}
+
+/* 右下角收藏图标 */
+.favorite-icon {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.favorite-icon:hover {
+  background: rgba(0, 0, 0, 0.8);
+  transform: scale(1.1);
+  color: #f7ba2a;
+}
+
+.favorite-icon.collected {
+  color: #f7ba2a;
+  background: rgba(247, 186, 42, 0.2);
+}
+
+.favorite-icon .el-icon {
+  font-size: 18px;
 }
 
 .image-card-content {

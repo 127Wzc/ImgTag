@@ -9,9 +9,15 @@ const api = axios.create({
     }
 })
 
-// 请求拦截器
+// 请求拦截器 - 自动添加 Authorization 头
 api.interceptors.request.use(
-    config => config,
+    config => {
+        const token = localStorage.getItem('token')
+        if (token) {
+            config.headers.Authorization = `Bearer ${token}`
+        }
+        return config
+    },
     error => Promise.reject(error)
 )
 
@@ -20,6 +26,12 @@ api.interceptors.response.use(
     response => response.data,
     error => {
         const message = error.response?.data?.detail || error.message || '请求失败'
+
+        // 401 未授权 - 清除 token
+        if (error.response?.status === 401) {
+            localStorage.removeItem('token')
+        }
+
         return Promise.reject(new Error(message))
     }
 )
@@ -32,6 +44,7 @@ export const getImages = (params = {}) => {
         tags: params.tags || null,
         url_contains: params.urlContains || null,
         description_contains: params.descriptionContains || null,
+        pending_only: params.pendingOnly || false,
         limit: params.limit || 20,
         offset: params.offset || 0,
         sort_by: params.sortBy || 'id',
@@ -80,6 +93,20 @@ export const deleteImage = (id) => {
     return api.delete(`/images/${id}`)
 }
 
+// 批量删除图像
+export const batchDeleteImages = (imageIds) => {
+    return api.post('/images/batch/delete', imageIds)
+}
+
+// 批量更新标签
+export const batchUpdateTags = (imageIds, tags, mode = 'add') => {
+    return api.post('/images/batch/update-tags', {
+        image_ids: imageIds,
+        tags: tags,
+        mode: mode
+    })
+}
+
 // ============ 搜索 API ============
 
 // 相似度搜索
@@ -109,6 +136,27 @@ export const healthCheck = () => {
 // 获取系统配置
 export const getSystemConfig = () => {
     return api.get('/system/config')
+}
+
+// 导出数据库
+export const exportDatabase = () => {
+    return api.get('/system/export', {
+        responseType: 'blob'
+    })
+}
+
+// 导入数据库
+export const importDatabase = (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return api.post('/system/import', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+    })
+}
+
+// 获取可用模型列表
+export const getAvailableModels = () => {
+    return api.get('/system/models')
 }
 
 // ============ 配置管理 API ============
@@ -280,4 +328,78 @@ export const cleanupTasks = (days = 7) => {
     return api.post('/tasks/cleanup', null, { params: { days } })
 }
 
+// ============ 认证 API ============
 
+// 用户登录
+export const login = (username, password) => {
+    return api.post('/auth/login', { username, password })
+}
+
+// 用户注册
+export const register = (username, password, email = null) => {
+    return api.post('/auth/register', { username, password, email })
+}
+
+// 获取当前用户信息
+export const getCurrentUser = () => {
+    return api.get('/auth/me')
+}
+
+// 登出
+export const logout = () => {
+    return api.post('/auth/logout')
+}
+
+// ============ 用户管理 API （管理员）============
+
+// 获取所有用户
+export const getUsers = () => {
+    return api.get('/auth/users')
+}
+
+// 创建用户
+export const createUser = (username, password, email = null) => {
+    return api.post('/auth/users', { username, password, email })
+}
+
+// 更新用户
+export const updateUser = (userId, data) => {
+    return api.put(`/auth/users/${userId}`, null, { params: data })
+}
+
+// 删除用户  
+export const deleteUser = (userId) => {
+    return api.delete(`/auth/users/${userId}`)
+}
+
+// 修改用户密码
+export const changeUserPassword = (userId, newPassword) => {
+    return api.put(`/auth/users/${userId}/password`, null, { params: { new_password: newPassword } })
+}
+
+// ============ 审批 API ============
+
+// 获取待审批列表
+export const getPendingApprovals = (params = {}) => {
+    return api.get('/approvals/', { params })
+}
+
+// 获取审批详情
+export const getApproval = (id) => {
+    return api.get(`/approvals/${id}`)
+}
+
+// 批准审批请求
+export const approveRequest = (id, comment = null) => {
+    return api.post(`/approvals/${id}/approve`, { comment })
+}
+
+// 拒绝审批请求
+export const rejectRequest = (id, comment = null) => {
+    return api.post(`/approvals/${id}/reject`, { comment })
+}
+
+// 批量批准
+export const batchApprove = (approvalIds, comment = null) => {
+    return api.post('/approvals/batch-approve', { approval_ids: approvalIds, comment })
+}
