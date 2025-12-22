@@ -1,8 +1,8 @@
 <template>
   <div class="settings-page">
     <el-tabs v-model="activeTab" class="settings-tabs">
-      <!-- 模型配置 Tab -->
-      <el-tab-pane label="模型配置" name="models">
+      <!-- 视觉模型配置 Tab -->
+      <el-tab-pane label="视觉模型" name="models">
         <div class="tab-content">
           <div v-if="loading" class="loading-state">
             <el-icon class="is-loading" :size="32"><Loading /></el-icon>
@@ -67,6 +67,64 @@
               </el-form-item>
             </div>
             
+            <div class="form-actions">
+              <el-button type="primary" :loading="saving" @click="saveConfig" round>
+                <el-icon><Check /></el-icon>
+                保存配置
+              </el-button>
+              <el-button @click="resetConfig" round>
+                <el-icon><Refresh /></el-icon>
+                重置
+              </el-button>
+            </div>
+          </el-form>
+        </div>
+      </el-tab-pane>
+      
+      <!-- 队列配置 Tab -->
+      <el-tab-pane label="队列配置" name="queue">
+        <div class="tab-content">
+          <div class="form-section">
+            <h3>
+              <el-icon><List /></el-icon>
+              任务队列设置
+            </h3>
+            <el-form :model="queueConfigForm" label-width="140px">
+              <el-form-item label="最大并发数">
+                <el-input-number 
+                  v-model.number="queueConfigForm.queue_max_workers" 
+                  :min="1" 
+                  :max="10"
+                  :step="1"
+                />
+                <div class="form-hint">同时处理的任务数量，建议根据服务器性能设置</div>
+              </el-form-item>
+              <el-form-item label="任务间隔(秒)">
+                <el-input-number 
+                  v-model.number="queueConfigForm.queue_batch_interval" 
+                  :min="0" 
+                  :max="60"
+                  :step="0.5"
+                  :precision="1"
+                />
+                <div class="form-hint">每个任务完成后的等待时间，可以降低 API 调用频率</div>
+              </el-form-item>
+            </el-form>
+            <div class="form-actions">
+              <el-button type="primary" :loading="savingQueue" @click="saveQueueConfig" round>
+                <el-icon><Check /></el-icon>
+                保存队列配置
+              </el-button>
+            </div>
+          </div>
+        </div>
+      </el-tab-pane>
+      
+      <!-- 向量管理 Tab -->
+      <el-tab-pane label="向量管理" name="vectors">
+        <div class="tab-content">
+          <!-- 嵌入模型配置 -->
+          <el-form :model="configForm" label-width="120px" class="config-form">
             <div class="form-section">
               <h3>
                 <el-icon><DataAnalysis /></el-icon>
@@ -124,86 +182,47 @@
                   />
                 </el-form-item>
               </template>
-            </div>
-            
-            <div class="form-actions">
-              <el-button type="primary" :loading="saving" @click="saveConfig" round>
-                <el-icon><Check /></el-icon>
-                保存配置
-              </el-button>
-              <el-button @click="resetConfig" round>
-                <el-icon><Refresh /></el-icon>
-                重置
-              </el-button>
+              
+              <div class="form-actions" style="margin-top: 16px;">
+                <el-button type="primary" :loading="saving" @click="saveConfig" round>
+                  <el-icon><Check /></el-icon>
+                  保存嵌入配置
+                </el-button>
+              </div>
             </div>
           </el-form>
-        </div>
-      </el-tab-pane>
-      
-      <!-- 队列配置 Tab -->
-      <el-tab-pane label="队列配置" name="queue">
-        <div class="tab-content">
+          
+          <el-divider />
+          
+          <!-- 向量状态信息 -->
           <div class="form-section">
             <h3>
-              <el-icon><List /></el-icon>
-              任务队列设置
+              <el-icon><Histogram /></el-icon>
+              向量数据
             </h3>
-            <el-form :model="queueConfigForm" label-width="140px">
-              <el-form-item label="最大并发数">
-                <el-input-number 
-                  v-model.number="queueConfigForm.queue_max_workers" 
-                  :min="1" 
-                  :max="10"
-                  :step="1"
-                />
-                <div class="form-hint">同时处理的任务数量，建议根据服务器性能设置</div>
-              </el-form-item>
-              <el-form-item label="任务间隔(秒)">
-                <el-input-number 
-                  v-model.number="queueConfigForm.queue_batch_interval" 
-                  :min="0" 
-                  :max="60"
-                  :step="0.5"
-                  :precision="1"
-                />
-                <div class="form-hint">每个任务完成后的等待时间，可以降低 API 调用频率</div>
-              </el-form-item>
-            </el-form>
-            <div class="form-actions">
-              <el-button type="primary" :loading="savingQueue" @click="saveQueueConfig" round>
-                <el-icon><Check /></el-icon>
-                保存队列配置
-              </el-button>
-            </div>
-          </div>
-        </div>
-      </el-tab-pane>
-      
-      <!-- 向量管理 Tab -->
-      <el-tab-pane label="向量管理" name="vectors">
-        <div class="tab-content">
-          <div class="vector-info">
-            <div class="info-row">
-              <span class="label">嵌入模式:</span>
-              <span class="value">{{ vectorStatus?.embedding_mode === 'local' ? '本地模型' : '在线 API' }}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">模型:</span>
-              <span class="value">{{ vectorStatus?.embedding_model || '-' }}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">模型维度:</span>
-              <span class="value">{{ vectorStatus?.embedding_dimensions || '-' }}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">数据库维度:</span>
-              <span class="value" :class="{ 'text-error': !vectorStatus?.dimensions_match }">
-                {{ vectorStatus?.db_dimensions || '-' }}
-              </span>
-            </div>
-            <div class="info-row">
-              <span class="label">图片数量:</span>
-              <span class="value">{{ vectorStatus?.image_count || 0 }}</span>
+            <div class="vector-info">
+              <div class="info-row">
+                <span class="label">当前模式:</span>
+                <span class="value">{{ vectorStatus?.embedding_mode === 'local' ? '本地模型' : '在线 API' }}</span>
+              </div>
+              <div class="info-row">
+                <span class="label">当前模型:</span>
+                <span class="value">{{ vectorStatus?.embedding_model || '-' }}</span>
+              </div>
+              <div class="info-row">
+                <span class="label">模型维度:</span>
+                <span class="value">{{ vectorStatus?.embedding_dimensions || '-' }}</span>
+              </div>
+              <div class="info-row">
+                <span class="label">数据库维度:</span>
+                <span class="value" :class="{ 'text-error': !vectorStatus?.dimensions_match }">
+                  {{ vectorStatus?.db_dimensions || '-' }}
+                </span>
+              </div>
+              <div class="info-row">
+                <span class="label">图片数量:</span>
+                <span class="value">{{ vectorStatus?.image_count || 0 }}</span>
+              </div>
             </div>
           </div>
           
@@ -533,7 +552,10 @@ import {
   getAvailableModels,
   getDuplicates,
   calculateHashes,
-  deleteImage
+  deleteImage,
+  installLocalDeps,
+  getInstallStatus,
+  checkLocalDeps
 } from '@/api'
 import TagManager from '@/components/TagManager.vue'
 
@@ -684,11 +706,60 @@ const saveConfig = async () => {
     await updateConfigs(configs)
     ElMessage.success('配置保存成功')
     originalConfig.value = { ...configForm }
+    
+    // 如果选择了本地嵌入模式，自动安装依赖
+    if (configForm.embedding_mode === 'local') {
+      await tryInstallLocalDeps()
+    }
   } catch (e) {
     ElMessage.error('保存配置失败: ' + e.message)
   } finally {
     saving.value = false
   }
+}
+
+// 尝试安装本地嵌入模型依赖
+const tryInstallLocalDeps = async () => {
+  try {
+    // 先检查是否已安装
+    const checkResult = await checkLocalDeps()
+    if (checkResult.installed) {
+      return // 已安装，无需操作
+    }
+    
+    // 触发安装
+    const result = await installLocalDeps()
+    if (result.status === 'started') {
+      ElMessage.info('正在后台安装本地嵌入模型依赖（约 700MB），请稍候...')
+      // 启动轮询检查安装状态
+      pollInstallStatus()
+    } else if (result.status === 'already_installed') {
+      // 已安装
+    } else if (result.status === 'installing') {
+      ElMessage.info('依赖正在安装中，请稍候...')
+    }
+  } catch (e) {
+    console.error('检查/安装本地依赖失败:', e)
+  }
+}
+
+// 轮询安装状态
+const pollInstallStatus = () => {
+  const checkInterval = setInterval(async () => {
+    try {
+      const status = await getInstallStatus()
+      if (!status.is_running) {
+        clearInterval(checkInterval)
+        if (status.success) {
+          ElMessage.success('本地嵌入模型依赖安装成功！')
+        } else if (status.success === false) {
+          ElMessage.error('依赖安装失败：' + status.message)
+        }
+      }
+    } catch (e) {
+      clearInterval(checkInterval)
+    }
+  }, 3000) // 每 3 秒检查一次
 }
 
 // 保存队列配置

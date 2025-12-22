@@ -78,7 +78,8 @@ async def check_local_dependencies():
     }
     
     try:
-        from sentence_transformers import SentenceTransformer
+        import onnxruntime
+        import transformers
         result["installed"] = True
         
         # 尝试加载模型
@@ -93,19 +94,122 @@ async def check_local_dependencies():
             result["error"] = f"模型加载失败: {str(e)}"
             
     except ImportError:
-        result["error"] = "sentence-transformers 未安装。请运行: uv sync --extra local"
+        result["error"] = "ONNX 依赖未安装。请运行: uv sync --extra local"
     
     return result
 
 
-@router.post("/install-local", response_model=Dict[str, str])
-async def install_local_hint():
-    """返回安装本地依赖的说明"""
-    return {
-        "message": "请在终端运行以下命令安装本地嵌入模型依赖",
-        "command": "uv sync --extra local",
-        "size": "约 700MB (包含 PyTorch)"
+# 安装状态
+install_status = {
+    "is_running": False,
+    "success": None,
+    "message": "",
+    "output": ""
+}
+
+
+@router.post("/install-local", response_model=Dict[str, Any])
+async def install_local_dependencies(background_tasks: BackgroundTasks):
+    """安装本地嵌入模型依赖（后台执行 uv sync --extra local）"""
+    global install_status
+    
+    # 检查是否已安装
+    try:
+        import onnxruntime
+        import transformers
+        return {
+            "status": "already_installed",
+            "message": "ONNX 依赖已安装",
+            "installed": True
+        }
+    except ImportError:
+        pass
+    
+    # 检查是否正在安装
+    if install_status["is_running"]:
+        return {
+            "status": "installing",
+            "message": "依赖正在安装中，请稍候...",
+            "installed": False
+        }
+    
+    # 启动后台安装任务
+    install_status = {
+        "is_running": True,
+        "success": None,
+        "message": "正在安装 ONNX Runtime（约 200MB）...",
+        "output": ""
     }
+    
+    background_tasks.add_task(install_local_task)
+    
+    return {
+        "status": "started",
+        "message": "依赖安装已启动，这可能需要几分钟时间...",
+        "installed": False
+    }
+
+
+@router.get("/install-local/status", response_model=Dict[str, Any])
+async def get_install_status():
+    """获取本地依赖安装状态"""
+    # 同时检查是否真正安装成功
+    installed = False
+    try:
+        import onnxruntime
+        import transformers
+        installed = True
+    except ImportError:
+        pass
+    
+    return {
+        **install_status,
+        "installed": installed
+    }
+
+
+async def install_local_task():
+    """后台执行依赖安装"""
+    global install_status
+    import subprocess
+    import sys
+    
+    logger.info("开始安装本地嵌入模型依赖...")
+    
+    try:
+        # 执行 uv sync --extra local
+        result = subprocess.run(
+            ["uv", "sync", "--extra", "local"],
+            capture_output=True,
+            text=True,
+            timeout=600  # 10 分钟超时
+        )
+        
+        if result.returncode == 0:
+            install_status["success"] = True
+            install_status["message"] = "依赖安装成功！"
+            install_status["output"] = result.stdout
+            logger.info("本地嵌入模型依赖安装成功")
+        else:
+            install_status["success"] = False
+            install_status["message"] = f"安装失败: {result.stderr}"
+            install_status["output"] = result.stderr
+            logger.error(f"依赖安装失败: {result.stderr}")
+            
+    except subprocess.TimeoutExpired:
+        install_status["success"] = False
+        install_status["message"] = "安装超时（超过10分钟）"
+        logger.error("依赖安装超时")
+    except FileNotFoundError:
+        install_status["success"] = False
+        install_status["message"] = "找不到 uv 命令，请确保 uv 已安装"
+        logger.error("找不到 uv 命令")
+    except Exception as e:
+        install_status["success"] = False
+        install_status["message"] = f"安装出错: {str(e)}"
+        logger.error(f"依赖安装出错: {str(e)}")
+    finally:
+        install_status["is_running"] = False
 
 
 @router.post("/resize-table", response_model=Dict[str, str])

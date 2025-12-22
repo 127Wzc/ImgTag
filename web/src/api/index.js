@@ -214,6 +214,16 @@ export const clearVectors = () => {
     return api.delete('/vectors/clear')
 }
 
+// 安装本地嵌入模型依赖
+export const installLocalDeps = () => {
+    return api.post('/vectors/install-local')
+}
+
+// 获取本地依赖安装状态
+export const getInstallStatus = () => {
+    return api.get('/vectors/install-local/status')
+}
+
 // ============ 队列管理 API ============
 
 // 获取队列状态

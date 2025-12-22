@@ -38,9 +38,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 本地嵌入模型 (可选，约700MB)
+# 本地嵌入模型 (可选，ONNX 版本，约 200MB)
 local = [
-    "sentence-transformers>=2.2.0",
+    "onnxruntime>=1.16.0",
+    "transformers>=4.35.0",
+    "tokenizers>=0.15.0",
 ]
 
 dev = [
