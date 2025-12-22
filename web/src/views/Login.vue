@@ -29,7 +29,7 @@
             type="password" 
             placeholder="请输入密码"
             required
-            minlength="6"
+            minlength="4"
           />
         </div>
 
