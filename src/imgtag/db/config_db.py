@@ -43,6 +43,7 @@ class ConfigDB:
         # 嵌入模型配置
         "embedding_mode": "local",  # local 或 api
         "embedding_local_model": "BAAI/bge-small-zh-v1.5",  # 本地模型名称
+        "hf_endpoint": "https://hf-mirror.com",  # Hugging Face 镜像站地址
         "embedding_api_base_url": "https://api.openai.com/v1",
         "embedding_api_key": "",
         "embedding_model": "text-embedding-3-small",

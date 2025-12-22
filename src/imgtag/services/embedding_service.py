@@ -55,7 +55,12 @@ class ONNXEmbeddingModel:
                 "或切换到 '在线 API' 模式"
             )
         
-        # 记录加载信息（只在这里记录，不在外层重复）
+        # 设置 Hugging Face 镜像站（用于下载模型）
+        from imgtag.db import config_db
+        hf_endpoint = config_db.get("hf_endpoint", "https://hf-mirror.com")
+        if hf_endpoint:
+            os.environ["HF_ENDPOINT"] = hf_endpoint
+            logger.info(f"使用 Hugging Face 镜像站: {hf_endpoint}")
         
         # 下载/加载分词器
         self.tokenizer = AutoTokenizer.from_pretrained(self.onnx_repo)

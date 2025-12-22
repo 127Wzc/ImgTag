@@ -146,9 +146,15 @@
                     <el-option label="text2vec-base-chinese (~400MB, 768维)" value="shibing624/text2vec-base-chinese" />
                   </el-select>
                 </el-form-item>
-                <el-alert type="info" :closable="false" show-icon>
-                  首次使用会自动下载模型，请耐心等待
-                </el-alert>
+                <el-form-item label="HF 镜像">
+                  <el-input 
+                    v-model="configForm.hf_endpoint" 
+                    placeholder="https://hf-mirror.com"
+                  />
+                  <div class="form-hint">
+                    首次使用需下载模型，国内用户建议使用镜像站 hf-mirror.com
+                  </div>
+                </el-form-item>
               </template>
               
               <!-- API 配置 -->
@@ -616,6 +622,7 @@ const configForm = reactive({
   vision_prompt: '',
   embedding_mode: 'local',
   embedding_local_model: 'BAAI/bge-small-zh-v1.5',
+  hf_endpoint: 'https://hf-mirror.com',
   embedding_api_base_url: '',
   embedding_api_key: '',
   embedding_model: '',
@@ -706,6 +713,9 @@ const saveConfig = async () => {
     await updateConfigs(configs)
     ElMessage.success('配置保存成功')
     originalConfig.value = { ...configForm }
+    
+    // 刷新向量状态，确保嵌入模型配置和向量数据显示一致
+    await fetchVectorStatus()
     
     // 如果选择了本地嵌入模式，自动安装依赖
     if (configForm.embedding_mode === 'local') {
