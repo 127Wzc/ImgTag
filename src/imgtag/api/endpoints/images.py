@@ -154,8 +154,8 @@ async def upload_and_analyze(
         # 读取文件内容
         file_content = await file.read()
         
-        # 保存文件
-        file_path, access_url = await upload_service.save_uploaded_file(
+        # 保存文件（返回真实文件类型）
+        file_path, access_url, file_type = await upload_service.save_uploaded_file(
             file_content, 
             file.filename
         )
@@ -182,7 +182,10 @@ async def upload_and_analyze(
         import hashlib
         file_hash = hashlib.md5(file_content).hexdigest()
         
-        # 1. 插入记录
+        # 计算文件大小 (MB)
+        file_size = round(len(file_content) / (1024 * 1024), 2)
+        
+        # 1. 插入记录（包含真实文件类型和大小）
         new_id = db.insert_image(
             image_url=access_url,
             tags=final_tags,
@@ -190,7 +193,9 @@ async def upload_and_analyze(
             description=final_description,
             source_type="upload",
             file_path=file_path,
-            file_hash=file_hash
+            file_hash=file_hash,
+            file_type=file_type,
+            file_size=file_size
         )
         
         if not new_id:
@@ -278,20 +283,25 @@ async def upload_zip(
                     # 解压文件
                     file_content = zf.read(zip_info.filename)
                     
-                    # 保存文件
-                    file_path, access_url = await upload_service.save_uploaded_file(
+                    # 保存文件（返回真实文件类型）
+                    file_path, access_url, file_type = await upload_service.save_uploaded_file(
                         file_content,
                         filename
                     )
                     
-                    # 插入数据库（零向量，待分析）
+                    # 计算文件大小 (MB)
+                    file_size = round(len(file_content) / (1024 * 1024), 2)
+                    
+                    # 插入数据库（包含真实文件类型和大小）
                     new_id = db.insert_image(
                         image_url=access_url,
                         tags=[],
                         embedding=zero_vector,
                         description="",
                         source_type="local",
-                        file_path=file_path
+                        file_path=file_path,
+                        file_type=file_type,
+                        file_size=file_size
                     )
                     
                     if new_id:

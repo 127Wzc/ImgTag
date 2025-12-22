@@ -226,13 +226,15 @@
         </div>
         
         <!-- 分页 -->
-        <div v-if="total > pageSize" class="pagination-container">
+        <div v-if="total > 0" class="pagination-container">
           <el-pagination
             v-model:current-page="currentPage"
-            :page-size="pageSize"
+            v-model:page-size="pageSize"
             :total="total"
-            layout="prev, pager, next, total"
+            :page-sizes="[20, 40, 60, 80, 100]"
+            layout="total, sizes, prev, pager, next"
             @current-change="handlePageChange"
+            @size-change="handleSizeChange"
           />
         </div>
       </template>
@@ -855,6 +857,12 @@ const handlePageChange = (page) => {
   fetchImages()
 }
 
+const handleSizeChange = (size) => {
+  pageSize.value = size
+  currentPage.value = 1
+  fetchImages()
+}
+
 // 批量选择相关方法
 const handleSelectModeChange = (val) => {
   if (!val) {
@@ -1083,10 +1091,8 @@ const handleBatchDelete = async () => {
     const result = await batchDeleteImages(selectedIds.value)
     ElMessage.success(result.message)
     clearSelection()
-    // 本地删除已删除的图片，避免刷新整个列表
-    images.value = images.value.filter(img => !idsToDelete.has(img.id))
-    // 更新总数
-    totalCount.value -= result.success_count || 0
+    // 刷新列表
+    fetchImages()
   } catch (e) {
     ElMessage.error('批量删除失败: ' + e.message)
   } finally {
@@ -1120,9 +1126,8 @@ const confirmDelete = (image) => {
     try {
       await deleteImage(image.id)
       ElMessage.success('删除成功')
-      // 本地移除已删除的图片
-      images.value = images.value.filter(img => img.id !== image.id)
-      totalCount.value -= 1
+      // 刷新列表
+      fetchImages()
     } catch (e) {
       ElMessage.error('删除失败: ' + e.message)
     }
@@ -1135,9 +1140,8 @@ const handleDeleteInFullscreen = async () => {
     await deleteImage(imageId)
     ElMessage.success('删除成功')
     fullscreenVisible.value = false
-    // 本地移除已删除的图片
-    images.value = images.value.filter(img => img.id !== imageId)
-    totalCount.value -= 1
+    // 刷新列表
+    fetchImages()
   } catch (e) {
     ElMessage.error('删除失败: ' + e.message)
   }

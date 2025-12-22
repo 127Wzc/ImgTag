@@ -65,6 +65,28 @@
                   自定义提示词可以控制标签和描述的输出风格。要求模型返回 JSON 格式：{"tags": [...], "description": "..."}
                 </div>
               </el-form-item>
+              
+              <el-divider />
+              
+              <el-form-item label="处理文件类型">
+                <el-input 
+                  v-model="configForm.vision_allowed_extensions" 
+                  placeholder="jpg,jpeg,png,webp,heic,heif"
+                />
+                <div class="form-hint">
+                  视觉模型只处理这些扩展名的文件，多个扩展名用逗号分隔
+                </div>
+              </el-form-item>
+              <el-form-item label="GIF 转换">
+                <el-switch 
+                  v-model="configForm.vision_convert_gif"
+                  active-text="开启"
+                  inactive-text="关闭"
+                />
+                <div class="form-hint">
+                  开启后会将 GIF 动图的第一帧转换为静态图后分析
+                </div>
+              </el-form-item>
             </div>
             
             <div class="form-actions">
@@ -323,10 +345,31 @@
               </el-form-item>
             </div>
             
+            <el-divider />
+            
+            <div class="form-section">
+              <h3>
+                <el-icon><Upload /></el-icon>
+                上传配置
+              </h3>
+              <el-form-item label="最大文件大小">
+                <el-input-number 
+                  v-model.number="apiConfigForm.max_upload_size" 
+                  :min="1" 
+                  :max="100"
+                  :step="1"
+                />
+                <span style="margin-left: 8px; color: var(--text-secondary);">MB</span>
+                <div class="form-hint">
+                  单个图片文件的最大允许大小，默认 10MB
+                </div>
+              </el-form-item>
+            </div>
+            
             <div class="form-actions">
               <el-button type="primary" :loading="savingApiConfig" @click="saveApiConfig" round>
                 <el-icon><Check /></el-icon>
-                保存外部 API 配置
+                保存配置
               </el-button>
             </div>
           </el-form>
@@ -620,6 +663,8 @@ const configForm = reactive({
   vision_api_key: '',
   vision_model: '',
   vision_prompt: '',
+  vision_allowed_extensions: 'jpg,jpeg,png,webp,bmp',
+  vision_convert_gif: true,
   embedding_mode: 'local',
   embedding_local_model: 'BAAI/bge-small-zh-v1.5',
   hf_endpoint: 'https://hf-mirror.com',
@@ -639,7 +684,8 @@ const savingQueue = ref(false)
 // 外部 API 配置
 const apiConfigForm = reactive({
   base_url: '',
-  external_api_key: ''
+  external_api_key: '',
+  max_upload_size: 10
 })
 const savingApiConfig = ref(false)
 
@@ -658,6 +704,9 @@ const fetchConfig = async () => {
       if (data[key] !== undefined) {
         if (key === 'embedding_dimensions') {
           configForm[key] = parseInt(data[key]) || 1536
+        } else if (key === 'vision_convert_gif') {
+          // 将字符串转换为布尔值
+          configForm[key] = data[key] === 'true' || data[key] === true
         } else {
           configForm[key] = data[key]
         }
@@ -666,6 +715,7 @@ const fetchConfig = async () => {
     // 加载外部 API 配置
     if (data.base_url !== undefined) apiConfigForm.base_url = data.base_url
     if (data.external_api_key !== undefined) apiConfigForm.external_api_key = data.external_api_key
+    if (data.max_upload_size !== undefined) apiConfigForm.max_upload_size = parseInt(data.max_upload_size) || 10
     
     // 加载队列配置
     if (data.queue_max_workers !== undefined) queueConfigForm.queue_max_workers = parseInt(data.queue_max_workers) || 2
@@ -708,7 +758,8 @@ const saveConfig = async () => {
   try {
     const configs = {
       ...configForm,
-      embedding_dimensions: String(configForm.embedding_dimensions)
+      embedding_dimensions: String(configForm.embedding_dimensions),
+      vision_convert_gif: String(configForm.vision_convert_gif)
     }
     await updateConfigs(configs)
     ElMessage.success('配置保存成功')
@@ -792,8 +843,11 @@ const saveQueueConfig = async () => {
 const saveApiConfig = async () => {
   savingApiConfig.value = true
   try {
-    await updateConfigs(apiConfigForm)
-    ElMessage.success('外部 API 配置保存成功')
+    await updateConfigs({
+      ...apiConfigForm,
+      max_upload_size: String(apiConfigForm.max_upload_size)
+    })
+    ElMessage.success('配置保存成功')
   } catch (e) {
     ElMessage.error('保存失败: ' + e.message)
   } finally {

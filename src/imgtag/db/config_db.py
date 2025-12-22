@@ -28,6 +28,8 @@ class ConfigDB:
         "vision_api_base_url": "https://api.openai.com/v1",
         "vision_api_key": "",
         "vision_model": "gpt-4o-mini",
+        "vision_allowed_extensions": "jpg,jpeg,png,webp,bmp",  # 视觉模型处理的文件类型
+        "vision_convert_gif": "true",  # 是否将 GIF 转换为静态图后处理
         "vision_prompt": """请分析这张图片，并按以下格式返回JSON响应:
 {
     "tags": ["标签1", "标签2", "标签3", ...],
@@ -52,6 +54,9 @@ class ConfigDB:
         # 队列配置
         "queue_max_workers": "2",  # 最大并发线程数
         "queue_batch_interval": "1",  # 每个任务完成后的间隔（秒）
+        
+        # 上传配置
+        "max_upload_size": "10",  # 最大上传文件大小 (MB)
     }
     
     def __new__(cls):

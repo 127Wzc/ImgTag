@@ -59,7 +59,7 @@ class UploadService:
         self, 
         file_content: bytes, 
         original_filename: str
-    ) -> Tuple[str, str]:
+    ) -> Tuple[str, str, str]:
         """保存上传的文件
         
         Args:
@@ -67,20 +67,59 @@ class UploadService:
             original_filename: 原始文件名
             
         Returns:
-            Tuple[str, str]: (保存的文件路径, 访问 URL)
+            Tuple[str, str, str]: (保存的文件路径, 访问 URL, 真实文件类型)
         """
         start_time = time.time()
         logger.info(f"保存上传文件: {original_filename}, 大小: {len(file_content)} 字节")
         
         try:
+            # 从配置数据库获取最大上传大小 (MB 转换为字节)
+            from imgtag.db import config_db
+            max_size_mb = config_db.get_int("max_upload_size", 10)
+            max_size_bytes = max_size_mb * 1024 * 1024
+            
             # 验证文件大小
-            if len(file_content) > settings.MAX_UPLOAD_SIZE:
-                raise ValueError(f"文件太大，最大允许 {settings.MAX_UPLOAD_SIZE / 1024 / 1024:.1f}MB")
+            if len(file_content) > max_size_bytes:
+                raise ValueError(f"文件太大，最大允许 {max_size_mb}MB")
             
             # 获取并验证扩展名
             extension = self._get_extension(original_filename)
             if not self._validate_extension(extension):
                 raise ValueError(f"不支持的文件类型: {extension}")
+            
+            # 使用 PIL 检测真实的图片格式
+            real_format = extension  # 默认使用扩展名
+            try:
+                from PIL import Image
+                import io
+                img = Image.open(io.BytesIO(file_content))
+                detected_format = img.format.lower() if img.format else None
+                if detected_format:
+                    # 标准化格式名称（PIL 内部格式 -> 常用扩展名）
+                    format_map = {
+                        'jpeg': 'jpg',
+                        'mpo': 'jpg',       # 多图 JPEG
+                        'png': 'png',
+                        'gif': 'gif',
+                        'webp': 'webp',
+                        'bmp': 'bmp',
+                        'tiff': 'tiff',
+                        'ico': 'ico',
+                        'heif': 'heic',     # HEIF/HEIC 格式
+                        'heic': 'heic',
+                        'avif': 'avif',     # AV1 图像格式
+                        'svg': 'svg',
+                        'psd': 'psd',       # Photoshop
+                        'pcx': 'pcx',
+                        'ppm': 'ppm',
+                        'tga': 'tga',
+                        'dds': 'dds',       # DirectDraw Surface
+                        'icns': 'icns',     # macOS 图标
+                    }
+                    real_format = format_map.get(detected_format, detected_format)
+                    logger.debug(f"PIL 检测到格式: {detected_format} -> {real_format}")
+            except Exception as e:
+                logger.warning(f"PIL 检测图片格式失败: {str(e)}，使用扩展名: {extension}")
             
             # 生成新文件名
             new_filename = self._generate_filename(extension)
@@ -95,9 +134,9 @@ class UploadService:
             
             process_time = time.time() - start_time
             perf_logger.info(f"文件保存耗时: {process_time:.4f}秒")
-            logger.info(f"文件保存成功: {file_path}")
+            logger.info(f"文件保存成功: {file_path}, 格式: {real_format}")
             
-            return str(file_path), access_url
+            return str(file_path), access_url, real_format
             
         except Exception as e:
             logger.error(f"保存文件失败: {str(e)}")

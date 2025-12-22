@@ -261,11 +261,62 @@ class TaskQueueService:
                 )
                 
             else:
+                # 获取文件扩展名
+                import os
+                file_ext = ""
+                if image_url.startswith("/uploads/"):
+                    file_ext = os.path.splitext(image_url)[1].lower().lstrip(".")
+                else:
+                    # 从 URL 尝试获取扩展名
+                    url_path = image_url.split("?")[0]
+                    file_ext = os.path.splitext(url_path)[1].lower().lstrip(".")
+                
+                # 检查是否在允许处理的文件类型中
+                allowed_extensions = config_db.get("vision_allowed_extensions", "jpg,jpeg,png,webp,bmp")
+                allowed_list = [ext.strip().lower() for ext in allowed_extensions.split(",")]
+                convert_gif = config_db.get("vision_convert_gif", "true").lower() == "true"
+                
+                # GIF 特殊处理
+                if file_ext == "gif":
+                    if not convert_gif:
+                        logger.info(f"图片 {task.image_id} 是 GIF 格式，跳过分析")
+                        # 只生成空向量，不分析
+                        embedding = await embedding_service.get_embedding("")
+                        db.update_image(image_id=task.image_id, embedding=embedding)
+                        task.status = TaskStatus.COMPLETED
+                        task.completed_at = datetime.now()
+                        try:
+                            db.update_task_status(task.id, "completed", result={"image_id": task.image_id, "skipped": True, "reason": "GIF not converted"})
+                        except Exception as e:
+                            logger.error(f"更新任务 {task.id} 状态失败: {str(e)}")
+                        with self._lock:
+                            if task.image_id in self._processing:
+                                del self._processing[task.image_id]
+                            self._completed.append(task)
+                        return
+                    # GIF 转换为 PNG 后处理，稍后在读取文件时处理
+                    
+                elif file_ext and file_ext not in allowed_list:
+                    logger.info(f"图片 {task.image_id} 格式 {file_ext} 不在允许列表中，跳过分析")
+                    # 生成空向量
+                    embedding = await embedding_service.get_embedding("")
+                    db.update_image(image_id=task.image_id, embedding=embedding)
+                    task.status = TaskStatus.COMPLETED
+                    task.completed_at = datetime.now()
+                    try:
+                        db.update_task_status(task.id, "completed", result={"image_id": task.image_id, "skipped": True, "reason": f"Extension {file_ext} not allowed"})
+                    except Exception as e:
+                        logger.error(f"更新任务 {task.id} 状态失败: {str(e)}")
+                    with self._lock:
+                        if task.image_id in self._processing:
+                            del self._processing[task.image_id]
+                        self._completed.append(task)
+                    return
+                
                 # 分析图片
                 if image_url.startswith("/uploads/"):
                     # 本地文件，需要读取文件内容
                     from imgtag.core.config import settings
-                    import os
                     
                     file_path = image.get("file_path") or os.path.join(
                         settings.UPLOAD_DIR, 
@@ -276,8 +327,32 @@ class TaskQueueService:
                         with open(file_path, "rb") as f:
                             file_content = f.read()
                         
-                        from imgtag.services.upload_service import UploadService
-                        mime_type = UploadService().get_mime_type(file_path)
+                        # GIF 转换为 PNG
+                        if file_ext == "gif" and convert_gif:
+                            try:
+                                from PIL import Image
+                                import io
+                                img = Image.open(io.BytesIO(file_content))
+                                # 取第一帧
+                                if hasattr(img, 'n_frames') and img.n_frames > 1:
+                                    img.seek(0)
+                                # 转换为 RGB（去掉透明通道）
+                                if img.mode in ('RGBA', 'LA', 'P'):
+                                    img = img.convert('RGB')
+                                # 保存为 PNG
+                                output = io.BytesIO()
+                                img.save(output, format='PNG')
+                                file_content = output.getvalue()
+                                mime_type = "image/png"
+                                logger.info(f"图片 {task.image_id} GIF 已转换为 PNG")
+                            except Exception as e:
+                                logger.warning(f"GIF 转换失败: {str(e)}，使用原始格式")
+                                from imgtag.services.upload_service import UploadService
+                                mime_type = UploadService().get_mime_type(file_path)
+                        else:
+                            from imgtag.services.upload_service import UploadService
+                            mime_type = UploadService().get_mime_type(file_path)
+                        
                         analysis = await vision_service.analyze_image_base64(file_content, mime_type)
                     else:
                         raise Exception(f"文件不存在: {file_path}")

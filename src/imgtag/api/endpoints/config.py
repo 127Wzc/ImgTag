@@ -72,8 +72,8 @@ async def update_configs(request: ConfigUpdate):
         # 如果更新了嵌入模型相关配置，重载模型以应用新设置
         embedding_related_keys = ["embedding_mode", "embedding_local_model", "hf_endpoint"]
         if any(key in filtered_configs for key in embedding_related_keys):
-            from imgtag.services import embedding_service
-            embedding_service.EmbeddingService.reload_model()
+            from imgtag.services.embedding_service import EmbeddingService
+            EmbeddingService.reload_model()
             logger.info("嵌入模型配置已更新，已重载模型")
         
         return {"message": f"成功更新 {len(filtered_configs)} 个配置项"}

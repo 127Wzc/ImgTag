@@ -114,16 +114,38 @@ class PGVectorDB:
                 CREATE TABLE public.images (
                     id SERIAL PRIMARY KEY,
                     image_url TEXT NOT NULL,
+                    file_type VARCHAR(20),
+                    file_size DECIMAL(10,2),
                     tags TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
-                    embedding vector({vector_dim}) NOT NULL,
                     description TEXT,
                     source_type VARCHAR(20) DEFAULT 'url',
                     file_path TEXT,
                     original_url TEXT,
                     file_hash VARCHAR(64),
+                    uploaded_by INTEGER,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    embedding vector({vector_dim}) NOT NULL
                 );
+                """)
+                
+                # 添加列注释
+                cursor.execute("""
+                COMMENT ON TABLE public.images IS '图片信息表';
+                COMMENT ON COLUMN public.images.id IS '主键ID';
+                COMMENT ON COLUMN public.images.image_url IS '图片访问URL';
+                COMMENT ON COLUMN public.images.file_type IS '文件类型(jpg/png/gif等)';
+                COMMENT ON COLUMN public.images.file_size IS '文件大小(MB)';
+                COMMENT ON COLUMN public.images.tags IS '标签数组';
+                COMMENT ON COLUMN public.images.description IS '图片描述';
+                COMMENT ON COLUMN public.images.source_type IS '来源类型(url/upload/local)';
+                COMMENT ON COLUMN public.images.file_path IS '本地文件路径';
+                COMMENT ON COLUMN public.images.original_url IS '原始URL';
+                COMMENT ON COLUMN public.images.file_hash IS '文件MD5哈希';
+                COMMENT ON COLUMN public.images.uploaded_by IS '上传用户ID';
+                COMMENT ON COLUMN public.images.created_at IS '创建时间';
+                COMMENT ON COLUMN public.images.updated_at IS '更新时间';
+                COMMENT ON COLUMN public.images.embedding IS '向量嵌入';
                 """)
                 
                 # 创建索引
@@ -387,6 +409,8 @@ class PGVectorDB:
             ("updated_at", "TIMESTAMP WITH TIME ZONE DEFAULT NOW()"),
             ("uploaded_by", "INTEGER"),  # 逻辑外键，不加约束
             ("file_hash", "VARCHAR(64)"),  # 文件 MD5 哈希，用于去重
+            ("file_type", "VARCHAR(20)"),  # 文件类型，如 jpg、png、gif
+            ("file_size", "DECIMAL(10,2)"),  # 文件大小 (MB)
         ]
         
         for col_name, col_type in images_columns:
@@ -481,7 +505,9 @@ class PGVectorDB:
         file_path: str = None,
         original_url: str = None,
         tag_source: str = "ai",
-        file_hash: str = None
+        file_hash: str = None,
+        file_type: str = None,
+        file_size: float = None
     ) -> Optional[int]:
         """插入一条图像记录"""
         start_time = time.time()
@@ -490,10 +516,18 @@ class PGVectorDB:
         try:
             vector_str = ','.join(map(str, embedding))
             
+            # 自动从 URL 截取文件类型
+            if not file_type:
+                import os
+                url_path = image_url.split("?")[0]  # 去掉查询参数
+                file_type = os.path.splitext(url_path)[1].lower().lstrip(".")
+                if not file_type:
+                    file_type = "unknown"
+            
             # 不再存储 tags 到 images 表
             query = """
-            INSERT INTO images (image_url, embedding, description, source_type, file_path, original_url, file_hash)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO images (image_url, embedding, description, source_type, file_path, original_url, file_hash, file_type, file_size)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id;
             """
             
@@ -501,7 +535,7 @@ class PGVectorDB:
                 with conn.cursor() as cursor:
                     cursor.execute(query, (
                         image_url, f"[{vector_str}]", description,
-                        source_type, file_path, original_url, file_hash
+                        source_type, file_path, original_url, file_hash, file_type, file_size
                     ))
                     new_id = cursor.fetchone()[0]
                 conn.commit()
