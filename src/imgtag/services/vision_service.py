@@ -104,12 +104,20 @@ class VisionService:
             
             # DEBUG: 打印响应元数据
             logger.debug(f"视觉模型 API 响应:")
-            logger.debug(f"  - Model: {response.model}")
+            logger.debug(f"  - Model: {getattr(response, 'model', None)}")
+            
+            # 检查响应是否有效
+            if not response or not response.choices or len(response.choices) == 0:
+                raise ValueError(f"视觉模型 API 返回空响应，请检查 API 配置和模型名称是否正确")
+            
             logger.debug(f"  - Finish Reason: {response.choices[0].finish_reason}")
             if response.usage:
                 logger.debug(f"  - Usage: prompt_tokens={response.usage.prompt_tokens}, completion_tokens={response.usage.completion_tokens}, total={response.usage.total_tokens}")
             
             content = response.choices[0].message.content
+            if not content:
+                raise ValueError("视觉模型返回内容为空")
+                
             return self._parse_response(content)
             
         except Exception as e:
@@ -154,12 +162,20 @@ class VisionService:
             
             # DEBUG: 打印响应元数据
             logger.debug(f"视觉模型 API 响应:")
-            logger.debug(f"  - Model: {response.model}")
+            logger.debug(f"  - Model: {getattr(response, 'model', None)}")
+            
+            # 检查响应是否有效
+            if not response or not response.choices or len(response.choices) == 0:
+                raise ValueError(f"视觉模型 API 返回空响应，请检查 API 配置和模型名称是否正确")
+            
             logger.debug(f"  - Finish Reason: {response.choices[0].finish_reason}")
             if response.usage:
                 logger.debug(f"  - Usage: prompt_tokens={response.usage.prompt_tokens}, completion_tokens={response.usage.completion_tokens}, total={response.usage.total_tokens}")
             
             content = response.choices[0].message.content
+            if not content:
+                raise ValueError("视觉模型返回内容为空")
+                
             return self._parse_response(content)
             
         except Exception as e:
