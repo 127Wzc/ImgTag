@@ -15,7 +15,7 @@ export const useAppStore = defineStore('app', () => {
     const pageSize = ref(20)
 
     // 主题管理
-    const theme = ref(localStorage.getItem('theme') || 'light') // light, dark
+    const theme = ref(localStorage.getItem('theme') || 'dark') // light, dark
 
     // 初始化主题
     function initTheme() {
@@ -23,9 +23,8 @@ export const useAppStore = defineStore('app', () => {
         if (savedTheme) {
             theme.value = savedTheme
         } else {
-            // 如果没有保存的主题，使用系统偏好
-            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-            theme.value = prefersDark ? 'dark' : 'light'
+            // 没有保存的主题，默认使用暗色
+            theme.value = 'dark'
         }
         applyTheme(theme.value)
     }

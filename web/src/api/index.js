@@ -352,6 +352,11 @@ export const cleanupTasks = (days = 7) => {
 
 // ============ 认证 API ============
 
+// 获取公开配置（无需认证）
+export const getPublicConfig = () => {
+    return api.get('/auth/public-config')
+}
+
 // 用户登录
 export const login = (username, password) => {
     return api.post('/auth/login', { username, password })

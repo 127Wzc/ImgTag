@@ -35,6 +35,7 @@
 - 管理员审批新用户
 - 角色权限控制（admin/user）
 - **用户管理界面**：管理员可创建/禁用/删除用户、修改密码
+- **个人中心**：修改密码、生成个人 API 密钥
 - 默认管理员账号：`admin` / `admin`
 
 **权限矩阵：**
@@ -101,7 +102,7 @@ image_tags          # 图片-标签关联表（核心）
 ├── image_id, tag_id, source(ai/user), added_by, added_at
 
 users               # 用户表
-├── id, username, password_hash, role, status
+├── id, username, password_hash, role, status, api_key
 
 collections         # 收藏夹表
 ├── id, name, user_id, parent_id
@@ -129,9 +130,7 @@ cd ImgTag
 # 启动服务
 docker-compose up -d
 
-# 访问
-# 前端: http://localhost:5173
-# API:  http://localhost:8000/docs
+# 访问：http://localhost:8000（单端口同时提供 API 和前端）
 ```
 
 ### 方式二：本地开发
@@ -208,31 +207,23 @@ pnpm dev
 
 ---
 
-## 🔧 API 接口
+## 🔧 内部 API
 
-| 端点 | 方法 | 说明 |
-|------|-----|------|
-| `/api/v1/images/upload` | POST | 上传图片 |
-| `/api/v1/images/upload-zip` | POST | 上传 ZIP |
-| `/api/v1/images/{id}` | GET/PUT/DELETE | 图片 CRUD |
-| `/api/v1/images/batch/delete` | POST | 批量删除 |
-| `/api/v1/images/batch/update-tags` | POST | 批量更新标签 |
-| `/api/v1/search/similar` | POST | 语义搜索 |
-| `/api/v1/collections/` | GET/POST | 收藏夹管理 |
-| `/api/v1/collections/{id}/random` | GET | 随机图片 |
-| `/api/v1/tags/` | GET | 标签列表 |
-| `/api/v1/tasks/` | GET | 任务列表 |
-| `/api/v1/queue/add` | POST | 添加到分析队列 |
-| `/api/v1/auth/login` | POST | 用户登录 |
-| `/api/v1/auth/register` | POST | 用户注册 |
-| `/api/v1/auth/users` | GET/POST/PUT/DELETE | 用户管理（管理员） |
-| `/api/v1/approvals/` | GET | 待审批用户列表 |
-| `/api/v1/system/export` | GET | 导出数据库（管理员） |
-| `/api/v1/system/import` | POST | 导入数据库（管理员） |
-| `/api/v1/system/duplicates` | GET | 查找重复图片（管理员） |
-| `/api/v1/system/models` | GET | 获取可用模型列表 |
+内部 API 使用 JWT 认证（Web 界面自动处理），供前端页面调用。
 
-完整文档：http://localhost:8000/docs
+### 主要端点
+
+| 模块 | 路径前缀 | 说明 |
+|------|---------|------|
+| 图片管理 | `/api/v1/images` | 上传、CRUD、批量操作 |
+| 搜索 | `/api/v1/search` | 语义相似度搜索 |
+| 收藏夹 | `/api/v1/collections` | 收藏夹管理 |
+| 标签 | `/api/v1/tags` | 标签列表、管理 |
+| 任务队列 | `/api/v1/queue` | 分析任务管理 |
+| 认证 | `/api/v1/auth` | 登录、注册、用户管理 |
+| 系统 | `/api/v1/system` | 备份、导入、重复检测 |
+
+📖 **完整文档**：http://localhost:8000/docs
 
 ---
 
@@ -273,7 +264,7 @@ curl "http://localhost:8000/api/v1/search?api_key=YOUR_KEY&keyword=%E5%88%9D%E9%
 
 ---
 
-## �📦 技术栈
+## 📦 技术栈
 
 **后端**：
 - FastAPI - Web 框架

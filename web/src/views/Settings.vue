@@ -482,6 +482,13 @@
       <!-- 用户管理 Tab -->
       <el-tab-pane label="用户管理" name="users">
         <div class="tab-content">
+          <el-form label-width="100px" class="register-config" style="margin-bottom: 16px;">
+            <el-form-item label="允许注册">
+              <el-switch v-model="allowRegister" @change="saveAllowRegister" />
+              <span class="form-hint" style="margin-left: 12px;">关闭后登录页面不显示注册入口</span>
+            </el-form-item>
+          </el-form>
+          
           <div class="user-actions">
             <el-button type="primary" round @click="showCreateUserDialog = true">
               <el-icon><Plus /></el-icon>
@@ -702,6 +709,9 @@ const apiConfigForm = reactive({
 })
 const savingApiConfig = ref(false)
 
+// 注册开关（独立配置）
+const allowRegister = ref(false)
+
 const originalConfig = ref({})
 
 const rebuildProgress = computed(() => {
@@ -729,6 +739,9 @@ const fetchConfig = async () => {
     if (data.base_url !== undefined) apiConfigForm.base_url = data.base_url
     if (data.external_api_key !== undefined) apiConfigForm.external_api_key = data.external_api_key
     if (data.max_upload_size !== undefined) apiConfigForm.max_upload_size = parseInt(data.max_upload_size) || 10
+    
+    // 加载注册开关
+    if (data.allow_register !== undefined) allowRegister.value = data.allow_register === 'true' || data.allow_register === true
     
     // 加载队列配置
     if (data.queue_max_workers !== undefined) queueConfigForm.queue_max_workers = parseInt(data.queue_max_workers) || 2
@@ -858,7 +871,8 @@ const saveApiConfig = async () => {
   savingApiConfig.value = true
   try {
     await updateConfigs({
-      ...apiConfigForm,
+      base_url: apiConfigForm.base_url,
+      external_api_key: apiConfigForm.external_api_key,
       max_upload_size: String(apiConfigForm.max_upload_size)
     })
     ElMessage.success('配置保存成功')
@@ -866,6 +880,20 @@ const saveApiConfig = async () => {
     ElMessage.error('保存失败: ' + e.message)
   } finally {
     savingApiConfig.value = false
+  }
+}
+
+// 保存注册开关（独立保存）
+const saveAllowRegister = async () => {
+  try {
+    await updateConfigs({
+      allow_register: String(allowRegister.value)
+    })
+    ElMessage.success('注册设置已更新')
+  } catch (e) {
+    ElMessage.error('保存失败: ' + e.message)
+    // 恢复原值
+    allowRegister.value = !allowRegister.value
   }
 }
 

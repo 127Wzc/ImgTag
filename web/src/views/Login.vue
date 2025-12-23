@@ -6,7 +6,21 @@
         <p>图像标签管理系统</p>
       </div>
 
-
+      <!-- 登录/注册标签页 -->
+      <div v-if="allowRegister" class="login-tabs">
+        <button 
+          :class="['tab', { active: activeTab === 'login' }]"
+          @click="activeTab = 'login'"
+        >
+          登录
+        </button>
+        <button 
+          :class="['tab', { active: activeTab === 'register' }]"
+          @click="activeTab = 'register'"
+        >
+          注册
+        </button>
+      </div>
 
       <form @submit.prevent="handleSubmit" class="login-form">
         <div class="form-group">
@@ -20,7 +34,14 @@
           />
         </div>
 
-
+        <div v-if="activeTab === 'register'" class="form-group">
+          <label>邮箱（可选）</label>
+          <input 
+            v-model="form.email" 
+            type="email" 
+            placeholder="请输入邮箱"
+          />
+        </div>
 
         <div class="form-group">
           <label>密码</label>
@@ -33,14 +54,23 @@
           />
         </div>
 
-
+        <div v-if="activeTab === 'register'" class="form-group">
+          <label>确认密码</label>
+          <input 
+            v-model="form.confirmPassword" 
+            type="password" 
+            placeholder="请再次输入密码"
+            required
+            minlength="4"
+          />
+        </div>
 
         <div v-if="error" class="error-message">
           {{ error }}
         </div>
 
         <button type="submit" class="submit-btn" :disabled="isLoading">
-          {{ isLoading ? '登录中...' : '登录' }}
+          {{ isLoading ? (activeTab === 'login' ? '登录中...' : '注册中...') : (activeTab === 'login' ? '登录' : '注册') }}
         </button>
       </form>
 
@@ -52,10 +82,10 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
-import { register } from '@/api'
+import { register, getPublicConfig } from '@/api'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -63,12 +93,23 @@ const authStore = useAuthStore()
 const activeTab = ref('login')
 const isLoading = ref(false)
 const error = ref(null)
+const allowRegister = ref(false)
 
 const form = reactive({
   username: '',
   email: '',
   password: '',
   confirmPassword: ''
+})
+
+onMounted(async () => {
+  try {
+    const config = await getPublicConfig()
+    allowRegister.value = config.allow_register === true
+  } catch (e) {
+    console.error('获取配置失败:', e)
+    allowRegister.value = false
+  }
 })
 
 async function handleSubmit() {

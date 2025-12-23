@@ -85,9 +85,26 @@ async def login(data: UserLogin):
     }
 
 
+@router.get("/public-config")
+async def get_public_config():
+    """获取公开配置（无需认证）"""
+    from imgtag.db import config_db
+    
+    return {
+        "allow_register": config_db.get("allow_register", "false").lower() == "true"
+    }
+
+
 @router.post("/register", response_model=Dict[str, Any])
 async def register(data: UserCreate):
     """用户注册"""
+    from imgtag.db import config_db
+    
+    # 检查是否允许注册
+    allow_register = config_db.get("allow_register", "false").lower() == "true"
+    if not allow_register:
+        raise HTTPException(status_code=403, detail="注册功能已关闭")
+    
     user_id = auth_service.register_user(
         data.username, 
         data.password, 
