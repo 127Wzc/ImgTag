@@ -8,7 +8,9 @@
 
 import asyncio
 from typing import Dict, Any
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
+
+from imgtag.api.endpoints.auth import require_admin
 
 from imgtag.db import db, config_db
 from imgtag.services import embedding_service
@@ -67,8 +69,8 @@ async def get_vector_status():
 
 
 @router.get("/check-local", response_model=Dict[str, Any])
-async def check_local_dependencies():
-    """检查本地嵌入模型依赖状态"""
+async def check_local_dependencies(admin: Dict = Depends(require_admin)):
+    """检查本地嵌入模型依赖状态（需管理员权限）"""
     result = {
         "installed": False,
         "model_loaded": False,
@@ -109,8 +111,8 @@ install_status = {
 
 
 @router.post("/install-local", response_model=Dict[str, Any])
-async def install_local_dependencies(background_tasks: BackgroundTasks):
-    """安装本地嵌入模型依赖（后台执行 uv sync --extra local）"""
+async def install_local_dependencies(background_tasks: BackgroundTasks, admin: Dict = Depends(require_admin)):
+    """安装本地嵌入模型依赖（需管理员权限）"""
     global install_status
     
     # 检查是否已安装
@@ -213,8 +215,8 @@ async def install_local_task():
 
 
 @router.post("/resize-table", response_model=Dict[str, str])
-async def resize_vector_table():
-    """重建向量表以匹配当前配置的维度"""
+async def resize_vector_table(admin: Dict = Depends(require_admin)):
+    """重建向量表以匹配当前配置的维度（需管理员权限）"""
     try:
         mode = config_db.get("embedding_mode", "local")
         
@@ -268,8 +270,8 @@ async def resize_vector_table():
 
 
 @router.post("/rebuild", response_model=Dict[str, str])
-async def start_rebuild(background_tasks: BackgroundTasks):
-    """启动向量数据重建任务（自动调整维度）"""
+async def start_rebuild(background_tasks: BackgroundTasks, admin: Dict = Depends(require_admin)):
+    """启动向量数据重建任务（需管理员权限）"""
     global rebuild_status
     
     if rebuild_status["is_running"]:
@@ -326,8 +328,8 @@ async def get_rebuild_status():
 
 
 @router.delete("/clear", response_model=Dict[str, str])
-async def clear_vectors():
-    """清空所有向量数据（将向量设为零向量）"""
+async def clear_vectors(admin: Dict = Depends(require_admin)):
+    """清空所有向量数据（需管理员权限）"""
     try:
         dimensions = get_db_vector_dimensions()
         zero_vector = [0.0] * dimensions

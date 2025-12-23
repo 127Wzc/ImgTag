@@ -7,8 +7,10 @@
 """
 
 from typing import Dict, Any, List
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from pydantic import BaseModel
+
+from imgtag.api.endpoints.auth import get_current_user
 
 from imgtag.services.task_queue import task_queue
 from imgtag.db import config_db
@@ -36,8 +38,8 @@ async def get_queue_status():
 
 
 @router.post("/add", response_model=Dict[str, Any])
-async def add_tasks(request: AddTasksRequest, background_tasks: BackgroundTasks):
-    """添加任务到队列"""
+async def add_tasks(request: AddTasksRequest, background_tasks: BackgroundTasks, user: Dict = Depends(get_current_user)):
+    """添加任务到队列（需登录）"""
     if not request.image_ids:
         raise HTTPException(status_code=400, detail="图片 ID 列表不能为空")
     
@@ -55,8 +57,8 @@ async def add_tasks(request: AddTasksRequest, background_tasks: BackgroundTasks)
 
 
 @router.post("/start", response_model=Dict[str, str])
-async def start_queue(background_tasks: BackgroundTasks):
-    """启动队列处理"""
+async def start_queue(background_tasks: BackgroundTasks, user: Dict = Depends(get_current_user)):
+    """启动队列处理（需登录）"""
     if task_queue._running:
         return {"message": "队列已在运行中"}
     
@@ -65,29 +67,29 @@ async def start_queue(background_tasks: BackgroundTasks):
 
 
 @router.post("/stop", response_model=Dict[str, str])
-async def stop_queue():
-    """停止队列处理"""
+async def stop_queue(user: Dict = Depends(get_current_user)):
+    """停止队列处理（需登录）"""
     task_queue.stop_processing()
     return {"message": "队列处理已停止"}
 
 
 @router.delete("/clear", response_model=Dict[str, str])
-async def clear_queue():
-    """清空待处理队列"""
+async def clear_queue(user: Dict = Depends(get_current_user)):
+    """清空待处理队列（需登录）"""
     task_queue.clear_queue()
     return {"message": "队列已清空"}
 
 
 @router.delete("/clear-completed", response_model=Dict[str, str])
-async def clear_completed():
-    """清空已完成列表"""
+async def clear_completed(user: Dict = Depends(get_current_user)):
+    """清空已完成列表（需登录）"""
     task_queue.clear_completed()
     return {"message": "已完成列表已清空"}
 
 
 @router.put("/config", response_model=Dict[str, Any])
-async def config_workers(request: ConfigWorkerRequest):
-    """配置最大工作线程数"""
+async def config_workers(request: ConfigWorkerRequest, user: Dict = Depends(get_current_user)):
+    """配置最大工作线程数（需登录）"""
     if request.max_workers < 1:
         raise HTTPException(status_code=400, detail="最大线程数必须大于 0")
     if request.max_workers > 10:
@@ -102,8 +104,8 @@ async def config_workers(request: ConfigWorkerRequest):
 
 
 @router.post("/add-untagged", response_model=Dict[str, Any])
-async def add_untagged_images(background_tasks: BackgroundTasks):
-    """添加所有未打标签的图片到队列"""
+async def add_untagged_images(background_tasks: BackgroundTasks, user: Dict = Depends(get_current_user)):
+    """添加所有未打标签的图片到队列（需登录）"""
     from imgtag.db import db
     
     try:

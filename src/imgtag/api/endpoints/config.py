@@ -7,8 +7,10 @@
 """
 
 from typing import Dict, Any
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+
+from imgtag.api.endpoints.auth import require_admin
 
 from imgtag.db import config_db
 from imgtag.core.logging_config import get_logger
@@ -24,8 +26,8 @@ class ConfigUpdate(BaseModel):
 
 
 @router.get("/", response_model=Dict[str, Any])
-async def get_all_config():
-    """获取所有配置（密钥会被遮挡）"""
+async def get_all_config(admin: Dict = Depends(require_admin)):
+    """获取所有配置（密钥会被遮挡，需管理员权限）"""
     logger.info("获取所有配置")
     try:
         return config_db.get_all(include_secrets=False)
@@ -35,8 +37,8 @@ async def get_all_config():
 
 
 @router.get("/{key}")
-async def get_config(key: str):
-    """获取单个配置项"""
+async def get_config(key: str, admin: Dict = Depends(require_admin)):
+    """获取单个配置项（需管理员权限）"""
     logger.info(f"获取配置: {key}")
     value = config_db.get(key)
     if value is None:
@@ -50,8 +52,8 @@ async def get_config(key: str):
 
 
 @router.put("/", response_model=Dict[str, str])
-async def update_configs(request: ConfigUpdate):
-    """批量更新配置"""
+async def update_configs(request: ConfigUpdate, admin: Dict = Depends(require_admin)):
+    """批量更新配置（需管理员权限）"""
     logger.info(f"更新配置: {list(request.configs.keys())}")
     
     try:
@@ -83,8 +85,8 @@ async def update_configs(request: ConfigUpdate):
 
 
 @router.put("/{key}")
-async def update_single_config(key: str, value: str):
-    """更新单个配置项"""
+async def update_single_config(key: str, value: str, admin: Dict = Depends(require_admin)):
+    """更新单个配置项（需管理员权限）"""
     logger.info(f"更新单个配置: {key}")
     
     try:

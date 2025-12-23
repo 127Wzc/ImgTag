@@ -8,7 +8,9 @@
 
 from typing import List, Dict, Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
+
+from imgtag.api.endpoints.auth import require_admin
 
 from imgtag.db import db
 from imgtag.schemas import (
@@ -33,8 +35,8 @@ async def get_tags(
 
 
 @router.post("/sync", response_model=Dict[str, Any])
-async def sync_tags():
-    """同步标签（从图片数据重建标签表）"""
+async def sync_tags(admin: Dict = Depends(require_admin)):
+    """同步标签（需管理员权限）"""
     count = db.sync_tags()
     return {
         "message": f"标签同步完成，更新了 {count} 个标签",
@@ -43,8 +45,8 @@ async def sync_tags():
 
 
 @router.put("/{tag_name}", response_model=Dict[str, Any])
-async def rename_tag(tag_name: str, tag_update: TagUpdate):
-    """重命名标签（会更新所有包含该标签的图片）"""
+async def rename_tag(tag_name: str, tag_update: TagUpdate, admin: Dict = Depends(require_admin)):
+    """重命名标签（需管理员权限）"""
     if not tag_update.name:
         raise HTTPException(status_code=400, detail="新标签名不能为空")
         
@@ -60,8 +62,8 @@ async def rename_tag(tag_name: str, tag_update: TagUpdate):
 
 
 @router.delete("/{tag_name}", response_model=Dict[str, Any])
-async def delete_tag(tag_name: str):
-    """删除标签（从所有图片中移除该标签）"""
+async def delete_tag(tag_name: str, admin: Dict = Depends(require_admin)):
+    """删除标签（需管理员权限）"""
     success = db.delete_tag(tag_name)
     if not success:
         raise HTTPException(status_code=500, detail="删除标签失败")

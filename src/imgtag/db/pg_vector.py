@@ -11,6 +11,7 @@ import psycopg
 from psycopg_pool import ConnectionPool
 from psycopg.types.json import Json
 import time
+import os
 from typing import List, Optional, Dict, Any
 
 from imgtag.core.logging_config import get_logger, get_perf_logger
@@ -18,6 +19,13 @@ from imgtag.core.config import settings
 
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
+
+# Schema 版本号 - 每次数据库结构变化时更新此版本号
+# 格式：主版本.次版本.补丁 (major.minor.patch)
+# - major: 不兼容的结构变化
+# - minor: 新增表/字段
+# - patch: 索引优化等小改动
+SCHEMA_VERSION = "1.1.0"
 
 
 class PGVectorDB:
@@ -75,9 +83,41 @@ class PGVectorDB:
         return PGVectorDB._pool.connection()
     
     def _init_tables(self, cursor):
-        """初始化数据库表"""
+        """初始化数据库表（支持智能跳过检查）"""
         start_time = time.time()
-        logger.info("检查数据库表结构")
+        
+        # 检查是否跳过数据库结构检查
+        skip_check = os.environ.get("DB_SKIP_CHECK", "").lower() in ("true", "1", "yes")
+        if skip_check:
+            logger.info("DB_SKIP_CHECK=true，跳过数据库结构检查")
+            return
+        
+        # 检查 schema_meta 表是否存在，用于存储版本信息
+        cursor.execute("""
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_schema = 'public' AND table_name = 'schema_meta'
+        );
+        """)
+        schema_meta_exists = cursor.fetchone()[0]
+        
+        stored_version = None
+        if schema_meta_exists:
+            cursor.execute("SELECT value FROM schema_meta WHERE key = 'schema_version';")
+            result = cursor.fetchone()
+            stored_version = result[0] if result else None
+        
+        # 版本匹配，跳过完整检查但运行轻量验证
+        if stored_version == SCHEMA_VERSION:
+            logger.info(f"数据库结构版本匹配 (v{SCHEMA_VERSION})，执行轻量验证")
+            self._quick_validate_schema(cursor)
+            perf_logger.info(f"数据库轻量验证耗时: {time.time() - start_time:.4f}秒")
+            return
+        
+        if stored_version:
+            logger.info(f"数据库结构版本变化: {stored_version} -> {SCHEMA_VERSION}，执行完整检查")
+        else:
+            logger.info(f"首次运行或无版本记录，执行完整数据库结构检查 (v{SCHEMA_VERSION})")
         
         try:
             # 检查 vector 扩展
@@ -116,7 +156,6 @@ class PGVectorDB:
                     image_url TEXT NOT NULL,
                     file_type VARCHAR(20),
                     file_size DECIMAL(10,2),
-                    tags TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
                     description TEXT,
                     source_type VARCHAR(20) DEFAULT 'url',
                     file_path TEXT,
@@ -136,7 +175,6 @@ class PGVectorDB:
                 COMMENT ON COLUMN public.images.image_url IS '图片访问URL';
                 COMMENT ON COLUMN public.images.file_type IS '文件类型(jpg/png/gif等)';
                 COMMENT ON COLUMN public.images.file_size IS '文件大小(MB)';
-                COMMENT ON COLUMN public.images.tags IS '标签数组';
                 COMMENT ON COLUMN public.images.description IS '图片描述';
                 COMMENT ON COLUMN public.images.source_type IS '来源类型(url/upload/local)';
                 COMMENT ON COLUMN public.images.file_path IS '本地文件路径';
@@ -148,11 +186,7 @@ class PGVectorDB:
                 COMMENT ON COLUMN public.images.embedding IS '向量嵌入';
                 """)
                 
-                # 创建索引
-                cursor.execute("""
-                CREATE INDEX idx_images_tags ON public.images USING GIN (tags);
-                """)
-                
+                # 创建索引（移除了 tags 索引）
                 cursor.execute(f"""
                 CREATE INDEX idx_images_embedding ON public.images 
                 USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
@@ -381,9 +415,8 @@ class PGVectorDB:
                     PRIMARY KEY (image_id, tag_id)
                 );
                 """)
-                cursor.execute("CREATE INDEX idx_image_tags_source ON public.image_tags(source);")
+                # 核心索引：tag_id 用于按标签查询；image_id 已是主键的前缀，自动有索引
                 cursor.execute("CREATE INDEX idx_image_tags_tag_id ON public.image_tags(tag_id);")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_name ON public.tags(name);")
                 logger.info("image_tags 表创建成功")
             
             # 所有表创建完成后，检查并添加新列
@@ -391,6 +424,9 @@ class PGVectorDB:
             
             # 确保默认 admin 账号存在
             self._ensure_default_admin(cursor)
+            
+            # 创建/更新 schema_meta 表保存版本号
+            self._save_schema_version(cursor)
             
             init_time = time.time() - start_time
             perf_logger.info(f"表结构初始化耗时: {init_time:.4f}秒")
@@ -466,12 +502,146 @@ class PGVectorDB:
             # 设置现有收藏夹归属于管理员（user_id=1）
             cursor.execute("UPDATE collections SET user_id = 1 WHERE user_id IS NULL;")
         
-        # 确保性能索引存在
+        # 优化索引：删除废弃索引，确保核心索引存在
+        self._optimize_indexes(cursor)
+    
+    def _optimize_indexes(self, cursor):
+        """优化索引：删除废弃索引，确保核心索引存在"""
+        # 需要删除的废弃索引列表
+        deprecated_indexes = [
+            "idx_image_tags_source",      # 按source查询很少用
+            "idx_image_tags_image_id",    # 主键前缀已有索引
+            "idx_image_tags_image_tag",   # 与主键重复
+            "idx_users_role",             # 用户量小，不需要
+            "idx_tags_parent",            # 标签层级很少用
+            "idx_approvals_requester",    # 审批量小，不需要
+            "idx_audit_logs_user",        # 审计日志很少查询
+            "idx_audit_logs_action",      # 审计日志很少查询
+            "idx_images_tags",            # 旧的 tags 数组索引（已废弃）
+        ]
+        
+        # 删除废弃索引
+        deleted_count = 0
+        for idx_name in deprecated_indexes:
+            try:
+                cursor.execute(f"DROP INDEX IF EXISTS {idx_name};")
+                # 检查是否真的删除了（通过影响行数无法判断，用日志记录）
+                deleted_count += 1
+            except Exception as e:
+                logger.debug(f"删除索引 {idx_name} 时出错（可能不存在）: {e}")
+        
+        logger.info(f"索引清理完成，尝试删除 {len(deprecated_indexes)} 个废弃索引")
+        
+        # 核心索引定义：{索引名: 创建语句}
+        core_indexes = {
+            "idx_image_tags_tag_id": "CREATE INDEX IF NOT EXISTS idx_image_tags_tag_id ON public.image_tags(tag_id);",
+            "idx_tags_name": "CREATE INDEX IF NOT EXISTS idx_tags_name ON public.tags(name);",
+            "idx_approvals_status": "CREATE INDEX IF NOT EXISTS idx_approvals_status ON public.approvals(status);",
+            "idx_images_created_at": "CREATE INDEX IF NOT EXISTS idx_images_created_at ON public.images(created_at DESC);",
+        }
+        
+        # 确保核心索引存在
+        created_count = 0
+        for idx_name, create_sql in core_indexes.items():
+            try:
+                cursor.execute(create_sql)
+                created_count += 1
+            except Exception as e:
+                logger.warning(f"创建索引 {idx_name} 失败: {e}")
+        
+        logger.info(f"核心索引检查完成，确保 {len(core_indexes)} 个索引存在")
+    
+    def _save_schema_version(self, cursor):
+        """保存 schema 版本到数据库"""
         try:
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_image_tags_tag_id ON public.image_tags(tag_id);")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_name ON public.tags(name);")
-        except Exception:
-            pass  # 索引可能已存在
+            # 创建 schema_meta 表（如果不存在）
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS public.schema_meta (
+                key VARCHAR(50) PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+            """)
+            
+            # 插入或更新 schema 版本
+            cursor.execute("""
+            INSERT INTO schema_meta (key, value, updated_at)
+            VALUES ('schema_version', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = %s, updated_at = NOW();
+            """, (SCHEMA_VERSION, SCHEMA_VERSION))
+            
+            logger.info(f"已保存数据库结构版本: {SCHEMA_VERSION}")
+        except Exception as e:
+            logger.warning(f"保存 schema 版本失败: {e}")
+    
+    def _quick_validate_schema(self, cursor):
+        """轻量验证：检查核心表和索引是否存在，缺失时自动修复"""
+        issues = []
+        
+        # 核心表列表
+        expected_tables = ["images", "tags", "users", "collections", "image_tags", 
+                          "image_collections", "approvals", "audit_logs", "schema_meta"]
+        
+        # 检查表是否存在
+        cursor.execute("""
+        SELECT table_name FROM information_schema.tables 
+        WHERE table_schema = 'public';
+        """)
+        existing_tables = {row[0] for row in cursor.fetchall()}
+        
+        missing_tables = set(expected_tables) - existing_tables
+        if missing_tables:
+            issues.append(f"缺失表: {', '.join(missing_tables)}")
+            logger.warning(f"发现缺失表: {', '.join(missing_tables)}")
+            logger.warning("  手动修复: 更新 SCHEMA_VERSION 触发完整检查，或手动执行建表语句")
+        
+        # 核心索引定义：{索引名: 创建语句}
+        core_indexes = {
+            "idx_image_tags_tag_id": "CREATE INDEX IF NOT EXISTS idx_image_tags_tag_id ON public.image_tags(tag_id);",
+            "idx_tags_name": "CREATE INDEX IF NOT EXISTS idx_tags_name ON public.tags(name);",
+            "idx_approvals_status": "CREATE INDEX IF NOT EXISTS idx_approvals_status ON public.approvals(status);",
+            "idx_images_created_at": "CREATE INDEX IF NOT EXISTS idx_images_created_at ON public.images(created_at DESC);",
+        }
+        
+        # 检查索引是否存在
+        cursor.execute("""
+        SELECT indexname FROM pg_indexes WHERE schemaname = 'public';
+        """)
+        existing_indexes = {row[0] for row in cursor.fetchall()}
+        
+        # 检查并自动创建缺失的核心索引
+        missing_indexes = set(core_indexes.keys()) - existing_indexes
+        if missing_indexes:
+            logger.info(f"发现 {len(missing_indexes)} 个缺失索引，正在自动创建...")
+            for idx_name in missing_indexes:
+                create_sql = core_indexes[idx_name]
+                try:
+                    cursor.execute(create_sql)
+                    logger.info(f"  ✓ 已创建索引: {idx_name}")
+                except Exception as e:
+                    logger.error(f"  ✗ 创建索引 {idx_name} 失败: {e}")
+                    issues.append(f"创建索引失败: {idx_name}")
+        
+        # 检查是否有多余的废弃索引
+        deprecated_indexes = [
+            "idx_image_tags_source", "idx_image_tags_image_id", "idx_image_tags_image_tag",
+            "idx_users_role", "idx_tags_parent", "idx_approvals_requester",
+            "idx_audit_logs_user", "idx_audit_logs_action", "idx_images_tags"
+        ]
+        extra_indexes = set(deprecated_indexes) & existing_indexes
+        if extra_indexes:
+            logger.info(f"发现 {len(extra_indexes)} 个废弃索引，正在自动删除...")
+            for idx_name in extra_indexes:
+                try:
+                    cursor.execute(f"DROP INDEX IF EXISTS {idx_name};")
+                    logger.info(f"  ✓ 已删除废弃索引: {idx_name}")
+                except Exception as e:
+                    logger.warning(f"  ✗ 删除索引 {idx_name} 失败: {e}")
+        
+        if issues:
+            logger.warning(f"数据库结构验证发现 {len(issues)} 个问题")
+        else:
+            logger.info("数据库结构验证通过")
     
     def _ensure_default_admin(self, cursor):
         """确保默认管理员账号存在"""
@@ -632,7 +802,7 @@ class PGVectorDB:
             logger.error(f"设置图片标签失败: {str(e)}")
     
     def search_by_tags(self, tags: List[str], limit: int = None) -> List[Dict]:
-        """通过标签搜索图像"""
+        """通过标签搜索图像（使用 image_tags 关联表）"""
         if limit is None:
             limit = settings.DEFAULT_SEARCH_LIMIT
             
@@ -640,27 +810,53 @@ class PGVectorDB:
         logger.info(f"按标签搜索: {tags}, 限制: {limit}")
         
         try:
-            query = """
-            SELECT id, image_url, tags, description, source_type, original_url
-            FROM images
-            WHERE tags @> %s
+            if not tags:
+                return []
+            
+            tag_placeholders = ','.join(['%s'] * len(tags))
+            query = f"""
+            SELECT i.id, i.image_url, i.description, i.source_type, i.original_url
+            FROM images i
+            WHERE i.id IN (
+                SELECT it.image_id FROM image_tags it
+                JOIN tags t ON it.tag_id = t.id
+                WHERE t.name IN ({tag_placeholders})
+                GROUP BY it.image_id
+                HAVING COUNT(DISTINCT t.name) = %s
+            )
             LIMIT %s;
             """
             
+            params = list(tags) + [len(tags), limit]
+            
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(query, (tags, limit))
+                    cursor.execute(query, params)
                     results = cursor.fetchall()
+                    
+                    # 批量获取标签
+                    image_ids = [row[0] for row in results]
+                    tags_map = {}
+                    if image_ids:
+                        cursor.execute("""
+                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.added_at)
+                        FROM image_tags it
+                        JOIN tags t ON it.tag_id = t.id
+                        WHERE it.image_id = ANY(%s)
+                        GROUP BY it.image_id;
+                        """, (image_ids,))
+                        for row in cursor.fetchall():
+                            tags_map[row[0]] = row[1]
             
             images = []
             for row in results:
                 images.append({
                     "id": row[0],
                     "image_url": row[1],
-                    "tags": row[2],
-                    "description": row[3],
-                    "source_type": row[4],
-                    "original_url": row[5]
+                    "tags": tags_map.get(row[0], []),
+                    "description": row[2],
+                    "source_type": row[3],
+                    "original_url": row[4]
                 })
             
             process_time = time.time() - start_time
@@ -690,7 +886,7 @@ class PGVectorDB:
             vector_str = ','.join(map(str, query_vector))
             
             query = """
-            SELECT id, image_url, tags, description, source_type, original_url,
+            SELECT id, image_url, description, source_type, original_url,
                    1 - (embedding <=> %s) as similarity
             FROM images
             WHERE 1 - (embedding <=> %s) > %s
@@ -705,6 +901,20 @@ class PGVectorDB:
                         f"[{vector_str}]", f"[{vector_str}]", threshold, limit
                     ))
                     results = cursor.fetchall()
+                    
+                    # 批量获取标签
+                    image_ids = [row[0] for row in results]
+                    tags_map = {}
+                    if image_ids:
+                        cursor.execute("""
+                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.added_at)
+                        FROM image_tags it
+                        JOIN tags t ON it.tag_id = t.id
+                        WHERE it.image_id = ANY(%s)
+                        GROUP BY it.image_id;
+                        """, (image_ids,))
+                        for row in cursor.fetchall():
+                            tags_map[row[0]] = row[1]
             
             query_time = time.time() - query_start
             perf_logger.info(f"向量搜索 SQL 执行耗时: {query_time:.4f}秒")
@@ -714,11 +924,11 @@ class PGVectorDB:
                 images.append({
                     "id": row[0],
                     "image_url": row[1],
-                    "tags": row[2],
-                    "description": row[3],
-                    "source_type": row[4],
-                    "original_url": row[5],
-                    "similarity": row[6]
+                    "tags": tags_map.get(row[0], []),
+                    "description": row[2],
+                    "source_type": row[3],
+                    "original_url": row[4],
+                    "similarity": row[5]
                 })
             
             total_time = time.time() - start_time
@@ -742,7 +952,7 @@ class PGVectorDB:
         vector_weight: float = 0.7,
         tag_weight: float = 0.3
     ) -> List[Dict]:
-        """混合搜索：向量相似度 + 标签匹配"""
+        """混合搜索：向量相似度 + 标签匹配（优化版，使用 LEFT JOIN 替代多次 EXISTS）"""
         if limit is None:
             limit = settings.DEFAULT_SEARCH_LIMIT
         if threshold is None:
@@ -754,50 +964,70 @@ class PGVectorDB:
         try:
             vector_str = ','.join(map(str, query_vector))
             
-            # 混合搜索查询
-            # 1. 计算向量相似度 (0-1)
-            # 2. 计算标签匹配度 (1 if query_text in tags else 0)
-            # 3. 加权求和
+            # 优化版：使用 LEFT JOIN 一次性计算标签匹配，避免多次 EXISTS 子查询
+            # tag_match 子查询只执行一次，结果通过 LEFT JOIN 关联
             query = """
-            SELECT id, image_url, tags, description, source_type, original_url,
-                   (1 - (embedding <=> %s)) as vector_score,
-                   (CASE WHEN %s = ANY(tags) THEN 1.0 ELSE 0.0 END) as tag_score
-            FROM images
-            WHERE (1 - (embedding <=> %s)) > %s OR (%s = ANY(tags))
-            ORDER BY ((1 - (embedding <=> %s)) * %s + (CASE WHEN %s = ANY(tags) THEN 1.0 ELSE 0.0 END) * %s) DESC
+            WITH tag_match AS (
+                SELECT DISTINCT it.image_id
+                FROM image_tags it
+                JOIN tags t ON it.tag_id = t.id
+                WHERE t.name = %s
+            )
+            SELECT i.id, i.image_url, i.description, i.source_type, i.original_url,
+                   (1 - (i.embedding <=> %s)) as vector_score,
+                   (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) as tag_score
+            FROM images i
+            LEFT JOIN tag_match tm ON i.id = tm.image_id
+            WHERE (1 - (i.embedding <=> %s)) > %s OR tm.image_id IS NOT NULL
+            ORDER BY (
+                (1 - (i.embedding <=> %s)) * %s + 
+                (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) * %s
+            ) DESC
             LIMIT %s;
             """
             
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(query, (
+                        query_text,
                         f"[{vector_str}]", 
-                        query_text, 
                         f"[{vector_str}]", 
                         threshold, 
-                        query_text,
                         f"[{vector_str}]",
                         vector_weight,
-                        query_text,
                         tag_weight,
                         limit
                     ))
                     results = cursor.fetchall()
+                    
+                    # 批量获取标签
+                    image_ids = [row[0] for row in results]
+                    tags_map = {}
+                    if image_ids:
+                        cursor.execute("""
+                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.added_at)
+                        FROM image_tags it
+                        JOIN tags t ON it.tag_id = t.id
+                        WHERE it.image_id = ANY(%s)
+                        GROUP BY it.image_id;
+                        """, (image_ids,))
+                        for row in cursor.fetchall():
+                            tags_map[row[0]] = row[1]
             
             images = []
             for row in results:
-                vector_score = float(row[6])
-                tag_score = float(row[7])
+                vector_score = float(row[5])
+                tag_score = float(row[6])
                 final_score = vector_score * vector_weight + tag_score * tag_weight
                 
                 images.append({
                     "id": row[0],
                     "image_url": row[1],
-                    "tags": row[2],
-                    "description": row[3],
-                    "source_type": row[4],
-                    "original_url": row[5],
-                    "similarity": final_score, # 返回混合分数作为相似度
+                    "tags": tags_map.get(row[0], []),
+                    "description": row[2],
+                    "source_type": row[3],
+                    "original_url": row[4],
+                    "similarity": final_score,
                     "vector_score": vector_score,
                     "tag_score": tag_score
                 })
@@ -827,6 +1057,7 @@ class PGVectorDB:
         tags: List[str] = None,
         url_contains: str = None,
         description_contains: str = None,
+        keyword: str = None,
         pending_only: bool = False,
         duplicates_only: bool = False,
         limit: int = 10,
@@ -836,7 +1067,7 @@ class PGVectorDB:
     ) -> Dict[str, Any]:
         """高级图像搜索"""
         start_time = time.time()
-        logger.info(f"高级图像搜索: 标签:{tags}, URL包含:{url_contains}, 待分析:{pending_only}, 重复:{duplicates_only}")
+        logger.info(f"高级图像搜索: 标签:{tags}, URL包含:{url_contains}, 关键字:{keyword}, 待分析:{pending_only}, 重复:{duplicates_only}")
         
         try:
             conditions = []
@@ -877,7 +1108,19 @@ class PGVectorDB:
                 conditions.append("i.image_url ILIKE %s")
                 params.append(f"%{url_contains}%")
             
-            if description_contains:
+            # 关键字搜索：同时模糊匹配描述和标签
+            if keyword:
+                conditions.append("""
+                    (i.description ILIKE %s OR i.id IN (
+                        SELECT it.image_id FROM image_tags it
+                        JOIN tags t ON it.tag_id = t.id
+                        WHERE t.name ILIKE %s
+                    ))
+                """)
+                params.append(f"%{keyword}%")
+                params.append(f"%{keyword}%")
+            elif description_contains:
+                # 向后兼容：只匹配描述
                 conditions.append("i.description ILIKE %s")
                 params.append(f"%{description_contains}%")
             
@@ -1371,7 +1614,7 @@ class PGVectorDB:
         tags: Optional[List[str]] = None,
         include_children: bool = False
     ) -> Optional[Dict]:
-        """从收藏夹中获取随机图片"""
+        """从收藏夹中获取随机图片（使用 image_tags 关联表）"""
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -1391,36 +1634,58 @@ class PGVectorDB:
                         collection_ids = [row[0] for row in cursor.fetchall()]
                     
                     # 构建查询
-                    query = """
-                    SELECT i.id, i.image_url, i.tags, i.description, i.source_type, 
-                           i.file_path, i.original_url
-                    FROM images i
-                    JOIN image_collections ic ON i.id = ic.image_id
-                    WHERE ic.collection_id = ANY(%s)
-                    """
-                    params = [collection_ids]
-                    
-                    # 添加标签过滤
                     if tags:
-                        query += " AND i.tags && %s"
-                        params.append(tags)
-                    
-                    query += " ORDER BY RANDOM() LIMIT 1;"
+                        # 使用 image_tags 关联表过滤标签
+                        tag_placeholders = ','.join(['%s'] * len(tags))
+                        query = f"""
+                        SELECT i.id, i.image_url, i.description, i.source_type, 
+                               i.file_path, i.original_url
+                        FROM images i
+                        JOIN image_collections ic ON i.id = ic.image_id
+                        WHERE ic.collection_id = ANY(%s)
+                          AND i.id IN (
+                              SELECT it.image_id FROM image_tags it
+                              JOIN tags t ON it.tag_id = t.id
+                              WHERE t.name IN ({tag_placeholders})
+                          )
+                        ORDER BY RANDOM() LIMIT 1;
+                        """
+                        params = [collection_ids] + list(tags)
+                    else:
+                        query = """
+                        SELECT i.id, i.image_url, i.description, i.source_type, 
+                               i.file_path, i.original_url
+                        FROM images i
+                        JOIN image_collections ic ON i.id = ic.image_id
+                        WHERE ic.collection_id = ANY(%s)
+                        ORDER BY RANDOM() LIMIT 1;
+                        """
+                        params = [collection_ids]
                     
                     cursor.execute(query, params)
                     result = cursor.fetchone()
+                    
+                    if not result:
+                        return None
+                    
+                    # 获取该图片的标签
+                    cursor.execute("""
+                    SELECT ARRAY_AGG(t.name ORDER BY it.added_at)
+                    FROM image_tags it
+                    JOIN tags t ON it.tag_id = t.id
+                    WHERE it.image_id = %s;
+                    """, (result[0],))
+                    tags_result = cursor.fetchone()
+                    image_tags = tags_result[0] if tags_result and tags_result[0] else []
             
-            if not result:
-                return None
-                
             return {
                 "id": result[0],
                 "image_url": result[1],
-                "tags": result[2],
-                "description": result[3],
-                "source_type": result[4],
-                "file_path": result[5],
-                "original_url": result[6]
+                "tags": image_tags,
+                "description": result[2],
+                "source_type": result[3],
+                "file_path": result[4],
+                "original_url": result[5]
             }
         except Exception as e:
             logger.error(f"获取随机图片失败: {str(e)}")
@@ -1549,13 +1814,13 @@ class PGVectorDB:
             return False
 
     def get_collection_images(self, collection_id: int, limit: int = 20, offset: int = 0) -> Dict[str, Any]:
-        """获取收藏夹内的图片"""
+        """获取收藏夹内的图片（使用 image_tags 关联表）"""
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
                     # 获取图片列表
                     cursor.execute("""
-                    SELECT i.id, i.image_url, i.tags, i.description, i.source_type, i.file_path, i.original_url
+                    SELECT i.id, i.image_url, i.description, i.source_type, i.file_path, i.original_url
                     FROM images i
                     JOIN image_collections ic ON i.id = ic.image_id
                     WHERE ic.collection_id = %s
@@ -1563,6 +1828,20 @@ class PGVectorDB:
                     LIMIT %s OFFSET %s;
                     """, (collection_id, limit, offset))
                     results = cursor.fetchall()
+                    
+                    # 批量获取标签
+                    image_ids = [row[0] for row in results]
+                    tags_map = {}
+                    if image_ids:
+                        cursor.execute("""
+                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.added_at)
+                        FROM image_tags it
+                        JOIN tags t ON it.tag_id = t.id
+                        WHERE it.image_id = ANY(%s)
+                        GROUP BY it.image_id;
+                        """, (image_ids,))
+                        for row in cursor.fetchall():
+                            tags_map[row[0]] = row[1]
                     
                     # 获取总数
                     cursor.execute("""
@@ -1573,11 +1852,11 @@ class PGVectorDB:
             images = [{
                 "id": row[0],
                 "image_url": row[1],
-                "tags": row[2],
-                "description": row[3],
-                "source_type": row[4],
-                "file_path": row[5],
-                "original_url": row[6]
+                "tags": tags_map.get(row[0], []),
+                "description": row[2],
+                "source_type": row[3],
+                "file_path": row[4],
+                "original_url": row[5]
             } for row in results]
             
             return {

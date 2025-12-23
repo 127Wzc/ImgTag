@@ -12,7 +12,7 @@ from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends, Header
 
 from imgtag.db import db
-from imgtag.api.endpoints.auth import get_current_user_optional
+from imgtag.api.endpoints.auth import get_current_user_optional, get_current_user
 from imgtag.services import vision_service, embedding_service, upload_service
 from imgtag.schemas import (
     ImageCreateByUrl,
@@ -32,8 +32,8 @@ router = APIRouter()
 
 
 @router.post("/", response_model=Dict[str, Any], status_code=201)
-async def create_image_manual(image: ImageCreateManual):
-    """手动创建图像记录（提供标签和描述）"""
+async def create_image_manual(image: ImageCreateManual, user: Dict = Depends(get_current_user)):
+    """手动创建图像记录（需登录）"""
     start_time = time.time()
     logger.info(f"创建图像: {image.image_url}")
     
@@ -72,8 +72,8 @@ async def create_image_manual(image: ImageCreateManual):
 
 
 @router.post("/analyze-url", response_model=UploadAnalyzeResponse, status_code=201)
-async def analyze_and_create_from_url(request: ImageCreateByUrl, background_tasks: BackgroundTasks):
-    """通过 URL 分析图像并创建记录（异步处理）"""
+async def analyze_and_create_from_url(request: ImageCreateByUrl, background_tasks: BackgroundTasks, user: Dict = Depends(get_current_user)):
+    """通过 URL 分析图像并创建记录（需登录）"""
     from imgtag.db import config_db
     from imgtag.services.task_queue import task_queue
     
@@ -141,9 +141,10 @@ async def upload_and_analyze(
     auto_analyze: bool = Form(default=True, description="是否自动分析"),
     skip_analyze: bool = Form(default=False, description="跳过分析，只上传"),
     tags: str = Form(default="", description="手动标签，逗号分隔"),
-    description: str = Form(default="", description="手动描述")
+    description: str = Form(default="", description="手动描述"),
+    user: Dict = Depends(get_current_user)
 ):
-    """上传图片文件并分析（异步处理）"""
+    """上传图片文件并分析（需登录）"""
     from imgtag.db import config_db
     from imgtag.services.task_queue import task_queue
     
@@ -225,9 +226,10 @@ async def upload_and_analyze(
 
 @router.post("/upload-zip", response_model=Dict[str, Any], status_code=201)
 async def upload_zip(
-    file: UploadFile = File(..., description="ZIP 压缩包")
+    file: UploadFile = File(..., description="ZIP 压缩包"),
+    user: Dict = Depends(get_current_user)
 ):
-    """上传 ZIP 文件，批量解压并保存图片（不分析，稍后队列处理）"""
+    """上传 ZIP 文件，批量解压并保存图片（需登录）"""
     import zipfile
     import io
     import os
@@ -369,6 +371,7 @@ async def search_images(request: ImageSearchRequest):
             tags=request.tags,
             url_contains=request.url_contains,
             description_contains=request.description_contains,
+            keyword=request.keyword,
             pending_only=request.pending_only,
             duplicates_only=request.duplicates_only,
             limit=request.limit,
@@ -400,9 +403,9 @@ async def search_images(request: ImageSearchRequest):
 async def update_image(
     image_id: int, 
     image_update: ImageUpdate,
-    current_user: Dict = Depends(get_current_user_optional)
+    current_user: Dict = Depends(get_current_user)
 ):
-    """更新图像信息"""
+    """更新图像信息（需登录）"""
     start_time = time.time()
     logger.info(f"更新图像: ID {image_id}")
     
@@ -454,8 +457,8 @@ async def update_image(
 
 
 @router.delete("/{image_id}", response_model=Dict[str, Any])
-async def delete_image(image_id: int):
-    """删除图像（同时删除本地文件）"""
+async def delete_image(image_id: int, user: Dict = Depends(get_current_user)):
+    """删除图像（需登录）"""
     import os
     
     start_time = time.time()
@@ -502,8 +505,8 @@ async def delete_image(image_id: int):
 
 
 @router.post("/batch/delete", response_model=Dict[str, Any])
-async def batch_delete_images(image_ids: List[int]):
-    """批量删除图像"""
+async def batch_delete_images(image_ids: List[int], user: Dict = Depends(get_current_user)):
+    """批量删除图像（需登录）"""
     import os
     
     start_time = time.time()
@@ -556,11 +559,11 @@ class BatchUpdateTagsRequest(BaseModel):
 @router.post("/batch/update-tags", response_model=Dict[str, Any])
 async def batch_update_tags(
     request: BatchUpdateTagsRequest,
-    current_user: Dict = Depends(get_current_user_optional)
+    current_user: Dict = Depends(get_current_user)
 ):
-    """批量更新图像标签"""
+    """批量更新图像标签（需登录）"""
     start_time = time.time()
-    user_id = current_user.get("id") if current_user else None
+    user_id = current_user.get("id")
     logger.info(f"批量更新标签: {len(request.image_ids)} 张, 模式: {request.mode}, 用户: {user_id}")
     
     success_count = 0

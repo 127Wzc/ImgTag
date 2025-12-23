@@ -179,6 +179,7 @@ const menuItems = computed(() => {
   items.push(
     { path: '/', label: '仪表盘', icon: 'HomeFilled' },
     { path: '/gallery', label: '图片库', icon: 'Picture' },
+    { path: '/search', label: '智能搜索', icon: 'Search' },
   )
   
   // 登录用户可以看到更多功能
@@ -186,7 +187,6 @@ const menuItems = computed(() => {
     items.push(
       { divider: true, label: '功能菜单' },
       { path: '/upload', label: '上传图片', icon: 'Upload' },
-      { path: '/search', label: '智能搜索', icon: 'Search' },
       { path: '/tasks', label: '任务队列', icon: 'List' },
       { path: '/collections', label: '我的收藏', icon: 'Star' },
     )

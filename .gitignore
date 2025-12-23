@@ -38,3 +38,7 @@ dist/
 
 # uv
 .python-version
+
+# 模型文件
+models/*/*/*.safetensors
+

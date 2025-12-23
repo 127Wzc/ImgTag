@@ -22,28 +22,11 @@
             </el-select>
           </el-form-item>
           
-          <el-form-item>
-            <el-popover placement="bottom" title="搜索设置" :width="300" trigger="click">
-              <template #reference>
-                <el-button :icon="Setting">设置</el-button>
-              </template>
-              <div class="search-settings">
-                <div class="setting-item">
-                  <span class="label">向量权重 ({{ vectorWeight }})</span>
-                  <el-slider v-model="vectorWeight" :min="0" :max="1" :step="0.1" />
-                </div>
-                <div class="setting-item">
-                  <span class="label">标签权重 ({{ tagWeight }})</span>
-                  <el-slider v-model="tagWeight" :min="0" :max="1" :step="0.1" />
-                </div>
-              </div>
-            </el-popover>
-          </el-form-item>
           
-          <el-form-item label="描述">
+          <el-form-item label="关键字">
             <el-input
-              v-model="filters.descriptionContains"
-              placeholder="描述关键词"
+              v-model="filters.keyword"
+              placeholder="搜索标签或描述"
               clearable
               style="width: 180px"
             />
@@ -555,7 +538,7 @@ const tagWeight = ref(0.3)
 
 const filters = reactive({
   tags: [],
-  descriptionContains: '',
+  keyword: '',
   pendingOnly: false,
   duplicatesOnly: false
 })
@@ -806,22 +789,10 @@ const fetchImages = async () => {
       })
       images.value = result.images
       total.value = result.total
-    } else if (filters.descriptionContains) {
-      // 语义搜索
-      const res = await searchSimilar(
-        filters.descriptionContains,
-        filters.tags.length > 0 ? filters.tags : [],
-        pageSize.value,
-        0.3, // 默认阈值
-        vectorWeight.value,
-        tagWeight.value
-      )
-      images.value = res.images
-      total.value = res.total
     } else {
       result = await getImages({
         tags: filters.tags.length > 0 ? filters.tags : null,
-        descriptionContains: null, // Ensure this is null for non-semantic search
+        keyword: filters.keyword || null,
         pendingOnly: filters.pendingOnly,
         duplicatesOnly: filters.duplicatesOnly,
         limit: pageSize.value,
@@ -845,7 +816,7 @@ const handleSearch = () => {
 
 const resetFilters = () => {
   filters.tags = []
-  filters.descriptionContains = ''
+  filters.keyword = ''
   filters.pendingOnly = false
   filters.duplicatesOnly = false
   currentPage.value = 1

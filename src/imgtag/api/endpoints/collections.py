@@ -11,6 +11,8 @@ from typing import List, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Depends
 
+from imgtag.api.endpoints.auth import get_current_user
+
 from imgtag.db import db
 from imgtag.services import embedding_service
 from imgtag.schemas import (
@@ -29,8 +31,8 @@ router = APIRouter()
 
 
 @router.post("/", response_model=Dict[str, Any], status_code=201)
-async def create_collection(collection: CollectionCreate):
-    """创建收藏夹"""
+async def create_collection(collection: CollectionCreate, user: Dict = Depends(get_current_user)):
+    """创建收藏夹（需登录）"""
     logger.info(f"创建收藏夹: {collection.name}")
     
     new_id = db.create_collection(
@@ -84,8 +86,8 @@ async def get_collection(collection_id: int):
 
 
 @router.put("/{collection_id}", response_model=Dict[str, Any])
-async def update_collection(collection_id: int, collection: CollectionUpdate):
-    """更新收藏夹"""
+async def update_collection(collection_id: int, collection: CollectionUpdate, user: Dict = Depends(get_current_user)):
+    """更新收藏夹（需登录）"""
     success = db.update_collection(
         collection_id=collection_id,
         name=collection.name,
@@ -100,8 +102,8 @@ async def update_collection(collection_id: int, collection: CollectionUpdate):
 
 
 @router.delete("/{collection_id}", response_model=Dict[str, Any])
-async def delete_collection(collection_id: int):
-    """删除收藏夹"""
+async def delete_collection(collection_id: int, user: Dict = Depends(get_current_user)):
+    """删除收藏夹（需登录）"""
     success = db.delete_collection(collection_id)
     if not success:
         raise HTTPException(status_code=500, detail="删除收藏夹失败")
@@ -110,8 +112,8 @@ async def delete_collection(collection_id: int):
 
 
 @router.post("/{collection_id}/images", response_model=Dict[str, Any])
-async def add_image_to_collection(collection_id: int, image_data: CollectionImageAdd):
-    """添加图片到收藏夹（自动添加标签）"""
+async def add_image_to_collection(collection_id: int, image_data: CollectionImageAdd, user: Dict = Depends(get_current_user)):
+    """添加图片到收藏夹（需登录）"""
     image_id = image_data.image_id
     
     # 1. 添加到收藏夹
@@ -134,8 +136,8 @@ async def add_image_to_collection(collection_id: int, image_data: CollectionImag
 
 
 @router.delete("/{collection_id}/images/{image_id}", response_model=Dict[str, Any])
-async def remove_image_from_collection(collection_id: int, image_id: int):
-    """从收藏夹移除图片"""
+async def remove_image_from_collection(collection_id: int, image_id: int, user: Dict = Depends(get_current_user)):
+    """从收藏夹移除图片（需登录）"""
     success = db.remove_image_from_collection(collection_id, image_id)
     if not success:
         raise HTTPException(status_code=500, detail="移除图片失败")

@@ -44,6 +44,7 @@ export const getImages = (params = {}) => {
         tags: params.tags || null,
         url_contains: params.urlContains || null,
         description_contains: params.descriptionContains || null,
+        keyword: params.keyword || null,
         pending_only: params.pendingOnly || false,
         duplicates_only: params.duplicatesOnly || false,
         limit: params.limit || 20,

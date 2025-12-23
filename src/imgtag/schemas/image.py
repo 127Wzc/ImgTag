@@ -74,7 +74,8 @@ class ImageSearchRequest(BaseModel):
     """高级图像搜索请求"""
     tags: Optional[List[str]] = Field(default=None, description="标签列表（包含任一即匹配）")
     url_contains: Optional[str] = Field(default=None, description="URL 包含的文本")
-    description_contains: Optional[str] = Field(default=None, description="描述包含的文本")
+    description_contains: Optional[str] = Field(default=None, description="描述包含的文本（向后兼容）")
+    keyword: Optional[str] = Field(default=None, description="关键字，模糊匹配标签和描述")
     pending_only: bool = Field(default=False, description="仅显示待分析的图片（无标签）")
     duplicates_only: bool = Field(default=False, description="仅显示重复的图片")
     limit: int = Field(default=10, ge=1, le=100, description="返回结果数量")

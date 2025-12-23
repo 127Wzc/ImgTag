@@ -44,7 +44,22 @@ class ONNXEmbeddingModel:
         self._load_model()
     
     def _load_model(self):
-        """加载 ONNX 模型和分词器"""
+        """加载 ONNX 模型和分词器
+        
+        优先从本地 models/ 目录加载 tokenizer 配置，避免网络请求。
+        ONNX 模型文件从配置的镜像站下载（如果本地没有缓存）。
+        """
+        from imgtag.db import config_db
+        
+        # 设置 Hugging Face 镜像站（必须在导入 transformers 之前设置）
+        hf_endpoint = config_db.get("hf_endpoint", "https://hf-mirror.com")
+        if hf_endpoint:
+            # 设置多个环境变量以确保所有库都使用镜像站
+            os.environ["HF_ENDPOINT"] = hf_endpoint
+            os.environ["HUGGINGFACE_HUB_ENDPOINT"] = hf_endpoint  # 兼容旧版本
+            os.environ["HF_MIRROR"] = hf_endpoint  # 部分工具使用这个
+            logger.info(f"使用 Hugging Face 镜像站: {hf_endpoint}")
+        
         try:
             import onnxruntime as ort
             from transformers import AutoTokenizer
@@ -55,18 +70,41 @@ class ONNXEmbeddingModel:
                 "或切换到 '在线 API' 模式"
             )
         
-        # 设置 Hugging Face 镜像站（用于下载模型）
-        from imgtag.db import config_db
-        hf_endpoint = config_db.get("hf_endpoint", "https://hf-mirror.com")
-        if hf_endpoint:
-            os.environ["HF_ENDPOINT"] = hf_endpoint
-            logger.info(f"使用 Hugging Face 镜像站: {hf_endpoint}")
+        # 检查本地 models 目录是否有预置的 tokenizer 文件
+        # 本地目录结构：models/{model_name}/ (如 models/BAAI/bge-small-zh-v1.5/)
+        project_root = Path(__file__).resolve().parent.parent.parent.parent  # src/imgtag/services -> project root
+        local_model_dir = project_root / "models" / self.model_name
+        logger.info(f"检查本地模型目录: {local_model_dir}, 存在: {local_model_dir.exists()}")
         
-        # 下载/加载分词器
-        self.tokenizer = AutoTokenizer.from_pretrained(self.onnx_repo)
+        tokenizer_loaded = False
+        if local_model_dir.exists() and (local_model_dir / "tokenizer.json").exists():
+            # 从本地目录加载 tokenizer（无需网络请求）
+            logger.info(f"从本地加载 tokenizer: {local_model_dir}")
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    str(local_model_dir),
+                    local_files_only=True,
+                    trust_remote_code=False
+                )
+                tokenizer_loaded = True
+            except Exception as e:
+                logger.warning(f"本地 tokenizer 加载失败: {e}，将从网络下载")
         
-        # 下载/加载 ONNX 模型
-        from huggingface_hub import hf_hub_download
+        if not tokenizer_loaded:
+            # 从网络下载 tokenizer（使用 ONNX 仓库，因为原始仓库可能没有 tokenizer.json）
+            hf_url = f"{hf_endpoint}/{self.onnx_repo}" if hf_endpoint else f"https://huggingface.co/{self.onnx_repo}"
+            logger.info(f"从网络下载 tokenizer: {self.onnx_repo} (URL: {hf_url})")
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.onnx_repo,
+                trust_remote_code=False
+            )
+        
+        # 下载/加载 ONNX 模型文件
+        from huggingface_hub import hf_hub_download, constants
+        
+        # 显示 HF 缓存目录
+        hf_cache_dir = constants.HF_HUB_CACHE
+        logger.info(f"Hugging Face 缓存目录: {hf_cache_dir}")
         
         try:
             # 尝试下载 ONNX 模型文件
@@ -74,6 +112,7 @@ class ONNXEmbeddingModel:
                 repo_id=self.onnx_repo,
                 filename="onnx/model.onnx",
             )
+            logger.info(f"ONNX 模型路径: {onnx_path}")
         except Exception:
             # 备用路径
             try:
@@ -81,6 +120,7 @@ class ONNXEmbeddingModel:
                     repo_id=self.onnx_repo,
                     filename="model.onnx",
                 )
+                logger.info(f"ONNX 模型路径: {onnx_path}")
             except Exception as e:
                 logger.error(f"下载 ONNX 模型失败: {e}")
                 raise

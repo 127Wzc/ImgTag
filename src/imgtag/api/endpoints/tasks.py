@@ -7,7 +7,9 @@
 """
 
 from typing import Dict, Any, List
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
+
+from imgtag.api.endpoints.auth import get_current_user
 
 from imgtag.services.task_service import task_service
 from imgtag.schemas import Task, TaskResponse
@@ -38,8 +40,8 @@ async def get_task(task_id: str):
 
 
 @router.post("/cleanup", response_model=Dict[str, Any])
-async def cleanup_tasks(days: int = Query(7, ge=1, description="保留天数")):
-    """清理旧任务"""
+async def cleanup_tasks(days: int = Query(7, ge=1, description="保留天数"), user: Dict = Depends(get_current_user)):
+    """清理旧任务（需登录）"""
     count = task_service.cleanup_old_tasks(days)
     return {"message": f"已清理 {count} 个旧任务"}
 
@@ -47,9 +49,10 @@ async def cleanup_tasks(days: int = Query(7, ge=1, description="保留天数")):
 @router.post("/vectorize", response_model=TaskResponse)
 async def create_vectorize_task(
     image_ids: List[int],
-    force: bool = Query(False, description="是否强制重新生成")
+    force: bool = Query(False, description="是否强制重新生成"),
+    user: Dict = Depends(get_current_user)
 ):
-    """创建批量向量化任务"""
+    """创建批量向量化任务（需登录）"""
     task_id = task_service.create_task(
         "vectorize_batch",
         {"image_ids": image_ids, "force": force}
