@@ -41,31 +41,35 @@ async def lifespan(app: FastAPI):
     
     # 恢复未完成的任务
     try:
-        from imgtag.services.task_queue import task_queue
+        from imgtag.services.task_queue import task_queue, AnalysisTask
         
         # 获取未完成的任务（pending 或 processing 状态）
         pending_tasks = db.get_tasks(limit=1000, status="pending")
         processing_tasks = db.get_tasks(limit=100, status="processing")
         
-        pending_image_ids = []
-        for task in pending_tasks.get("tasks", []):
-            payload = task.get("payload", {})
-            if isinstance(payload, dict):
-                image_id = payload.get("image_id")
-                if image_id:
-                    pending_image_ids.append(image_id)
+        all_tasks = pending_tasks.get("tasks", []) + processing_tasks.get("tasks", [])
         
-        # processing 状态的任务可能是中断的，也恢复
-        for task in processing_tasks.get("tasks", []):
-            payload = task.get("payload", {})
-            if isinstance(payload, dict):
-                image_id = payload.get("image_id")
-                if image_id:
-                    pending_image_ids.append(image_id)
-        
-        if pending_image_ids:
-            logger.info(f"恢复 {len(pending_image_ids)} 个未完成的任务")
-            task_queue.add_tasks(pending_image_ids)
+        if all_tasks:
+            logger.info(f"恢复 {len(all_tasks)} 个未完成的任务")
+            
+            # 直接添加到队列，不创建新的数据库记录
+            restored = 0
+            for task_data in all_tasks:
+                payload = task_data.get("payload", {})
+                if isinstance(payload, dict):
+                    image_id = payload.get("image_id")
+                    if image_id:
+                        # 复用原有的 task_id 和 task_type
+                        task = AnalysisTask(
+                            image_id=image_id,
+                            task_type=task_data.get("task_type", "analyze_image"),
+                            id=task_data.get("id", "")
+                        )
+                        task_queue._queue.append(task)
+                        restored += 1
+            
+            logger.info(f"成功恢复 {restored} 个任务到队列")
+            
             # 启动处理
             import asyncio
             asyncio.create_task(task_queue.start_processing())

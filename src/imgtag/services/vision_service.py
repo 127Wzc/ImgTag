@@ -9,6 +9,8 @@
 import base64
 import json
 import re
+import time
+import datetime
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -105,18 +107,11 @@ class VisionService:
             # DEBUG: 打印响应元数据
             logger.debug(f"视觉模型 API 响应:")
             logger.debug(f"  - Model: {getattr(response, 'model', None)}")
+            logger.debug(f"  - Response Type: {type(response)}")
             
-            # 检查响应是否有效
-            if not response or not response.choices or len(response.choices) == 0:
-                raise ValueError(f"视觉模型 API 返回空响应，请检查 API 配置和模型名称是否正确")
-            
-            logger.debug(f"  - Finish Reason: {response.choices[0].finish_reason}")
-            if response.usage:
-                logger.debug(f"  - Usage: prompt_tokens={response.usage.prompt_tokens}, completion_tokens={response.usage.completion_tokens}, total={response.usage.total_tokens}")
-            
-            content = response.choices[0].message.content
-            if not content:
-                raise ValueError("视觉模型返回内容为空")
+            # 使用统一的内容提取方法（支持 OpenAI 和 Google 格式）
+            content = self._extract_content_from_response(response)
+            logger.debug(f"  - Extracted content length: {len(content)}")
                 
             return self._parse_response(content)
             
@@ -163,25 +158,145 @@ class VisionService:
             # DEBUG: 打印响应元数据
             logger.debug(f"视觉模型 API 响应:")
             logger.debug(f"  - Model: {getattr(response, 'model', None)}")
+            logger.debug(f"  - Response Type: {type(response)}")
             
-            # 检查响应是否有效
-            if not response or not response.choices or len(response.choices) == 0:
-                raise ValueError(f"视觉模型 API 返回空响应，请检查 API 配置和模型名称是否正确")
-            
-            logger.debug(f"  - Finish Reason: {response.choices[0].finish_reason}")
-            if response.usage:
-                logger.debug(f"  - Usage: prompt_tokens={response.usage.prompt_tokens}, completion_tokens={response.usage.completion_tokens}, total={response.usage.total_tokens}")
-            
-            content = response.choices[0].message.content
-            if not content:
-                raise ValueError("视觉模型返回内容为空")
+            # 使用统一的内容提取方法（支持 OpenAI 和 Google 格式）
+            content = self._extract_content_from_response(response)
+            logger.debug(f"  - Extracted content length: {len(content)}")
                 
             return self._parse_response(content)
             
         except Exception as e:
             logger.error(f"视觉模型分析失败: {str(e)}")
             raise
-    
+
+    def _convert_google_to_openai(self, google_response: dict) -> dict:
+        """将 Google Gemini 原生响应转换为 OpenAI 标准 Chat Completion 响应格式"""
+        
+        # 1. 提取核心数据层
+        data = google_response.get("response", google_response)
+        
+        # 2. 处理时间戳
+        created_timestamp = int(time.time())
+        if "createTime" in data:
+            try:
+                dt = datetime.datetime.strptime(data["createTime"].split(".")[0], "%Y-%m-%dT%H:%M:%S")
+                created_timestamp = int(dt.replace(tzinfo=datetime.timezone.utc).timestamp())
+            except Exception:
+                pass
+
+        # 3. 映射 Finish Reason
+        finish_reason_map = {
+            "STOP": "stop",
+            "MAX_TOKENS": "length",
+            "SAFETY": "content_filter",
+            "RECITATION": "content_filter",
+            "OTHER": "stop"
+        }
+
+        # 4. 构建 Choices 列表
+        choices = []
+        if "candidates" in data:
+            for index, candidate in enumerate(data["candidates"]):
+                content_parts = candidate.get("content", {}).get("parts", [])
+                full_text = "".join([part.get("text", "") for part in content_parts])
+                
+                g_finish = candidate.get("finishReason", "STOP")
+                o_finish = finish_reason_map.get(g_finish, "stop")
+
+                choice = {
+                    "index": index,
+                    "message": {
+                        "role": "assistant",
+                        "content": full_text
+                    },
+                    "finish_reason": o_finish
+                }
+                choices.append(choice)
+
+        # 5. 处理 Usage
+        usage_meta = data.get("usageMetadata", {})
+        usage = {
+            "prompt_tokens": usage_meta.get("promptTokenCount", 0),
+            "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
+            "total_tokens": usage_meta.get("totalTokenCount", 0)
+        }
+
+        # 6. 组装最终 OpenAI 格式
+        openai_response = {
+            "id": f"chatcmpl-{data.get('responseId', 'unknown')}",
+            "object": "chat.completion",
+            "created": created_timestamp,
+            "model": data.get("modelVersion", "gemini-model"),
+            "choices": choices,
+            "usage": usage,
+            "system_fingerprint": data.get("responseId")
+        }
+
+        return openai_response
+
+    def _extract_content_from_response(self, response) -> str:
+        """从响应中提取内容，支持 OpenAI 和 Google Gemini 格式"""
+        
+        # 尝试 OpenAI 格式（标准路径）
+        if hasattr(response, 'choices') and response.choices and len(response.choices) > 0:
+            choice = response.choices[0]
+            if hasattr(choice, 'message') and choice.message:
+                content = getattr(choice.message, 'content', None)
+                if content:
+                    logger.debug(f"从 OpenAI 格式提取内容成功")
+                    return content
+        
+        # 尝试将 OpenAI 对象转为字典
+        response_dict = None
+        if hasattr(response, 'model_dump'):
+            response_dict = response.model_dump()
+            logger.debug(f"使用 model_dump() 转换响应: {list(response_dict.keys())}")
+        elif hasattr(response, '__dict__'):
+            response_dict = response.__dict__
+            logger.debug(f"使用 __dict__ 转换响应")
+        elif isinstance(response, dict):
+            response_dict = response
+        
+        if response_dict:
+            # 打印原始响应用于调试
+            logger.debug(f"原始响应字典: {json.dumps(response_dict, ensure_ascii=False, default=str)[:500]}...")
+            
+            # 检查是否是 Google Gemini 格式（包含 response.candidates）
+            if "response" in response_dict and isinstance(response_dict["response"], dict):
+                inner = response_dict["response"]
+                if "candidates" in inner:
+                    logger.debug("检测到 Google Gemini 响应格式（内层），正在提取...")
+                    for candidate in inner.get("candidates", []):
+                        parts = candidate.get("content", {}).get("parts", [])
+                        for part in parts:
+                            text = part.get("text", "")
+                            if text:
+                                logger.debug(f"提取到文本内容，长度: {len(text)}")
+                                return text
+            
+            # 直接检查 candidates（无外层包装）
+            if "candidates" in response_dict:
+                logger.debug("检测到 Google Gemini 响应格式（外层），正在提取...")
+                for candidate in response_dict.get("candidates", []):
+                    parts = candidate.get("content", {}).get("parts", [])
+                    for part in parts:
+                        text = part.get("text", "")
+                        if text:
+                            logger.debug(f"提取到文本内容，长度: {len(text)}")
+                            return text
+            
+            # 检查 choices（字典格式）
+            if "choices" in response_dict and response_dict["choices"]:
+                for choice in response_dict["choices"]:
+                    msg = choice.get("message", {})
+                    content = msg.get("content", "")
+                    if content:
+                        logger.debug(f"从 choices 字典提取内容成功")
+                        return content
+        
+        raise ValueError("无法从响应中提取内容，请检查 API 配置")
+
     def _parse_response(self, content: str) -> ImageAnalysisResult:
         """解析模型响应"""
         # DEBUG: 打印原始响应内容

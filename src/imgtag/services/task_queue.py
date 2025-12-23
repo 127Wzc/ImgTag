@@ -32,6 +32,7 @@ import uuid
 class AnalysisTask:
     """分析任务"""
     image_id: int
+    task_type: str = "analyze_image"  # analyze_image / rebuild_vector
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     status: TaskStatus = TaskStatus.PENDING
     error: Optional[str] = None
@@ -73,8 +74,15 @@ class TaskQueueService:
         """获取任务间隔时间（秒）"""
         return float(config_db.get("queue_batch_interval", "1") or "1")
     
-    def add_tasks(self, image_ids: List[int]) -> int:
-        """添加任务到队列"""
+    def add_tasks(self, image_ids: List[int], task_type: str = "analyze_image") -> int:
+        """添加任务到队列
+        
+        Args:
+            image_ids: 图片 ID 列表
+            task_type: 任务类型，可选值：
+                - analyze_image: 分析图片（视觉模型 + 向量）
+                - rebuild_vector: 重建向量（仅向量）
+        """
         with self._lock:
             added = 0
             for image_id in image_ids:
@@ -85,14 +93,14 @@ class TaskQueueService:
                     continue
                 
                 # 创建任务对象
-                task = AnalysisTask(image_id=image_id)
+                task = AnalysisTask(image_id=image_id, task_type=task_type)
                 self._queue.append(task)
                 
                 # 持久化到数据库
                 try:
                     db.create_task(
                         task_id=task.id,
-                        task_type="analyze_image",
+                        task_type=task_type,
                         payload={"image_id": image_id}
                     )
                 except Exception as e:
@@ -100,7 +108,7 @@ class TaskQueueService:
                     
                 added += 1
             
-            logger.info(f"添加了 {added} 个任务到队列")
+            logger.info(f"添加了 {added} 个任务到队列 (类型: {task_type})")
             return added
     
     def get_status(self) -> Dict[str, Any]:
