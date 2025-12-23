@@ -81,29 +81,14 @@ async def analyze_and_create_from_url(request: ImageCreateByUrl, background_task
     logger.info(f"添加远程图像任务: {request.image_url}")
     
     try:
-        # 获取向量维度用于创建零向量
-        mode = config_db.get("embedding_mode", "local")
-        if mode == "local":
-            model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
-            if "small" in model_name:
-                dim = 512
-            elif "base" in model_name:
-                dim = 768
-            else:
-                dim = 512
-        else:
-            dim = config_db.get_int("embedding_dimensions", 1536)
-        
-        zero_vector = [0.0] * dim
-        
-        # 1. 插入初始记录（未分析状态）
+        # 1. 插入初始记录（未分析状态，embedding 为 NULL）
         tags = request.tags or []
         description = request.description or ""
         
         new_id = db.insert_image(
             image_url=request.image_url,
             tags=tags,
-            embedding=zero_vector,
+            embedding=None,  # 待分析，暂无向量
             description=description,
             source_type="url",
             original_url=request.image_url
@@ -161,21 +146,6 @@ async def upload_and_analyze(
             file.filename
         )
         
-        # 获取向量维度
-        mode = config_db.get("embedding_mode", "local")
-        if mode == "local":
-            model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
-            if "small" in model_name:
-                dim = 512
-            elif "base" in model_name:
-                dim = 768
-            else:
-                dim = 512
-        else:
-            dim = config_db.get_int("embedding_dimensions", 1536)
-        
-        zero_vector = [0.0] * dim
-        
         final_tags = [t.strip() for t in tags.split(",") if t.strip()]
         final_description = description
         
@@ -186,11 +156,11 @@ async def upload_and_analyze(
         # 计算文件大小 (MB)
         file_size = round(len(file_content) / (1024 * 1024), 2)
         
-        # 1. 插入记录（包含真实文件类型和大小）
+        # 1. 插入记录（embedding 为 NULL，待后续分析生成）
         new_id = db.insert_image(
             image_url=access_url,
             tags=final_tags,
-            embedding=zero_vector,
+            embedding=None,  # 待分析，暂无向量
             description=final_description,
             source_type="upload",
             file_path=file_path,
@@ -244,22 +214,6 @@ async def upload_zip(
         # 读取 ZIP 内容
         zip_content = await file.read()
         
-        # 获取向量维度用于创建零向量
-        from imgtag.db import config_db
-        mode = config_db.get("embedding_mode", "local")
-        if mode == "local":
-            model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
-            if "small" in model_name:
-                dim = 512
-            elif "base" in model_name:
-                dim = 768
-            else:
-                dim = 512
-        else:
-            dim = config_db.get_int("embedding_dimensions", 1536)
-        
-        zero_vector = [0.0] * dim
-        
         # 支持的图片扩展名
         image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
         
@@ -294,11 +248,11 @@ async def upload_zip(
                     # 计算文件大小 (MB)
                     file_size = round(len(file_content) / (1024 * 1024), 2)
                     
-                    # 插入数据库（包含真实文件类型和大小）
+                    # 插入数据库（embedding 为 NULL，待后续分析）
                     new_id = db.insert_image(
                         image_url=access_url,
                         tags=[],
-                        embedding=zero_vector,
+                        embedding=None,  # 待分析，暂无向量
                         description="",
                         source_type="local",
                         file_path=file_path,

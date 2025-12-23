@@ -331,18 +331,15 @@ async def get_rebuild_status():
 async def clear_vectors(admin: Dict = Depends(require_admin)):
     """清空所有向量数据（需管理员权限）"""
     try:
-        dimensions = get_db_vector_dimensions()
-        zero_vector = [0.0] * dimensions
-        
         with db._get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
-                UPDATE images SET embedding = %s::vector, updated_at = NOW();
-                """, (zero_vector,))
+                UPDATE images SET embedding = NULL, updated_at = NOW();
+                """)
             conn.commit()
         
         logger.info("向量数据已清空")
-        return {"message": "向量数据已清空"}
+        return {"message": "向量数据已清空（设为 NULL）"}
     except Exception as e:
         logger.error(f"清空向量失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -164,7 +164,7 @@ class PGVectorDB:
                     uploaded_by INTEGER,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                    embedding vector({vector_dim}) NOT NULL
+                    embedding vector({vector_dim})
                 );
                 """)
                 
@@ -669,7 +669,7 @@ class PGVectorDB:
         self,
         image_url: str,
         tags: List[str],
-        embedding: List[float],
+        embedding: List[float] = None,
         description: str = None,
         source_type: str = "url",
         file_path: str = None,
@@ -679,12 +679,20 @@ class PGVectorDB:
         file_type: str = None,
         file_size: float = None
     ) -> Optional[int]:
-        """插入一条图像记录"""
+        """插入一条图像记录
+        
+        Args:
+            embedding: 向量嵌入，可为 None 表示未生成向量
+        """
         start_time = time.time()
         logger.debug(f"插入图像记录: {image_url}")
         
         try:
-            vector_str = ','.join(map(str, embedding))
+            # 支持 embedding 为 None（表示未生成向量）
+            embedding_value = None
+            if embedding is not None and len(embedding) > 0:
+                vector_str = ','.join(map(str, embedding))
+                embedding_value = f"[{vector_str}]"
             
             # 自动从 URL 截取文件类型
             if not file_type:
@@ -704,7 +712,7 @@ class PGVectorDB:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(query, (
-                        image_url, f"[{vector_str}]", description,
+                        image_url, embedding_value, description,
                         source_type, file_path, original_url, file_hash, file_type, file_size
                     ))
                     new_id = cursor.fetchone()[0]
@@ -966,6 +974,7 @@ class PGVectorDB:
             
             # 优化版：使用 LEFT JOIN 一次性计算标签匹配，避免多次 EXISTS 子查询
             # tag_match 子查询只执行一次，结果通过 LEFT JOIN 关联
+            # 过滤掉 NULL 向量：未生成向量的图片不参与相似度搜索
             query = """
             WITH tag_match AS (
                 SELECT DISTINCT it.image_id
@@ -978,7 +987,8 @@ class PGVectorDB:
                    (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) as tag_score
             FROM images i
             LEFT JOIN tag_match tm ON i.id = tm.image_id
-            WHERE (1 - (i.embedding <=> %s)) > %s OR tm.image_id IS NOT NULL
+            WHERE i.embedding IS NOT NULL
+              AND ((1 - (i.embedding <=> %s)) > %s OR tm.image_id IS NOT NULL)
             ORDER BY (
                 (1 - (i.embedding <=> %s)) * %s + 
                 (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) * %s
@@ -2343,29 +2353,12 @@ class PGVectorDB:
     def import_image(self, img_data: Dict) -> bool:
         """导入单张图片"""
         try:
-            from imgtag.db import config_db
-            
-            # 获取向量维度用于创建零向量
-            mode = config_db.get("embedding_mode", "local")
-            if mode == "local":
-                model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
-                if "small" in model_name:
-                    dim = 512
-                elif "base" in model_name:
-                    dim = 768
-                else:
-                    dim = 512
-            else:
-                dim = config_db.get_int("embedding_dimensions", 1536)
-            
-            zero_vector = [0.0] * dim
-            
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
-                    # 插入图片（使用 ON CONFLICT 避免重复）
+                    # 插入图片（embedding 为 NULL，待后续生成）
                     cur.execute("""
                         INSERT INTO images (image_url, description, embedding, source_type, original_url, file_path)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, NULL, %s, %s, %s)
                         ON CONFLICT (image_url) DO UPDATE SET
                             description = EXCLUDED.description,
                             source_type = EXCLUDED.source_type,
@@ -2375,7 +2368,6 @@ class PGVectorDB:
                     """, (
                         img_data.get('image_url'),
                         img_data.get('description', ''),
-                        zero_vector,
                         img_data.get('source_type', 'url'),
                         img_data.get('original_url'),
                         img_data.get('file_path')
