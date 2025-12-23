@@ -91,3 +91,10 @@ api_router.include_router(
     tags=["任务管理"]
 )
 
+# 注册外部 API 路由（第三方接入，使用 API 密钥认证）
+from imgtag.api.endpoints import external
+api_router.include_router(
+    external.router, 
+    prefix="", 
+    tags=["外部API"]
+)

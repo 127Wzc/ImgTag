@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from imgtag.schemas.user import UserCreate, UserLogin, UserResponse, Token
+from pydantic import BaseModel, Field
 from imgtag.services import auth_service
 from imgtag.db import db
 from imgtag.core.logging_config import get_logger
@@ -200,3 +201,74 @@ async def change_user_password(
         raise HTTPException(status_code=500, detail="修改密码失败")
     
     return {"message": "密码修改成功"}
+
+
+# ========== 个人中心 ==========
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str = Field(..., min_length=6)
+
+
+@router.put("/me/password")
+async def change_my_password(
+    data: ChangePasswordRequest,
+    user: Dict = Depends(get_current_user)
+):
+    """修改自己的密码（需验证旧密码）"""
+    # 获取完整用户信息（包含密码哈希）
+    full_user = db.get_user_by_id(user["id"])
+    if not full_user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    
+    # 验证旧密码
+    if not auth_service.verify_password(data.old_password, full_user["password_hash"]):
+        raise HTTPException(status_code=400, detail="旧密码错误")
+    
+    # 修改密码
+    success = db.change_user_password(user["id"], data.new_password)
+    if not success:
+        raise HTTPException(status_code=500, detail="修改密码失败")
+    
+    return {"message": "密码修改成功"}
+
+
+@router.post("/me/api-key")
+async def generate_my_api_key(user: Dict = Depends(get_current_user)):
+    """生成新的个人 API 密钥（会覆盖旧密钥）"""
+    api_key = db.generate_user_api_key(user["id"])
+    if not api_key:
+        raise HTTPException(status_code=500, detail="生成 API 密钥失败")
+    
+    return {
+        "api_key": api_key,
+        "message": "API 密钥生成成功，请妥善保存"
+    }
+
+
+@router.get("/me/api-key")
+async def get_my_api_key(user: Dict = Depends(get_current_user)):
+    """获取当前 API 密钥（脱敏显示）"""
+    api_key = db.get_user_api_key(user["id"])
+    
+    if not api_key:
+        return {"has_key": False, "masked_key": None}
+    
+    # 脱敏显示：前8位...后8位
+    masked_key = f"{api_key[:8]}...{api_key[-8:]}"
+    
+    return {
+        "has_key": True,
+        "masked_key": masked_key
+    }
+
+
+@router.delete("/me/api-key")
+async def delete_my_api_key(user: Dict = Depends(get_current_user)):
+    """删除个人 API 密钥"""
+    success = db.delete_user_api_key(user["id"])
+    if not success:
+        raise HTTPException(status_code=500, detail="删除 API 密钥失败")
+    
+    return {"message": "API 密钥已删除"}
+

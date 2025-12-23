@@ -236,50 +236,40 @@ pnpm dev
 
 ---
 
-## � 外部 API
+## 🔌 外部 API
 
-供其他服务调用的 API 接口。
+供第三方系统接入的 API，使用个人 API 密钥认证。
 
-### 标签随机图片
+### 快速开始
 
-```http
-GET /api/v1/images/random?tags=标签1&tags=标签2&count=5
+1. 在 **个人中心**（点击右上角用户名）生成 API 密钥
+2. 调用 API 时携带密钥（Header 或参数方式）
+
+### 接口列表
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/v1/random` | 获取随机图片 |
+| `POST /api/v1/add-image` | 通过 URL 添加图片 |
+| `GET /api/v1/image/{id}` | 获取图片详情 |
+| `GET /api/v1/search` | 搜索图片 |
+
+### 示例
+
+```bash
+# 获取随机图片
+curl "http://localhost:8000/api/v1/random?api_key=YOUR_KEY&count=1"
+
+# 添加图片
+curl -X POST "http://localhost:8000/api/v1/add-image?api_key=YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"image_url": "https://example.com/image.jpg"}'
+
+# 搜索图片（关键词需 URL 编码）
+curl "http://localhost:8000/api/v1/search?api_key=YOUR_KEY&keyword=%E5%88%9D%E9%9F%B3&limit=10"
 ```
 
-**参数：**
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `tags` | string[] | 标签列表（AND 关系，必须同时包含） |
-| `count` | int | 返回数量，默认 1，最大 50 |
-| `include_full_url` | bool | 是否拼接 base_url，默认 true |
-| `api_key` | string | 鉴权密钥（参数方式，可选） |
-
-**鉴权方式（二选一）：**
-- Header: `X-API-Key: your-secret-key`
-- 参数: `?api_key=your-secret-key`
-
-> 密钥在「设置 → 外部 API 配置」中设置，留空则不验证
-
-**响应示例：**
-
-```json
-{
-  "images": [
-    {
-      "id": 1,
-      "url": "http://example.com/uploads/xxx.jpg",
-      "description": "图片描述",
-      "tags": ["标签1", "标签2"]
-    }
-  ],
-  "count": 1
-}
-```
-
-**配置说明：**
-- `base_url`: 外部 API 返回的图片 URL 将拼接此地址
-- `external_api_key`: 外部调用时需验证的密钥
+📖 **完整文档**：[docs/EXTERNAL_API.md](docs/EXTERNAL_API.md)
 
 ---
 

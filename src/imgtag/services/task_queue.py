@@ -326,8 +326,8 @@ class TaskQueueService:
                     # 本地文件，需要读取文件内容
                     from imgtag.core.config import settings
                     
-                    file_path = image.get("file_path") or os.path.join(
-                        settings.UPLOAD_DIR, 
+                    file_path = image.get("file_path") or str(
+                        settings.get_upload_path() / 
                         image_url.replace("/uploads/", "")
                     )
                     

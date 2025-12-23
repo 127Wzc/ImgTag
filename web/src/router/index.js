@@ -56,6 +56,12 @@ const routes = [
         name: 'Tags',
         component: () => import('@/views/Tags.vue'),
         meta: { requiresAdmin: true }  // 需要管理员
+    },
+    {
+        path: '/user-center',
+        name: 'UserCenter',
+        component: () => import('@/views/UserCenter.vue'),
+        meta: { requiresAuth: true }  // 需要登录
     }
 ]
 

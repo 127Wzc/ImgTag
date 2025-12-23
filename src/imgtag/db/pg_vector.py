@@ -25,7 +25,7 @@ perf_logger = get_perf_logger()
 # - major: 不兼容的结构变化
 # - minor: 新增表/字段
 # - patch: 索引优化等小改动
-SCHEMA_VERSION = "1.1.0"
+SCHEMA_VERSION = "1.2.0"
 
 
 class PGVectorDB:
@@ -501,6 +501,19 @@ class PGVectorDB:
             cursor.execute("ALTER TABLE collections ADD COLUMN user_id INTEGER;")
             # 设置现有收藏夹归属于管理员（user_id=1）
             cursor.execute("UPDATE collections SET user_id = 1 WHERE user_id IS NULL;")
+        
+        # users 表新列（API 密钥）
+        cursor.execute("""
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns 
+            WHERE table_schema = 'public' 
+            AND table_name = 'users' 
+            AND column_name = 'api_key'
+        );
+        """)
+        if not cursor.fetchone()[0]:
+            logger.info("添加 users 表新列: api_key")
+            cursor.execute("ALTER TABLE users ADD COLUMN api_key VARCHAR(64) UNIQUE;")
         
         # 优化索引：删除废弃索引，确保核心索引存在
         self._optimize_indexes(cursor)
@@ -1382,7 +1395,8 @@ class PGVectorDB:
         description: str = None,
         embedding: List[float] = None,
         tag_source: str = "user",
-        user_id: int = None
+        user_id: int = None,
+        original_url: str = None
     ) -> bool:
         """更新图像信息"""
         start_time = time.time()
@@ -1408,6 +1422,10 @@ class PGVectorDB:
                 vector_str = ','.join(map(str, embedding))
                 update_fields.append("embedding = %s")
                 params.append(f"[{vector_str}]")
+            
+            if original_url is not None:
+                update_fields.append("original_url = %s")
+                params.append(original_url)
             
             update_fields.append("updated_at = NOW()")
             
@@ -2109,6 +2127,74 @@ class PGVectorDB:
                 return True
         except Exception as e:
             logger.error(f"删除用户失败: {str(e)}")
+            return False
+    
+    # ========== 用户 API 密钥管理 ==========
+    
+    def generate_user_api_key(self, user_id: int) -> Optional[str]:
+        """生成并保存新的用户 API 密钥"""
+        try:
+            import secrets
+            # 生成 32 字节的随机密钥，编码为 64 字符的十六进制字符串
+            api_key = secrets.token_hex(32)
+            
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE users SET api_key = %s WHERE id = %s",
+                        (api_key, user_id)
+                    )
+                conn.commit()
+            
+            logger.info(f"已为用户 {user_id} 生成新的 API 密钥")
+            return api_key
+        except Exception as e:
+            logger.error(f"生成 API 密钥失败: {str(e)}")
+            return None
+    
+    def get_user_api_key(self, user_id: int) -> Optional[str]:
+        """获取用户的 API 密钥"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT api_key FROM users WHERE id = %s", (user_id,))
+                    result = cur.fetchone()
+                    return result[0] if result else None
+        except Exception as e:
+            logger.error(f"获取 API 密钥失败: {str(e)}")
+            return None
+    
+    def get_user_by_api_key(self, api_key: str) -> Optional[Dict]:
+        """根据 API 密钥获取用户"""
+        if not api_key:
+            return None
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        "SELECT id, username, email, role, is_active FROM users WHERE api_key = %s AND is_active = TRUE",
+                        (api_key,)
+                    )
+                    return cur.fetchone()
+        except Exception as e:
+            logger.error(f"根据 API 密钥获取用户失败: {str(e)}")
+            return None
+    
+    def delete_user_api_key(self, user_id: int) -> bool:
+        """删除用户的 API 密钥"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE users SET api_key = NULL WHERE id = %s",
+                        (user_id,)
+                    )
+                conn.commit()
+            logger.info(f"已删除用户 {user_id} 的 API 密钥")
+            return True
+        except Exception as e:
+            logger.error(f"删除 API 密钥失败: {str(e)}")
             return False
     
     def change_user_password(self, user_id: int, new_password: str) -> bool:

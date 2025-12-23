@@ -123,7 +123,9 @@
             <!-- 用户状态 -->
             <div v-if="authStore.isLoggedIn" class="header-item user-info">
               <el-icon><User /></el-icon>
-              <span class="user-name">{{ authStore.username }}</span>
+              <span class="user-name clickable" @click="router.push('/user-center')">
+                {{ authStore.username }}
+              </span>
               <el-tag v-if="authStore.isAdmin" size="small" type="warning">管理员</el-tag>
               <el-button text type="danger" size="small" @click="handleLogout">登出</el-button>
             </div>
@@ -749,6 +751,15 @@ onUnmounted(() => {
 .user-name {
   font-weight: 500;
   color: var(--text-primary);
+}
+
+.user-name.clickable {
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.user-name.clickable:hover {
+  color: var(--primary-color);
 }
 
 .login-btn {

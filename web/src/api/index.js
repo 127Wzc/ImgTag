@@ -399,6 +399,28 @@ export const changeUserPassword = (userId, newPassword) => {
     return api.put(`/auth/users/${userId}/password`, null, { params: { new_password: newPassword } })
 }
 
+// ============ 个人中心 API ============
+
+// 修改自己的密码
+export const changeMyPassword = (oldPassword, newPassword) => {
+    return api.put('/auth/me/password', { old_password: oldPassword, new_password: newPassword })
+}
+
+// 生成 API 密钥
+export const generateApiKey = () => {
+    return api.post('/auth/me/api-key')
+}
+
+// 获取 API 密钥（脱敏）
+export const getApiKey = () => {
+    return api.get('/auth/me/api-key')
+}
+
+// 删除 API 密钥
+export const deleteApiKey = () => {
+    return api.delete('/auth/me/api-key')
+}
+
 // ============ 审批 API ============
 
 // 获取待审批列表

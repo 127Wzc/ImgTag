@@ -66,6 +66,7 @@ class ImageUpdate(BaseModel):
     image_url: Optional[str] = Field(default=None, description="新的图像 URL")
     tags: Optional[List[str]] = Field(default=None, description="新的标签列表")
     description: Optional[str] = Field(default=None, description="新的描述")
+    original_url: Optional[str] = Field(default=None, description="原始来源地址")
 
 
 # ============= 搜索请求 =============

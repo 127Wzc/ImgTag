@@ -11,8 +11,9 @@ from typing import Dict, Any, List
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends, Header
 
-from imgtag.db import db
+from imgtag.db import db, config_db
 from imgtag.api.endpoints.auth import get_current_user_optional, get_current_user
+from imgtag.api.dependencies import verify_api_key, require_api_key
 from imgtag.services import vision_service, embedding_service, upload_service
 from imgtag.schemas import (
     ImageCreateByUrl,
@@ -390,7 +391,8 @@ async def update_image(
             description=image_update.description,
             embedding=embedding_vector,
             tag_source="user",
-            user_id=user_id
+            user_id=user_id,
+            original_url=image_update.original_url
         )
         
         if not success:
@@ -557,84 +559,3 @@ async def batch_update_tags(
         "process_time": f"{process_time:.4f}秒"
     }
 
-
-@router.get("/random")
-async def random_images(
-    tags: List[str] = [],
-    count: int = 1,
-    include_full_url: bool = True,
-    api_key: str = None,
-    x_api_key: str = Header(None, alias="X-API-Key")
-):
-    """
-    根据标签获取随机图片（外部 API）
-    
-    - **tags**: 标签列表，支持多个标签（AND 关系）
-    - **count**: 返回图片数量，默认 1，最大 50
-    - **include_full_url**: 是否返回完整 URL（拼接 base_url）
-    - **api_key**: 鉴权密钥（参数方式）
-    - **X-API-Key**: 鉴权密钥（Header 方式）
-    
-    返回示例：
-    ```json
-    {
-        "images": [
-            {
-                "id": 1,
-                "url": "http://example.com/uploads/xxx.jpg",
-                "description": "图片描述",
-                "tags": ["标签1", "标签2"]
-            }
-        ],
-        "count": 1
-    }
-    ```
-    """
-    start_time = time.time()
-    logger.info(f"随机图片请求: tags={tags}, count={count}")
-    
-    # 获取配置
-    from imgtag.db import config_db
-    
-    # 验证密钥
-    expected_key = config_db.get_string("external_api_key", "")
-    if expected_key:  # 如果配置了密钥，则需要验证
-        provided_key = api_key or x_api_key
-        if not provided_key or provided_key != expected_key:
-            raise HTTPException(status_code=401, detail="无效的 API 密钥")
-    
-    # 限制数量
-    count = min(count, 50)
-    
-    try:
-        # 获取 base_url 配置
-        base_url = ""
-        if include_full_url:
-            base_url = config_db.get_string("base_url", "")
-        
-        # 查询随机图片
-        result = db.get_random_images_by_tags(tags, count)
-        
-        images = []
-        for img in result:
-            url = img.get("image_url", "")
-            if include_full_url and base_url and url.startswith("/"):
-                url = base_url.rstrip("/") + url
-            
-            images.append({
-                "id": img.get("id"),
-                "url": url,
-                "description": img.get("description", ""),
-                "tags": img.get("tags", [])
-            })
-        
-        process_time = time.time() - start_time
-        perf_logger.info(f"随机图片查询耗时: {process_time:.4f}秒")
-        
-        return {
-            "images": images,
-            "count": len(images)
-        }
-    except Exception as e:
-        logger.error(f"随机图片查询失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"随机图片查询失败: {str(e)}")

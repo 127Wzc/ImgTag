@@ -331,6 +331,15 @@
               </el-input>
             </div>
 
+            <div v-if="selectedImage.original_url && selectedImage.original_url !== selectedImage.image_url" class="info-section">
+              <h3>原始地址</h3>
+              <el-input :model-value="selectedImage.original_url" readonly>
+                <template #append>
+                  <el-button @click="copyOriginalUrl">复制</el-button>
+                </template>
+              </el-input>
+            </div>
+
             <div v-if="authStore.isLoggedIn" class="info-section">
               <h3>操作</h3>
               <el-button @click="openAddToCollectionDialog">
@@ -398,6 +407,15 @@
                 />
                 <el-button type="primary" @click="addUserTag" :disabled="!newUserTag.trim()">添加</el-button>
               </div>
+            </div>
+
+            <div class="info-section">
+              <h3>原始地址</h3>
+              <el-input
+                v-model="editForm.original_url"
+                placeholder="图片原始来源地址（可选）"
+                clearable
+              />
             </div>
           </div>
           
@@ -927,7 +945,8 @@ const startEdit = () => {
     id: selectedImage.value.id,
     description: selectedImage.value.description || '',
     aiTags: [...aiTagNames],
-    userTags: [...userTagNames]
+    userTags: [...userTagNames],
+    original_url: selectedImage.value.original_url || ''
   }
   newUserTag.value = ''
   isEditing.value = true
@@ -981,13 +1000,15 @@ const saveEdit = async () => {
     // 保存时后端会自动重建向量
     await updateImage(editForm.value.id, {
       description: editForm.value.description,
-      tags: allTags
+      tags: allTags,
+      original_url: editForm.value.original_url || null
     })
     ElMessage.success('保存成功，向量已更新')
     
     // 更新当前显示的数据
     selectedImage.value.description = editForm.value.description
     selectedImage.value.tags = allTags
+    selectedImage.value.original_url = editForm.value.original_url
     
     // 更新 tags_with_source 以便正确显示分类
     selectedImage.value.tags_with_source = [
@@ -1076,6 +1097,13 @@ const copyUrl = async () => {
   const fullUrl = await getFullImageUrl(selectedImage.value.image_url)
   navigator.clipboard.writeText(fullUrl)
   ElMessage.success('已复制到剪贴板')
+}
+
+const copyOriginalUrl = () => {
+  if (selectedImage.value?.original_url) {
+    navigator.clipboard.writeText(selectedImage.value.original_url)
+    ElMessage.success('原始地址已复制到剪贴板')
+  }
 }
 
 const confirmDelete = (image) => {
