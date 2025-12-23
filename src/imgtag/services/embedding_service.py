@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """
@@ -23,6 +23,63 @@ ONNX_MODEL_MAP = {
     "shibing624/text2vec-base-chinese": ("GanymedeNil/text2vec-base-chinese-onnx", 768),
 }
 
+# Tokenizer 所需的文件列表
+TOKENIZER_FILES = [
+    ("tokenizer.json", True),        # (文件名, 是否必需)
+    ("tokenizer_config.json", True),
+    ("special_tokens_map.json", True),
+    ("vocab.txt", False),            # 某些模型可能没有
+]
+
+
+def _download_file(url: str, dest_path: Path, timeout: int = 300, stream: bool = False) -> bool:
+    """
+    下载单个文件到指定路径
+    
+    Args:
+        url: 下载地址
+        dest_path: 保存路径
+        timeout: 超时时间（秒）
+        stream: 是否使用流式下载（用于大文件）
+    
+    Returns:
+        是否下载成功
+    """
+    import requests
+    
+    try:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        response = requests.get(url, stream=stream, timeout=timeout)
+        response.raise_for_status()
+        
+        if stream:
+            # 流式下载大文件，带进度显示
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(dest_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        # 每 10MB 打印一次进度
+                        if total_size > 0 and downloaded % (10 * 1024 * 1024) < 8192:
+                            percent = downloaded * 100 / total_size
+                            logger.info(f"  下载进度: {percent:.1f}%")
+        else:
+            # 直接下载小文件
+            dest_path.write_bytes(response.content)
+        
+        return True
+        
+    except requests.exceptions.Timeout:
+        logger.warning(f"下载超时: {url}")
+        return False
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"下载失败: {url} - {e}")
+        return False
+
 
 class ONNXEmbeddingModel:
     """ONNX 嵌入模型封装"""
@@ -46,19 +103,19 @@ class ONNXEmbeddingModel:
     def _load_model(self):
         """加载 ONNX 模型和分词器
         
-        优先从本地 models/ 目录加载 tokenizer 配置，避免网络请求。
-        ONNX 模型文件从配置的镜像站下载（如果本地没有缓存）。
+        优先从本地 models/ 目录加载完整模型（tokenizer + ONNX），实现完全离线运行。
+        如果本地没有模型文件，则从配置的镜像站下载。
+        
+        本地模型目录结构：
+        models/{model_name}/
+        ├── tokenizer.json
+        ├── tokenizer_config.json
+        ├── vocab.txt
+        ├── special_tokens_map.json
+        └── onnx/
+            └── model.onnx
         """
         from imgtag.db import config_db
-        
-        # 设置 Hugging Face 镜像站（必须在导入 transformers 之前设置）
-        hf_endpoint = config_db.get("hf_endpoint", "https://hf-mirror.com")
-        if hf_endpoint:
-            # 设置多个环境变量以确保所有库都使用镜像站
-            os.environ["HF_ENDPOINT"] = hf_endpoint
-            os.environ["HUGGINGFACE_HUB_ENDPOINT"] = hf_endpoint  # 兼容旧版本
-            os.environ["HF_MIRROR"] = hf_endpoint  # 部分工具使用这个
-            logger.info(f"使用 Hugging Face 镜像站: {hf_endpoint}")
         
         try:
             import onnxruntime as ort
@@ -70,15 +127,35 @@ class ONNXEmbeddingModel:
                 "或切换到 '在线 API' 模式"
             )
         
-        # 检查本地 models 目录是否有预置的 tokenizer 文件
-        # 本地目录结构：models/{model_name}/ (如 models/BAAI/bge-small-zh-v1.5/)
-        project_root = Path(__file__).resolve().parent.parent.parent.parent  # src/imgtag/services -> project root
+        # 检查本地 models 目录是否有预置的完整模型
+        project_root = Path(__file__).resolve().parent.parent.parent.parent
         local_model_dir = project_root / "models" / self.model_name
-        logger.info(f"检查本地模型目录: {local_model_dir}, 存在: {local_model_dir.exists()}")
+        local_onnx_path = local_model_dir / "onnx" / "model.onnx"
+        local_onnx_path_alt = local_model_dir / "model.onnx"  # 备用位置
         
+        logger.info(f"检查本地模型目录: {local_model_dir}")
+        logger.info(f"  - 目录存在: {local_model_dir.exists()}")
+        logger.info(f"  - tokenizer.json 存在: {(local_model_dir / 'tokenizer.json').exists()}")
+        logger.info(f"  - onnx/model.onnx 存在: {local_onnx_path.exists()}")
+        logger.info(f"  - model.onnx 存在: {local_onnx_path_alt.exists()}")
+        
+        # 判断是否可以完全离线加载
+        has_local_tokenizer = local_model_dir.exists() and (local_model_dir / "tokenizer.json").exists()
+        has_local_onnx = local_onnx_path.exists() or local_onnx_path_alt.exists()
+        can_load_offline = has_local_tokenizer and has_local_onnx
+        
+        if can_load_offline:
+            logger.info("✓ 发现完整的本地模型，将完全离线加载（无需网络）")
+        else:
+            logger.info("✗ 本地模型不完整，需要从网络下载")
+            if not has_local_tokenizer:
+                logger.info("  - 缺少 tokenizer 文件")
+            if not has_local_onnx:
+                logger.info("  - 缺少 ONNX 模型文件")
+        
+        # ===== 加载 Tokenizer =====
         tokenizer_loaded = False
-        if local_model_dir.exists() and (local_model_dir / "tokenizer.json").exists():
-            # 从本地目录加载 tokenizer（无需网络请求）
+        if has_local_tokenizer:
             logger.info(f"从本地加载 tokenizer: {local_model_dir}")
             try:
                 self.tokenizer = AutoTokenizer.from_pretrained(
@@ -87,45 +164,93 @@ class ONNXEmbeddingModel:
                     trust_remote_code=False
                 )
                 tokenizer_loaded = True
+                logger.info("✓ 本地 tokenizer 加载成功")
             except Exception as e:
-                logger.warning(f"本地 tokenizer 加载失败: {e}，将从网络下载")
+                logger.warning(f"本地 tokenizer 加载失败: {e}")
         
         if not tokenizer_loaded:
-            # 从网络下载 tokenizer（使用 ONNX 仓库，因为原始仓库可能没有 tokenizer.json）
-            hf_url = f"{hf_endpoint}/{self.onnx_repo}" if hf_endpoint else f"https://huggingface.co/{self.onnx_repo}"
-            logger.info(f"从网络下载 tokenizer: {self.onnx_repo} (URL: {hf_url})")
+            # 使用 requests 下载 tokenizer 文件到本地目录
+            hf_endpoint = config_db.get("hf_endpoint", "https://hf-mirror.com")
+            logger.info(f"使用镜像站下载 tokenizer: {hf_endpoint}/{self.onnx_repo}")
+            
+            local_model_dir.mkdir(parents=True, exist_ok=True)
+            
+            download_ok = True
+            for filename, required in TOKENIZER_FILES:
+                dest_path = local_model_dir / filename
+                if dest_path.exists():
+                    logger.info(f"  ✓ 已存在: {filename}")
+                    continue
+                
+                url = f"{hf_endpoint}/{self.onnx_repo}/resolve/main/{filename}"
+                logger.info(f"  下载: {filename}")
+                
+                if _download_file(url, dest_path, timeout=60):
+                    logger.info(f"  ✓ {filename} 下载成功")
+                elif required:
+                    download_ok = False
+                else:
+                    logger.info(f"  - {filename} 不存在（可选文件）")
+            
+            if not download_ok:
+                raise RuntimeError("Tokenizer 下载失败，请检查网络或手动下载")
+            
+            # 从下载的本地文件加载 tokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(
-                self.onnx_repo,
+                str(local_model_dir),
+                local_files_only=True,
                 trust_remote_code=False
             )
+            logger.info("✓ 网络 tokenizer 下载并加载成功")
         
-        # 下载/加载 ONNX 模型文件
-        from huggingface_hub import hf_hub_download, constants
+        # ===== 加载 ONNX 模型 =====
+        onnx_path = None
         
-        # 显示 HF 缓存目录
-        hf_cache_dir = constants.HF_HUB_CACHE
-        logger.info(f"Hugging Face 缓存目录: {hf_cache_dir}")
+        if has_local_onnx:
+            # 优先使用本地 ONNX 文件
+            if local_onnx_path.exists():
+                onnx_path = str(local_onnx_path)
+            else:
+                onnx_path = str(local_onnx_path_alt)
+            logger.info(f"从本地加载 ONNX 模型: {onnx_path}")
+        else:
+            # 从网络下载 ONNX 模型
+            hf_endpoint = config_db.get("hf_endpoint", "https://hf-mirror.com")
+            logger.info(f"使用镜像站下载 ONNX 模型: {hf_endpoint}")
+            
+            target_onnx_path = local_model_dir / "onnx" / "model.onnx"
+            
+            # 尝试多个可能的路径
+            onnx_urls = [
+                f"{hf_endpoint}/{self.onnx_repo}/resolve/main/onnx/model.onnx",
+                f"{hf_endpoint}/{self.onnx_repo}/resolve/main/model.onnx",
+            ]
+            
+            download_success = False
+            for url in onnx_urls:
+                logger.info(f"尝试下载: {url}")
+                if _download_file(url, target_onnx_path, timeout=600, stream=True):
+                    onnx_path = str(target_onnx_path)
+                    logger.info(f"✓ ONNX 模型下载成功: {onnx_path}")
+                    download_success = True
+                    break
+            
+            if not download_success:
+                logger.error("")
+                logger.error("========== 离线模型下载说明 ==========")
+                logger.error(f"请手动下载模型并放到: {local_model_dir}/")
+                logger.error("")
+                logger.error("方法1: 使用下载脚本")
+                logger.error("  python scripts/download_model.py")
+                logger.error("")
+                logger.error("方法2: 手动下载")
+                logger.error(f"  从 https://hf-mirror.com/{self.onnx_repo} 下载以下文件:")
+                logger.error("  - tokenizer.json, tokenizer_config.json, special_tokens_map.json")
+                logger.error("  - onnx/model.onnx")
+                logger.error("======================================")
+                raise RuntimeError("无法加载嵌入模型，请查看上方说明手动下载模型文件")
         
-        try:
-            # 尝试下载 ONNX 模型文件
-            onnx_path = hf_hub_download(
-                repo_id=self.onnx_repo,
-                filename="onnx/model.onnx",
-            )
-            logger.info(f"ONNX 模型路径: {onnx_path}")
-        except Exception:
-            # 备用路径
-            try:
-                onnx_path = hf_hub_download(
-                    repo_id=self.onnx_repo,
-                    filename="model.onnx",
-                )
-                logger.info(f"ONNX 模型路径: {onnx_path}")
-            except Exception as e:
-                logger.error(f"下载 ONNX 模型失败: {e}")
-                raise
-        
-        # 创建 ONNX 推理会话
+        # ===== 创建 ONNX 推理会话 =====
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         
@@ -135,7 +260,7 @@ class ONNXEmbeddingModel:
             providers=['CPUExecutionProvider']
         )
         
-        logger.info(f"ONNX 模型加载成功，维度: {self.dimensions}")
+        logger.info(f"✓ ONNX 模型加载成功，维度: {self.dimensions}")
     
     def encode(self, text: str, normalize_embeddings: bool = True) -> np.ndarray:
         """编码文本为向量"""
