@@ -6,7 +6,9 @@
 使用 OpenAI 兼容的 API 分析图像
 """
 
+# 标准库
 import base64
+import io
 import json
 import re
 import time
@@ -14,8 +16,12 @@ import datetime
 from dataclasses import dataclass
 from typing import List, Optional
 
+# 第三方库
+import httpx
+from PIL import Image
 from openai import AsyncOpenAI
 
+# 本地模块
 from imgtag.core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -55,6 +61,109 @@ class VisionService:
         """获取模型名称"""
         from imgtag.db import config_db
         return config_db.get("vision_model", "gpt-4o-mini")
+    
+    def _compress_image(self, image_data: bytes, max_size: int = 1024 * 1024, max_dimension: int = 2048) -> tuple:
+        """压缩图片到指定大小以内（优化识别效果）
+        
+        支持格式：JPEG, PNG, GIF（取第一帧）, WebP, BMP 等
+        
+        压缩策略（按优先级）：
+        1. GIF 提取第一帧转为静态图
+        2. 缩放到最大边长 2048px（视觉模型内部也会缩放，不影响识别）
+        3. 使用 JPEG 质量 85 压缩
+        4. 如果仍超限，逐步降低分辨率（优先于降低质量）
+        5. 最低质量保持 60，避免影响识别效果
+        
+        Args:
+            image_data: 原始图片字节数据
+            max_size: 最大文件大小（字节），默认 1MB
+            max_dimension: 最大边长（像素），默认 2048
+            
+        Returns:
+            (压缩后的字节数据, MIME类型)
+        """
+        
+        # 打开图片
+        img = Image.open(io.BytesIO(image_data))
+        original_size = img.size
+        original_format = img.format or "UNKNOWN"
+        
+        logger.debug(f"原始图片: {original_format}, {original_size[0]}x{original_size[1]}, mode={img.mode}")
+        
+        # GIF 处理：提取第一帧
+        if original_format == 'GIF':
+            img.seek(0)  # 确保是第一帧
+            logger.debug("GIF 图片，提取第一帧")
+        
+        # 转换为 RGB（去除透明通道，JPEG 不支持）
+        if img.mode in ('RGBA', 'P', 'LA', 'PA'):
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            # 处理带透明通道的图片
+            if img.mode in ('RGBA', 'LA', 'PA'):
+                try:
+                    alpha = img.split()[-1]
+                    background.paste(img, mask=alpha)
+                except Exception:
+                    background.paste(img)
+            else:
+                background.paste(img)
+            img = background
+        elif img.mode not in ('RGB', 'L'):
+            img = img.convert('RGB')
+        elif img.mode == 'L':
+            img = img.convert('RGB')
+        
+        # 第一步：缩放到最大边长
+        width, height = img.size
+        if max(width, height) > max_dimension:
+            ratio = max_dimension / max(width, height)
+            new_size = (int(width * ratio), int(height * ratio))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+            logger.debug(f"图片缩放: {width}x{height} -> {new_size[0]}x{new_size[1]}")
+        
+        # 第二步：尝试高质量压缩
+        quality = 85
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=quality, optimize=True)
+        if len(buffer.getvalue()) <= max_size:
+            logger.debug(f"压缩成功: quality={quality}, size={len(buffer.getvalue())/1024:.1f}KB")
+            return buffer.getvalue(), "image/jpeg"
+        
+        # 第三步：优先缩小分辨率（保持质量 75）
+        scale_steps = [1536, 1280, 1024, 768, 512]
+        for target_dim in scale_steps:
+            if max(img.size) > target_dim:
+                ratio = target_dim / max(img.size)
+                new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                resized = img.resize(new_size, Image.Resampling.LANCZOS)
+                
+                buffer = io.BytesIO()
+                resized.save(buffer, format='JPEG', quality=75, optimize=True)
+                
+                if len(buffer.getvalue()) <= max_size:
+                    logger.debug(f"压缩成功（缩小分辨率）: {new_size[0]}x{new_size[1]}, quality=75, size={len(buffer.getvalue())/1024:.1f}KB")
+                    return buffer.getvalue(), "image/jpeg"
+        
+        # 第四步：最后手段 - 降低质量（但不低于 60）
+        quality = 65
+        while quality >= 60:
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=quality, optimize=True)
+            
+            if len(buffer.getvalue()) <= max_size:
+                logger.debug(f"压缩成功（降低质量）: quality={quality}, size={len(buffer.getvalue())/1024:.1f}KB")
+                return buffer.getvalue(), "image/jpeg"
+            
+            quality -= 5
+        
+        # 返回最终结果（使用最小分辨率和质量 60）
+        final_img = img.resize((512, int(512 * img.size[1] / img.size[0])), Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        final_img.save(buffer, format='JPEG', quality=60, optimize=True)
+        logger.warning(f"图片压缩后仍超限: {len(buffer.getvalue())/1024:.1f}KB (原始: {original_format} {original_size})")
+        return buffer.getvalue(), "image/jpeg"
     
     def _get_prompt(self) -> str:
         """获取分析提示词"""
@@ -120,54 +229,95 @@ class VisionService:
             raise
     
     async def analyze_image_base64(self, image_data: bytes, mime_type: str = "image/jpeg") -> ImageAnalysisResult:
-        """分析 Base64 编码的图像"""
-        logger.info(f"分析 Base64 图像, 类型: {mime_type}")
+        """分析 Base64 编码的图像（支持 OpenAI 和 Gemini 原生格式）"""
+        from imgtag.db import config_db
+        
+        original_size = len(image_data)
+        logger.info(f"分析 Base64 图像, 类型: {mime_type}, 原始大小: {original_size/1024:.1f} KB")
+        
+        # 从配置读取压缩阈值（KB），默认 2048KB = 2MB
+        max_image_size_kb = config_db.get_int("vision_max_image_size", 2048)
+        max_image_size = max_image_size_kb * 1024  # 转为字节
+        
+        # 图片过大时自动压缩
+        if original_size > max_image_size:
+            logger.info(f"图片过大 ({original_size/1024:.1f} KB > {max_image_size_kb} KB)，正在压缩...")
+            image_data, mime_type = self._compress_image(image_data, max_size=max_image_size)
+            logger.info(f"压缩后: {len(image_data)/1024:.1f} KB, 类型: {mime_type}")
         
         try:
-            client = self._get_client()
+            from imgtag.db import config_db
+            
+            api_base = config_db.get("vision_api_base_url", "https://api.openai.com/v1")
+            api_key = config_db.get("vision_api_key", "")
             model = self._get_model()
             prompt = self._get_prompt()
+            
+            if not api_key:
+                raise ValueError("视觉模型 API 密钥未配置")
             
             base64_image = base64.b64encode(image_data).decode("utf-8")
             data_url = f"data:{mime_type};base64,{base64_image}"
             
             # DEBUG: 打印请求参数
-            from imgtag.db import config_db
-            api_base = config_db.get("vision_api_base_url", "https://api.openai.com/v1")
             logger.debug(f"视觉模型 API 请求参数:")
             logger.debug(f"  - API Base: {api_base}")
             logger.debug(f"  - Model: {model}")
             logger.debug(f"  - Image: Base64 ({len(image_data)} bytes, {mime_type})")
             logger.debug(f"  - Prompt: {prompt[:100]}...")
-            logger.debug(f"  - stream: False")
             
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": data_url}}
-                        ]
+            # 使用 httpx 直接请求，支持原生 Gemini 响应
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    f"{api_base.rstrip('/')}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {"type": "image_url", "image_url": {"url": data_url}}
+                                ]
+                            }
+                        ],
+                        "stream": False
                     }
-                ],
-                stream=False,  # 明确禁用流式响应
-            )
+                )
+                
+                # 检查响应状态
+                if response.status_code != 200:
+                    error_text = response.text[:500] if response.text else "无响应内容"
+                    logger.error(f"API 请求失败: HTTP {response.status_code}, 响应: {error_text}")
+                    raise ValueError(f"API 请求失败: HTTP {response.status_code}")
+                
+                response_data = response.json()
             
-            # DEBUG: 打印响应元数据
-            logger.debug(f"视觉模型 API 响应:")
-            logger.debug(f"  - Model: {getattr(response, 'model', None)}")
-            logger.debug(f"  - Response Type: {type(response)}")
+            # DEBUG: 打印响应
+            logger.debug(f"视觉模型 API 响应: {json.dumps(response_data, ensure_ascii=False, default=str)[:500]}...")
             
-            # 使用统一的内容提取方法（支持 OpenAI 和 Google 格式）
-            content = self._extract_content_from_response(response)
+            # 提取内容（支持 OpenAI 和 Gemini 格式）
+            content = self._extract_content_from_response(response_data)
             logger.debug(f"  - Extracted content length: {len(content)}")
                 
             return self._parse_response(content)
             
+        except httpx.ConnectError as e:
+            logger.error(f"视觉模型 API 连接失败: {api_base} - {str(e)}")
+            raise ValueError(f"无法连接到 API: {api_base}")
+        except httpx.ReadError as e:
+            logger.error(f"视觉模型 API 读取错误（服务器断开连接）: {str(e)}")
+            raise ValueError(f"API 读取错误，服务器可能不可用或响应异常")
+        except httpx.TimeoutException as e:
+            logger.error(f"视觉模型 API 请求超时: {str(e)}")
+            raise ValueError("API 请求超时")
         except Exception as e:
-            logger.error(f"视觉模型分析失败: {str(e)}")
+            import traceback
+            logger.error(f"视觉模型分析失败: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
             raise
 
     def _convert_google_to_openai(self, google_response: dict) -> dict:

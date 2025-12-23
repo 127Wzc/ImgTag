@@ -87,6 +87,18 @@
                   开启后会将 GIF 动图的第一帧转换为静态图后分析
                 </div>
               </el-form-item>
+              <el-form-item label="压缩阈值">
+                <el-input-number 
+                  v-model.number="configForm.vision_max_image_size" 
+                  :min="256" 
+                  :max="10240"
+                  :step="256"
+                />
+                <span style="margin-left: 8px; color: var(--text-secondary);">KB</span>
+                <div class="form-hint">
+                  超过此大小的图片会自动压缩后再发送给视觉模型，默认 2048KB。设置过大可能导致 API 请求失败
+                </div>
+              </el-form-item>
             </div>
             
             <div class="form-actions">
@@ -665,6 +677,7 @@ const configForm = reactive({
   vision_prompt: '',
   vision_allowed_extensions: 'jpg,jpeg,png,webp,bmp',
   vision_convert_gif: true,
+  vision_max_image_size: 2048,
   embedding_mode: 'local',
   embedding_local_model: 'BAAI/bge-small-zh-v1.5',
   hf_endpoint: 'https://hf-mirror.com',
@@ -702,8 +715,8 @@ const fetchConfig = async () => {
     const data = await getAllConfigs()
     Object.keys(configForm).forEach(key => {
       if (data[key] !== undefined) {
-        if (key === 'embedding_dimensions') {
-          configForm[key] = parseInt(data[key]) || 1536
+        if (key === 'embedding_dimensions' || key === 'vision_max_image_size') {
+          configForm[key] = parseInt(data[key]) || (key === 'vision_max_image_size' ? 1024 : 1536)
         } else if (key === 'vision_convert_gif') {
           // 将字符串转换为布尔值
           configForm[key] = data[key] === 'true' || data[key] === true
@@ -759,7 +772,8 @@ const saveConfig = async () => {
     const configs = {
       ...configForm,
       embedding_dimensions: String(configForm.embedding_dimensions),
-      vision_convert_gif: String(configForm.vision_convert_gif)
+      vision_convert_gif: String(configForm.vision_convert_gif),
+      vision_max_image_size: String(configForm.vision_max_image_size)
     }
     await updateConfigs(configs)
     ElMessage.success('配置保存成功')
