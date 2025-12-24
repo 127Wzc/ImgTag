@@ -334,7 +334,7 @@ export const syncTags = () => {
 }
 
 export const renameTag = (oldName, newName) => {
-    return api.put(`/tags/${encodeURIComponent(oldName)}`, { new_name: newName })
+    return api.put(`/tags/${encodeURIComponent(oldName)}`, { name: newName })
 }
 
 export const deleteTag = (tagName) => {

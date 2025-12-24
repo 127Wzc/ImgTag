@@ -162,7 +162,7 @@ const saveEdit = async (row) => {
     row.name = editName.value
     cancelEdit()
   } catch (error) {
-    ElMessage.error('重命名失败')
+    ElMessage.error(error.message || '重命名失败')
   }
 }
 

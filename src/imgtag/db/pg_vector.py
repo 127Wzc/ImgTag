@@ -1338,29 +1338,45 @@ class PGVectorDB:
             logger.error(f"获取标签列表失败: {str(e)}")
             return []
 
-    def rename_tag(self, old_name: str, new_name: str) -> bool:
-        """重命名标签（同时更新 images 表）"""
+    def tag_exists(self, name: str) -> bool:
+        """检查标签是否存在（高效索引查询）"""
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
-                    # 1. 更新 tags 表
+                    cursor.execute("SELECT 1 FROM tags WHERE name = %s LIMIT 1;", (name,))
+                    return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"检查标签存在失败: {str(e)}")
+            return False
+
+    def rename_tag(self, old_name: str, new_name: str) -> bool:
+        """重命名标签（ID 不变，仅修改名称）
+        
+        如果新名称已存在则拒绝重命名。
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 1. 检查新标签名是否已存在
+                    cursor.execute("SELECT id FROM tags WHERE name = %s;", (new_name,))
+                    if cursor.fetchone():
+                        logger.warning(f"标签 '{new_name}' 已存在，无法重命名")
+                        return False
+                    
+                    # 2. 获取旧标签的 ID
+                    cursor.execute("SELECT id FROM tags WHERE name = %s;", (old_name,))
+                    old_tag = cursor.fetchone()
+                    
+                    if not old_tag:
+                        logger.warning(f"旧标签 '{old_name}' 不存在")
+                        return False
+                    
+                    old_tag_id = old_tag[0]
+                    
+                    # 3. 直接重命名（ID 保持不变）
                     cursor.execute("""
-                    INSERT INTO tags (name, usage_count) VALUES (%s, 0)
-                    ON CONFLICT (name) DO NOTHING;
-                    """, (new_name,))
-                    
-                    # 2. 更新 images 表中的标签数组
-                    cursor.execute("""
-                    UPDATE images 
-                    SET tags = array_replace(tags, %s, %s)
-                    WHERE %s = ANY(tags);
-                    """, (old_name, new_name, old_name))
-                    
-                    # 3. 删除旧标签
-                    cursor.execute("DELETE FROM tags WHERE name = %s;", (old_name,))
-                    
-                    # 4. 重新同步计数
-                    self.sync_tags()
+                    UPDATE tags SET name = %s, updated_at = NOW() WHERE id = %s;
+                    """, (new_name, old_tag_id))
                     
                     return True
         except Exception as e:
@@ -1368,18 +1384,11 @@ class PGVectorDB:
             return False
 
     def delete_tag(self, tag_name: str) -> bool:
-        """删除标签（从所有图片中移除）"""
+        """删除标签（image_tags 会级联删除）"""
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
-                    # 1. 从 images 表中移除标签
-                    cursor.execute("""
-                    UPDATE images 
-                    SET tags = array_remove(tags, %s)
-                    WHERE %s = ANY(tags);
-                    """, (tag_name, tag_name))
-                    
-                    # 2. 从 tags 表删除
+                    # 直接从 tags 表删除，image_tags 会通过外键级联删除
                     cursor.execute("DELETE FROM tags WHERE name = %s;", (tag_name,))
                     
                     return True

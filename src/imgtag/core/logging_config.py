@@ -47,7 +47,7 @@ def _get_log_level():
         try:
             from imgtag.core.config import settings
             _log_level = settings.LOG_LEVEL
-        except:
+        except Exception:
             _log_level = "INFO"
     return _log_level
 

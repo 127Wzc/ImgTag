@@ -6,20 +6,25 @@
 系统状态和健康检查
 """
 
+import hashlib
+import json
+import os
+from datetime import datetime
 from typing import Dict, Any
-from fastapi import APIRouter
 
-from imgtag.db import db
+import httpx
+from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi.responses import JSONResponse
+
+from imgtag.api.endpoints.auth import require_admin
 from imgtag.core.config import settings
 from imgtag.core.logging_config import get_logger
+from imgtag.db import config_db, db
+from imgtag.services.embedding_service import embedding_service
 
 logger = get_logger(__name__)
 
 router = APIRouter()
-
-
-from imgtag.services.embedding_service import embedding_service
-from imgtag.db import config_db
 
 @router.get("/status", response_model=Dict[str, Any])
 async def get_system_status():
@@ -76,7 +81,6 @@ async def get_config():
     }
 
 
-import httpx
 
 @router.get("/models")
 async def get_available_models():
@@ -120,12 +124,7 @@ async def get_available_models():
         return {"models": [], "error": str(e)}
 
 
-from fastapi import Depends, UploadFile, File
-from fastapi.responses import JSONResponse
-from imgtag.api.endpoints.auth import require_admin
-from imgtag.db import config_db
-import json
-from datetime import datetime
+
 
 
 @router.get("/export")
@@ -249,8 +248,7 @@ async def import_database(
 
 # ========== 重复检测 API ==========
 
-import hashlib
-import os
+
 
 @router.get("/duplicates")
 async def get_duplicate_images(admin: Dict = Depends(require_admin)):

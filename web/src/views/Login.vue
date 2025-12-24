@@ -50,7 +50,7 @@
             type="password" 
             placeholder="请输入密码"
             required
-            minlength="4"
+            minlength="6"
           />
         </div>
 
@@ -61,7 +61,7 @@
             type="password" 
             placeholder="请再次输入密码"
             required
-            minlength="4"
+            minlength="6"
           />
         </div>
 

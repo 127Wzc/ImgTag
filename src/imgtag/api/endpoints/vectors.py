@@ -112,7 +112,11 @@ install_status = {
 
 @router.post("/install-local", response_model=Dict[str, Any])
 async def install_local_dependencies(background_tasks: BackgroundTasks, admin: Dict = Depends(require_admin)):
-    """安装本地嵌入模型依赖（需管理员权限）"""
+    """安装本地嵌入模型依赖（需管理员权限）
+    
+    注意：此 API 在生产环境中不推荐使用，建议手动运行:
+        uv sync --extra local
+    """
     global install_status
     
     # 检查是否已安装
@@ -126,6 +130,9 @@ async def install_local_dependencies(background_tasks: BackgroundTasks, admin: D
         }
     except ImportError:
         pass
+    
+    # 安全警告
+    logger.warning("通过 Web API 安装依赖存在安全风险，建议手动运行: uv sync --extra local")
     
     # 检查是否正在安装
     if install_status["is_running"]:
@@ -147,7 +154,7 @@ async def install_local_dependencies(background_tasks: BackgroundTasks, admin: D
     
     return {
         "status": "started",
-        "message": "依赖安装已启动，这可能需要几分钟时间...",
+        "message": "依赖安装已启动（建议手动运行: uv sync --extra local），这可能需要几分钟时间...",
         "installed": False
     }
 
