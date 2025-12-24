@@ -135,6 +135,11 @@ export const healthCheck = () => {
     return api.get('/system/health')
 }
 
+// 获取仪表盘统计数据
+export const getDashboardStats = () => {
+    return api.get('/system/dashboard')
+}
+
 // 获取系统配置
 export const getSystemConfig = () => {
     return api.get('/system/config')

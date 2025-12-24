@@ -65,6 +65,85 @@ async def health_check():
     return {"status": "healthy"}
 
 
+@router.get("/dashboard", response_model=Dict[str, Any])
+async def get_dashboard_stats():
+    """获取仪表盘综合统计数据"""
+    logger.info("获取仪表盘统计数据")
+    
+    try:
+        from imgtag.services.task_queue import task_queue
+        from datetime import date
+        
+        # === 图片统计 ===
+        total_images = db.count_images()
+        
+        # 待分析图片数（没有 description 或 没有标签的）
+        pending_images = db.count_pending_images()
+        
+        # 已分析图片数
+        analyzed_images = total_images - pending_images
+        
+        # === 今日统计 ===
+        today = date.today().isoformat()
+        today_uploaded = db.count_images_by_date(today, "uploaded")
+        today_analyzed = db.count_images_by_date(today, "analyzed")
+        
+        # === 任务队列统计 ===
+        queue_status = task_queue.get_status()
+        total_tasks = queue_status.get("pending_count", 0) + queue_status.get("processing_count", 0) + queue_status.get("completed_count", 0)
+        processing_tasks = queue_status.get("processing_count", 0)
+        pending_tasks = queue_status.get("pending_count", 0)
+        queue_running = queue_status.get("running", False)
+        
+        # === 系统配置 ===
+        vision_model = config_db.get("vision_model", settings.VISION_MODEL)
+        embedding_mode = config_db.get("embedding_mode", "local")
+        
+        if embedding_mode == "local":
+            embedding_model = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
+        else:
+            embedding_model = config_db.get("embedding_model", settings.EMBEDDING_MODEL)
+        
+        embedding_dimensions = embedding_service.get_dimensions()
+        
+        return {
+            # 图片统计
+            "images": {
+                "total": total_images,
+                "pending": pending_images,
+                "analyzed": analyzed_images
+            },
+            # 今日统计
+            "today": {
+                "uploaded": today_uploaded,
+                "analyzed": today_analyzed
+            },
+            # 任务队列
+            "queue": {
+                "total": total_tasks,
+                "processing": processing_tasks,
+                "pending": pending_tasks,
+                "running": queue_running
+            },
+            # 系统配置
+            "system": {
+                "vision_model": vision_model,
+                "embedding_model": embedding_model,
+                "embedding_dimensions": embedding_dimensions,
+                "version": settings.PROJECT_VERSION
+            }
+        }
+    except Exception as e:
+        logger.error(f"获取仪表盘统计失败: {str(e)}")
+        return {
+            "error": str(e),
+            "images": {"total": 0, "pending": 0, "analyzed": 0},
+            "today": {"uploaded": 0, "analyzed": 0},
+            "queue": {"total": 0, "processing": 0, "pending": 0, "running": False},
+            "system": {"vision_model": "-", "embedding_model": "-", "embedding_dimensions": 0, "version": "-"}
+        }
+
+
 @router.get("/config", response_model=Dict[str, Any])
 async def get_config():
     """获取当前配置（不含敏感信息）"""

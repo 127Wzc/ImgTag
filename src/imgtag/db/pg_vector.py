@@ -1075,6 +1075,49 @@ class PGVectorDB:
             logger.error(f"获取图像总数失败: {str(e)}")
             return 0
     
+    def count_pending_images(self) -> int:
+        """获取待分析图片数量（没有标签的图片）"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM images i
+                        WHERE i.id NOT IN (SELECT DISTINCT image_id FROM image_tags);
+                    """)
+                    count = cursor.fetchone()[0]
+            return count
+        except Exception as e:
+            logger.error(f"获取待分析图片数量失败: {str(e)}")
+            return 0
+    
+    def count_images_by_date(self, date_str: str, count_type: str = "uploaded") -> int:
+        """按日期统计图片数量
+        
+        Args:
+            date_str: 日期字符串，格式 YYYY-MM-DD
+            count_type: 'uploaded' 按上传日期统计，'analyzed' 按分析完成（有标签）日期统计
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    if count_type == "uploaded":
+                        # 按上传日期（created_at）统计
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM images
+                            WHERE DATE(created_at) = %s;
+                        """, (date_str,))
+                    else:
+                        # 按分析完成日期统计（最近添加标签的日期）
+                        cursor.execute("""
+                            SELECT COUNT(DISTINCT it.image_id) FROM image_tags it
+                            WHERE DATE(it.added_at) = %s;
+                        """, (date_str,))
+                    count = cursor.fetchone()[0]
+            return count
+        except Exception as e:
+            logger.error(f"按日期统计图片失败: {str(e)}")
+            return 0
+    
     def search_images(
         self,
         tags: List[str] = None,
