@@ -169,6 +169,32 @@ body {
   transition: background var(--transition-slow);
 }
 
+/* ===== 移动端全局溢出控制 ===== */
+@media (max-width: 768px) {
+
+  html,
+  body {
+    overflow-x: hidden !important;
+    max-width: 100vw;
+  }
+
+  * {
+    max-width: 100%;
+  }
+
+  /* 所有表格强制不溢出 */
+  .el-table {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  /* 所有卡片不溢出 */
+  .card {
+    max-width: 100%;
+    overflow: hidden;
+  }
+}
+
 /* 背景图案叠加 */
 body::before {
   content: '';

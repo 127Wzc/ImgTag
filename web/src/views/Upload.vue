@@ -52,111 +52,6 @@
         <p>{{ uploadProgressText }}</p>
       </div>
     </div>
-    
-    <!-- 队列管理 -->
-    <div class="card queue-card">
-      <div class="card-header">
-        <el-icon :size="22" color="#f59e0b"><List /></el-icon>
-        <h2>分析队列</h2>
-        <div class="queue-status-badge" :class="{ running: queueStatus?.running }">
-          {{ queueStatus?.running ? '运行中' : '已停止' }}
-        </div>
-      </div>
-      
-      <div class="queue-stats">
-        <div class="stat-item">
-          <span class="stat-value">{{ queueStatus?.pending_count || 0 }}</span>
-          <span class="stat-label">待处理</span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-value">{{ queueStatus?.processing_count || 0 }}</span>
-          <span class="stat-label">处理中</span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-value">{{ queueStatus?.completed_count || 0 }}</span>
-          <span class="stat-label">已完成</span>
-        </div>
-      </div>
-      
-      <div class="queue-config">
-        <span class="config-label">并发线程数：</span>
-        <el-input-number 
-          v-model="maxWorkers" 
-          :min="1" 
-          :max="10" 
-          size="small"
-          @change="updateWorkers"
-        />
-      </div>
-      
-      <div class="queue-actions">
-        <el-button 
-          type="primary" 
-          :disabled="queueStatus?.running"
-          @click="handleAddUntagged"
-          round
-        >
-          <el-icon><Plus /></el-icon>
-          添加未分析图片
-        </el-button>
-        
-        <el-button 
-          v-if="!queueStatus?.running"
-          type="success"
-          :disabled="queueStatus?.pending_count === 0"
-          @click="handleStartQueue"
-          round
-        >
-          <el-icon><VideoPlay /></el-icon>
-          开始处理
-        </el-button>
-        
-        <el-button 
-          v-else
-          type="warning"
-          @click="handleStopQueue"
-          round
-        >
-          <el-icon><VideoPause /></el-icon>
-          停止处理
-        </el-button>
-        
-        <el-button 
-          type="danger" 
-          plain
-          :disabled="queueStatus?.pending_count === 0"
-          @click="handleClearQueue"
-          round
-        >
-          清空队列
-        </el-button>
-      </div>
-      
-      <!-- 处理中的任务 -->
-      <div v-if="queueStatus?.processing?.length > 0" class="queue-list">
-        <h4>正在处理</h4>
-        <div class="queue-item processing" v-for="task in queueStatus.processing" :key="task.image_id">
-          <el-icon class="is-loading"><Loading /></el-icon>
-          <span>图片 #{{ task.image_id }}</span>
-        </div>
-      </div>
-      
-      <!-- 最近完成的任务 -->
-      <div v-if="queueStatus?.recent_completed?.length > 0" class="queue-list">
-        <h4>最近完成</h4>
-        <div 
-          class="queue-item" 
-          :class="task.status"
-          v-for="task in queueStatus.recent_completed" 
-          :key="task.image_id"
-        >
-          <el-icon v-if="task.status === 'completed'"><SuccessFilled /></el-icon>
-          <el-icon v-else><CircleCloseFilled /></el-icon>
-          <span>图片 #{{ task.image_id }}</span>
-          <span v-if="task.error" class="error-text">{{ task.error }}</span>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -541,20 +436,141 @@ onUnmounted(() => {
   margin-left: auto;
 }
 
+/* ===== 移动端响应式样式 ===== */
+@media (max-width: 768px) {
+  .upload-page {
+    gap: 16px;
+  }
+  
+  .upload-card,
+  .queue-card {
+    padding: 16px;
+  }
+  
+  .card-header {
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+  }
+  
+  .card-header h2 {
+    font-size: 16px;
+  }
+  
+  /* 上传模式选择器 */
+  .upload-mode {
+    margin-bottom: 16px;
+  }
+  
+  .upload-mode :deep(.el-radio-group) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  
+  .upload-mode :deep(.el-radio-button) {
+    flex: 1;
+    min-width: auto;
+  }
+  
+  .upload-mode :deep(.el-radio-button__inner) {
+    width: 100%;
+    padding: 10px 8px;
+    font-size: 13px;
+  }
+  
+  /* 上传区域 */
+  .upload-area :deep(.el-upload-dragger) {
+    padding: 40px 16px;
+  }
+  
+  .upload-icon {
+    font-size: 36px;
+    margin-bottom: 12px;
+  }
+  
+  .upload-text p {
+    font-size: 14px;
+  }
+  
+  .upload-hint {
+    font-size: 11px;
+  }
+  
+  /* 上传操作按钮 */
+  .upload-actions {
+    flex-direction: column;
+  }
+  
+  .upload-actions .el-button {
+    width: 100%;
+  }
+  
+  /* 队列统计 */
+  .queue-stats {
+    gap: 16px;
+    padding: 16px;
+    flex-direction: row;
+    justify-content: space-around;
+  }
+  
+  .stat-value {
+    font-size: 22px;
+  }
+  
+  .stat-label {
+    font-size: 11px;
+  }
+  
+  /* 队列配置 */
+  .queue-config {
+    flex-wrap: wrap;
+  }
+  
+  /* 队列操作按钮 */
+  .queue-actions {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  
+  .queue-actions .el-button {
+    flex: 1;
+    min-width: calc(50% - 5px);
+  }
+  
+  /* 队列列表 */
+  .queue-list {
+    margin-top: 16px;
+    padding-top: 16px;
+  }
+  
+  .queue-item {
+    padding: 10px;
+    font-size: 13px;
+  }
+  
+  .error-text {
+    width: 100%;
+    margin-left: 24px;
+    margin-top: 4px;
+  }
+}
+
 @media (max-width: 600px) {
   .queue-stats {
     flex-direction: column;
-    gap: 16px;
+    gap: 12px;
     align-items: flex-start;
   }
   
   .stat-item {
     flex-direction: row;
     gap: 12px;
+    width: 100%;
+    justify-content: space-between;
   }
   
-  .queue-actions {
-    flex-direction: column;
+  .queue-actions .el-button {
+    min-width: 100%;
   }
 }
 </style>

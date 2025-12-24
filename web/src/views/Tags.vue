@@ -287,4 +287,125 @@ onMounted(() => {
 :deep(.el-button.is-link:hover) {
   opacity: 0.8;
 }
+
+/* ===== 移动端响应式样式 ===== */
+@media (max-width: 768px) {
+  .tags-page {
+    gap: 12px;
+  }
+  
+  .card {
+    padding: 12px;
+    overflow: hidden;
+  }
+  
+  .page-header {
+    margin-bottom: 4px;
+  }
+  
+  .page-title {
+    font-size: 18px;
+    gap: 8px;
+  }
+  
+  .page-description {
+    font-size: 12px;
+  }
+  
+  /* 工具栏垂直布局 */
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  
+  .toolbar-right {
+    margin-left: 0;
+  }
+  
+  .toolbar-right .el-input {
+    width: 100% !important;
+  }
+  
+  .toolbar .el-button {
+    width: 100%;
+  }
+  
+  /* 统计块 - 水平紧凑 */
+  .stats-row {
+    gap: 8px;
+  }
+  
+  .stat-item {
+    padding: 10px 12px;
+    flex: 1;
+    min-width: 0;
+  }
+  
+  .stat-value {
+    font-size: 18px;
+  }
+  
+  .stat-label {
+    font-size: 11px;
+  }
+  
+  /* 表格优化 */
+  .el-table {
+    width: 100% !important;
+  }
+  
+  /* 隐藏来源列 */
+  :deep(.el-table th:nth-child(3)),
+  :deep(.el-table td:nth-child(3)) {
+    display: none;
+  }
+  
+  /* 缩小操作列 */
+  :deep(.el-table th:last-child),
+  :deep(.el-table td:last-child) {
+    width: 80px !important;
+  }
+  
+  /* 编辑单元格 */
+  .edit-cell {
+    flex-direction: column;
+    gap: 6px;
+    align-items: stretch;
+  }
+  
+  .edit-cell .el-input {
+    width: 100%;
+  }
+  
+  .edit-cell .el-button {
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .page-title {
+    font-size: 18px;
+  }
+  
+  .stats-row {
+    flex-direction: column;
+  }
+  
+  .stat-item {
+    flex: none;
+    width: 100%;
+  }
+  
+  :deep(.el-table) {
+    font-size: 12px;
+  }
+  
+  :deep(.el-table th.el-table__cell),
+  :deep(.el-table td.el-table__cell) {
+    padding: 8px 6px;
+  }
+}
 </style>
+

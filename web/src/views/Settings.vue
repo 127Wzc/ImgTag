@@ -1189,7 +1189,6 @@ onUnmounted(() => {
 
 <style scoped>
 .settings-page {
-  max-width: 1200px;
   width: 100%;
 }
 
@@ -1364,6 +1363,13 @@ onUnmounted(() => {
 
 .form-section :deep(.el-form-item) {
   margin-bottom: 22px;
+  display: flex;
+  align-items: flex-start;
+}
+
+.form-section :deep(.el-form-item__content) {
+  flex: 1;
+  min-width: 0;
 }
 
 .form-section :deep(.el-form-item__label) {
@@ -1549,36 +1555,227 @@ onUnmounted(() => {
 
 /* 响应式布局 */
 @media (max-width: 768px) {
+  .settings-page {
+    padding: 0;
+    overflow-x: hidden;
+  }
+  
   .settings-tabs {
-    padding: 16px;
+    padding: 8px;
+    overflow: hidden;
+  }
+  
+  /* 输入框和组件全宽 */
+  :deep(.el-input),
+  :deep(.el-select),
+  :deep(.el-textarea),
+  :deep(.el-input-number) {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+  
+  /* 内联 flex 容器优化 */
+  :deep([style*="display: flex"]),
+  :deep([style*="display:flex"]) {
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+  }
+  
+  /* Tabs 可水平滚动 */
+  :deep(.el-tabs__header) {
+    margin-bottom: 16px;
+  }
+  
+  :deep(.el-tabs__nav-wrap) {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  
+  :deep(.el-tabs__nav-wrap)::after {
+    display: none;
+  }
+  
+  :deep(.el-tabs__nav-scroll) {
+    overflow-x: auto;
+  }
+  
+  :deep(.el-tabs__nav) {
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    display: flex;
   }
   
   :deep(.el-tabs__item) {
-    padding: 0 12px;
-    font-size: 13px;
+    padding: 0 14px !important;
+    font-size: 14px;
+    flex-shrink: 0;
+    height: 40px;
+    line-height: 40px;
+  }
+  
+  /* 表单 label 上方显示 - 强制覆盖 */
+  :deep(.el-form) {
+    --el-form-label-width: auto !important;
+  }
+  
+  :deep(.el-form-item) {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    margin-bottom: 20px !important;
+  }
+  
+  :deep(.el-form-item__label) {
+    display: block !important;
+    width: auto !important;
+    text-align: left !important;
+    padding: 0 0 8px 0 !important;
+    font-weight: 500;
+    color: var(--text-primary);
+    font-size: 14px;
+    line-height: 1.4;
+    justify-content: flex-start !important;
+  }
+  
+  :deep(.el-form-item__content) {
+    width: 100% !important;
+    margin-left: 0 !important;
+    flex: 1 !important;
   }
   
   .form-section {
     padding: 16px;
+    margin-bottom: 16px;
+  }
+  
+  .form-section h3 {
+    font-size: 15px;
+    margin-bottom: 16px;
+    padding-bottom: 10px;
   }
   
   .vector-info {
     grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  
+  .info-row {
+    padding: 14px;
+  }
+  
+  .info-row .value {
+    font-size: 16px;
   }
   
   .vector-actions,
   .form-actions {
     flex-direction: column;
+    gap: 10px;
   }
   
   .vector-actions .el-button,
   .form-actions .el-button {
     width: 100%;
+    margin: 0;
   }
   
   .health-status {
     flex-direction: column;
     align-items: stretch;
+  }
+  
+  .status-indicator {
+    min-width: auto;
+  }
+  
+  /* 用户管理表格 */
+  .user-actions {
+    flex-direction: column;
+    gap: 10px;
+  }
+  
+  .user-actions .el-button {
+    width: 100%;
+  }
+  
+  /* 重复检测 */
+  .duplicate-stats {
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .duplicate-actions {
+    flex-direction: column !important;
+  }
+  
+  .duplicate-actions .el-button {
+    width: 100%;
+  }
+  
+  .duplicate-group {
+    padding: 12px;
+  }
+  
+  .group-images {
+    gap: 8px;
+  }
+  
+  .dup-image-item {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  
+  /* 备份区域 */
+  .backup-section h3 {
+    font-size: 15px;
+  }
+  
+  /* 注册配置 */
+  .register-config :deep(.el-form-item) {
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  
+  .register-config .form-hint {
+    width: 100%;
+    margin-top: 8px;
+    margin-left: 0;
+  }
+  
+  /* 依赖安装状态 */
+  .deps-status {
+    flex-direction: column;
+    gap: 12px;
+  }
+}
+
+/* 更小屏幕 */
+@media (max-width: 480px) {
+  .settings-tabs {
+    padding: 8px;
+  }
+  
+  :deep(.el-tabs__item) {
+    padding: 0 8px;
+    font-size: 12px;
+  }
+  
+  .form-section {
+    padding: 12px;
+  }
+  
+  .form-hint {
+    font-size: 12px;
+    padding: 10px 12px;
+  }
+  
+  .info-row .label {
+    font-size: 11px;
+  }
+  
+  .info-row .value {
+    font-size: 14px;
   }
 }
 </style>

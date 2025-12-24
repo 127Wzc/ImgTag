@@ -1,11 +1,22 @@
 <template>
   <el-config-provider :locale="zhCn">
     <div class="app-container" v-if="!isLoginPage">
+      <!-- 移动端遮罩层 -->
+      <div 
+        class="sidebar-overlay" 
+        :class="{ visible: mobileMenuOpen }" 
+        @click="closeMobileMenu"
+      ></div>
+      
       <!-- 侧边栏 -->
-      <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
+      <aside class="sidebar" :class="{ collapsed: sidebarCollapsed, 'mobile-open': mobileMenuOpen }">
         <div class="logo">
           <el-icon :size="26"><PictureFilled /></el-icon>
           <span v-if="!sidebarCollapsed" class="logo-text">ImgTag</span>
+          <!-- 移动端关闭按钮 -->
+          <button class="mobile-close-btn" @click="closeMobileMenu">
+            <el-icon :size="20"><Close /></el-icon>
+          </button>
         </div>
         
         <nav class="sidebar-nav">
@@ -21,6 +32,7 @@
               :to="item.path" 
               class="nav-item"
               :class="{ active: currentRoute === item.path }"
+              @click="handleNavClick"
             >
               <el-icon :size="20"><component :is="item.icon" /></el-icon>
               <span v-if="!sidebarCollapsed">{{ item.label }}</span>
@@ -38,7 +50,7 @@
               {{ theme === 'light' ? '深色模式' : '浅色模式' }}
             </span>
           </div>
-          <div class="collapse-btn" @click="sidebarCollapsed = !sidebarCollapsed">
+          <div class="collapse-btn desktop-only" @click="sidebarCollapsed = !sidebarCollapsed">
             <el-icon :size="18">
               <ArrowLeft v-if="!sidebarCollapsed" />
               <ArrowRight v-else />
@@ -48,9 +60,13 @@
       </aside>
 
       <!-- 主内容区 -->
-      <main class="main-content">
+      <main class="main-content" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
         <header class="header">
           <div class="header-left">
+            <!-- 移动端汉堡菜单按钮 -->
+            <button class="hamburger-btn" @click="toggleMobileMenu">
+              <el-icon :size="22"><Fold /></el-icon>
+            </button>
             <h1 class="page-title">{{ pageTitle }}</h1>
           </div>
           <div class="header-right">
@@ -152,7 +168,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import { healthCheck, getTasks } from '@/api'
@@ -164,6 +180,39 @@ const router = useRouter()
 const appStore = useAppStore()
 const authStore = useAuthStore()
 const sidebarCollapsed = ref(false)
+
+// 移动端菜单状态
+const mobileMenuOpen = ref(false)
+const isMobile = ref(false)
+
+// 检测是否为移动端
+const checkMobile = () => {
+  isMobile.value = window.innerWidth <= 768
+  // 在切换到桌面模式时关闭移动端菜单
+  if (!isMobile.value) {
+    mobileMenuOpen.value = false
+  }
+}
+
+// 切换移动端菜单
+const toggleMobileMenu = () => {
+  mobileMenuOpen.value = !mobileMenuOpen.value
+  // 防止背景滚动
+  document.body.style.overflow = mobileMenuOpen.value ? 'hidden' : ''
+}
+
+// 关闭移动端菜单
+const closeMobileMenu = () => {
+  mobileMenuOpen.value = false
+  document.body.style.overflow = ''
+}
+
+// 导航点击处理（移动端点击后关闭菜单）
+const handleNavClick = () => {
+  if (isMobile.value) {
+    closeMobileMenu()
+  }
+}
 
 // 是否登录页
 const isLoginPage = computed(() => route.meta?.hideNav === true)
@@ -293,6 +342,10 @@ onMounted(async () => {
   // 初始化认证状态
   await authStore.init()
   
+  // 初始化移动端检测
+  checkMobile()
+  window.addEventListener('resize', checkMobile)
+  
   checkHealth()
   fetchProcessingTasks()
   
@@ -305,6 +358,8 @@ onMounted(async () => {
 onUnmounted(() => {
   if (healthTimer) clearInterval(healthTimer)
   if (tasksTimer) clearInterval(tasksTimer)
+  window.removeEventListener('resize', checkMobile)
+  document.body.style.overflow = ''
 })
 </script>
 
@@ -696,14 +751,174 @@ onUnmounted(() => {
   font-size: 13px;
 }
 
-/* 响应式 */
+/* ===== 移动端响应式样式 ===== */
+
+/* 移动端遮罩层 */
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 99;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.sidebar-overlay.visible {
+  opacity: 1;
+}
+
+/* 汉堡菜单按钮 */
+.hamburger-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: none;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  margin-right: 12px;
+  flex-shrink: 0;
+}
+
+.hamburger-btn:hover {
+  background: var(--bg-hover);
+  color: var(--primary-color);
+}
+
+.hamburger-btn:active {
+  transform: scale(0.95);
+}
+
+/* 移动端关闭按钮 */
+.mobile-close-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  margin-left: auto;
+}
+
+.mobile-close-btn:hover {
+  background: var(--bg-hover);
+  color: var(--primary-color);
+}
+
+/* 桌面端折叠按钮 */
+.desktop-only {
+  display: flex;
+}
+
+/* 响应式 - 768px 以下为移动端 */
 @media (max-width: 768px) {
+  /* 显示遮罩层 */
+  .sidebar-overlay {
+    display: block;
+    pointer-events: none;
+  }
+  
+  .sidebar-overlay.visible {
+    pointer-events: auto;
+  }
+
+  /* 汉堡菜单按钮 */
+  .hamburger-btn {
+    display: flex;
+  }
+  
+  /* 移动端关闭按钮 */
+  .mobile-close-btn {
+    display: flex;
+  }
+  
+  /* 隐藏桌面端折叠按钮 */
+  .desktop-only {
+    display: none;
+  }
+
+  /* 侧边栏 - 移动端抽屉模式 */
+  .sidebar {
+    width: 280px;
+    transform: translateX(-100%);
+    box-shadow: var(--shadow-xl);
+  }
+  
+  .sidebar.mobile-open {
+    transform: translateX(0);
+  }
+  
+  /* 侧边栏在移动端不需要折叠状态 */
+  .sidebar.collapsed {
+    width: 280px;
+    transform: translateX(-100%);
+  }
+  
+  .sidebar.collapsed.mobile-open {
+    transform: translateX(0);
+  }
+  
+  .sidebar.collapsed .nav-item span,
+  .sidebar.collapsed .logo-text,
+  .sidebar.collapsed .theme-text,
+  .sidebar.collapsed .divider-label {
+    display: inline;
+  }
+  
+  .sidebar.collapsed .nav-item {
+    justify-content: flex-start;
+    padding: 10px 16px;
+  }
+  
+  .sidebar.collapsed .divider-line {
+    display: none;
+  }
+  
+  .sidebar.collapsed .nav-divider {
+    padding: 0 16px;
+  }
+
+  /* 主内容区全宽 */
+  .main-content {
+    margin-left: 0 !important;
+  }
+  
+  /* Header 适配 */
+  .header {
+    padding: 0 16px;
+    min-height: 56px;
+  }
+  
+  .header-left {
+    display: flex;
+    align-items: center;
+  }
+  
+  .page-title {
+    font-size: 18px;
+  }
+  
   .header-right {
     gap: 8px;
   }
   
   .header-item {
-    padding: 6px 12px;
+    padding: 6px 10px;
     font-size: 12px;
   }
   
@@ -714,6 +929,62 @@ onUnmounted(() => {
   
   .tasks-count {
     font-size: 14px;
+  }
+  
+  /* 用户信息适配 */
+  .user-info .user-name {
+    max-width: 60px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  .user-info .el-tag {
+    display: none;
+  }
+  
+  /* 内容区padding适配 */
+  .content-wrapper {
+    padding: 16px;
+  }
+  
+  /* Logo区域适配 */
+  .logo {
+    justify-content: flex-start;
+    padding: 0 20px;
+  }
+}
+
+/* 更小屏幕适配 */
+@media (max-width: 480px) {
+  .header {
+    padding: 0 12px;
+  }
+  
+  .hamburger-btn {
+    width: 36px;
+    height: 36px;
+    margin-right: 8px;
+  }
+  
+  .page-title {
+    font-size: 16px;
+  }
+  
+  .header-item {
+    padding: 6px 8px;
+  }
+  
+  .content-wrapper {
+    padding: 12px;
+  }
+  
+  .sidebar {
+    width: 260px;
+  }
+  
+  .sidebar.collapsed {
+    width: 260px;
   }
 }
 

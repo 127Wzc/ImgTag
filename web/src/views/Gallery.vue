@@ -1788,6 +1788,133 @@ onUnmounted(() => {
   }
 }
 
+/* ===== 移动端响应式样式 768px ===== */
+@media (max-width: 768px) {
+  .gallery-page {
+    padding: 0;
+  }
+  
+  /* 筛选栏垂直布局 */
+  .filter-bar {
+    padding: 12px;
+  }
+  
+  .filter-bar :deep(.el-form--inline) {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .filter-bar :deep(.el-form-item) {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    margin-right: 0;
+    margin-bottom: 0;
+    width: 100%;
+  }
+  
+  .filter-bar :deep(.el-form-item__label) {
+    padding-bottom: 6px;
+    padding-right: 0;
+  }
+  
+  .filter-bar :deep(.el-form-item__content) {
+    width: 100%;
+  }
+  
+  .filter-bar :deep(.el-select),
+  .filter-bar :deep(.el-input) {
+    width: 100% !important;
+  }
+  
+  .filter-bar :deep(.el-form-item:last-child) {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  
+  .filter-bar :deep(.el-form-item:last-child .el-button) {
+    flex: 1;
+  }
+  
+  /* 批量选择模式提示 */
+  .batch-mode-hint {
+    padding: 12px;
+  }
+  
+  .batch-mode-btn {
+    width: 100%;
+  }
+  
+  /* 分页 */
+  .pagination-container {
+    padding: 12px 0;
+  }
+  
+  :deep(.el-pagination) {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+  }
+  
+  :deep(.el-pagination .el-pagination__sizes),
+  :deep(.el-pagination .el-pagination__total) {
+    display: none;
+  }
+  
+  /* 图片卡片 */
+  .image-card {
+    border-radius: var(--radius-md);
+  }
+  
+  .image-card img {
+    height: 140px;
+  }
+  
+  .image-card-content {
+    padding: 10px;
+  }
+  
+  .description {
+    font-size: 13px;
+    -webkit-line-clamp: 2;
+  }
+  
+  /* 全屏弹窗适配 */
+  .fullscreen-info-panel {
+    padding: 16px;
+    gap: 16px;
+  }
+  
+  .panel-header {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  
+  .panel-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  
+  .panel-actions .el-button {
+    flex: 1;
+    min-width: auto;
+  }
+  
+  .info-section h3 {
+    font-size: 13px;
+  }
+  
+  .description-text {
+    font-size: 14px;
+  }
+  
+  .add-tag-row {
+    flex-direction: column;
+  }
+}
+
 @media (max-width: 600px) {
   .images-grid {
     grid-template-columns: 1fr;

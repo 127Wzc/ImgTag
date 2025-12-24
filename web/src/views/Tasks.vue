@@ -293,4 +293,136 @@ onUnmounted(() => {
   font-weight: 600;
   color: var(--text-primary);
 }
+
+/* ===== 移动端响应式样式 ===== */
+@media (max-width: 768px) {
+  .tasks-page {
+    padding: 0;
+  }
+  
+  .card {
+    padding: 12px;
+    overflow: hidden;
+  }
+  
+  .header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    padding-bottom: 12px;
+    margin-bottom: 12px;
+  }
+  
+  .header h2 {
+    font-size: 16px;
+  }
+  
+  .actions {
+    width: 100%;
+    display: flex;
+    gap: 8px;
+  }
+  
+  .actions .el-button {
+    flex: 1;
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+  
+  /* 表格整体容器 */
+  .el-table {
+    width: 100% !important;
+  }
+  
+  /* 隐藏不必要的列 */
+  :deep(.el-table th:nth-child(4)),
+  :deep(.el-table td:nth-child(4)),
+  :deep(.el-table th:nth-child(5)),
+  :deep(.el-table td:nth-child(5)) {
+    display: none;
+  }
+  
+  /* 缩小任务ID列宽 */
+  :deep(.el-table .el-table__cell:first-child) {
+    max-width: 100px !important;
+    width: 100px !important;
+  }
+  
+  .task-id {
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
+    font-size: 11px;
+  }
+  
+  /* 类型和状态列 */
+  :deep(.el-table-column--type),
+  :deep(.el-table-column--status) {
+    width: auto !important;
+  }
+  
+  /* 结果/错误区域 */
+  .error-text,
+  .result-json {
+    max-height: 50px;
+    max-width: 150px;
+    font-size: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  
+  .result-json pre {
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-size: 10px;
+  }
+  
+  /* 分页 */
+  .pagination {
+    justify-content: center;
+    margin-top: 12px;
+    padding-top: 10px;
+  }
+  
+  :deep(.el-pagination) {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+  }
+  
+  :deep(.el-pagination .el-pagination__sizes),
+  :deep(.el-pagination .el-pagination__total) {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .header h2 {
+    font-size: 16px;
+  }
+  
+  .header h2 .el-icon {
+    padding: 6px;
+  }
+  
+  .actions {
+    flex-direction: column;
+  }
+  
+  .actions .el-button {
+    width: 100%;
+  }
+  
+  :deep(.el-table) {
+    font-size: 12px;
+  }
+  
+  :deep(.el-table th.el-table__cell),
+  :deep(.el-table td.el-table__cell) {
+    padding: 8px 4px;
+  }
+}
 </style>
+

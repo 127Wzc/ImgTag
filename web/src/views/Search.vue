@@ -345,14 +345,91 @@ const handleSearch = async () => {
   }
 }
 
-@media (max-width: 600px) {
-  .results-grid {
-    grid-template-columns: 1fr;
+/* 768px 移动端适配 */
+@media (max-width: 768px) {
+  .search-page {
+    gap: 16px;
+  }
+  
+  .search-form {
+    padding: 16px;
+  }
+  
+  .search-form h2 {
+    font-size: 20px;
+  }
+  
+  .form-description {
+    font-size: 13px;
+    margin-bottom: 16px;
   }
   
   .search-options {
     flex-direction: column;
     gap: 16px;
+    align-items: stretch;
+  }
+  
+  .search-options .el-form-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    width: 100%;
+  }
+  
+  .search-options :deep(.el-slider) {
+    width: 100% !important;
+    margin: 0;
+  }
+  
+  .search-options :deep(.el-input-number) {
+    width: 100% !important;
+  }
+  
+  .threshold-value {
+    width: auto;
+    text-align: left;
+  }
+  
+  .search-actions .el-button {
+    width: 100%;
+    padding: 14px;
+  }
+  
+  .results-section {
+    padding: 16px;
+  }
+  
+  .results-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  
+  .results-header h3 {
+    font-size: 16px;
+  }
+  
+  .result-card img {
+    height: 160px;
+  }
+  
+  .result-content {
+    padding: 12px;
+  }
+}
+
+@media (max-width: 600px) {
+  .results-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .search-form h2 {
+    font-size: 18px;
+  }
+  
+  .result-card img {
+    height: 180px;
   }
 }
 </style>
