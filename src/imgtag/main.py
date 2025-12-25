@@ -143,7 +143,8 @@ else:
         }
 
 
-if __name__ == "__main__":
+def main():
+    """命令行入口点"""
     logger.info(f"启动 {settings.PROJECT_NAME} 服务")
     uvicorn.run(
         "imgtag.main:app", 
@@ -152,3 +153,6 @@ if __name__ == "__main__":
         reload=True
     )
 
+
+if __name__ == "__main__":
+    main()

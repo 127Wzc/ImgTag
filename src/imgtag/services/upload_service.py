@@ -55,11 +55,65 @@ class UploadService:
         """生成唯一文件名"""
         return f"{uuid.uuid4().hex}.{extension}"
     
+    def extract_image_dimensions(self, file_content: bytes) -> Tuple[Optional[int], Optional[int]]:
+        """从图片内容提取宽高
+        
+        Args:
+            file_content: 图片字节数据
+            
+        Returns:
+            Tuple[Optional[int], Optional[int]]: (宽度, 高度)，失败返回 (None, None)
+        """
+        try:
+            from PIL import Image
+            import io
+            # 设置解压缩炸弹保护（默认约 178M 像素，约 16K x 16K）
+            Image.MAX_IMAGE_PIXELS = 178956970
+            with Image.open(io.BytesIO(file_content)) as img:
+                width, height = img.size
+                logger.debug(f"提取图片分辨率: {width}x{height}")
+                return width, height
+        except Image.DecompressionBombError:
+            logger.warning("图片尺寸过大，跳过分辨率提取")
+            return None, None
+        except Exception as e:
+            logger.warning(f"提取图片分辨率失败: {str(e)}")
+            return None, None
+    
+    @staticmethod
+    def get_resolution_level(width: Optional[int], height: Optional[int]) -> str:
+        """根据宽高获取分辨率等级
+        
+        Args:
+            width: 图片宽度
+            height: 图片高度
+            
+        Returns:
+            str: 分辨率等级 (8K/4K/2K/1080p/720p/SD/unknown)
+        """
+        if width is None or height is None:
+            return "unknown"
+        
+        max_dim = max(width, height)
+        
+        if max_dim >= 7680:
+            return "8K"
+        elif max_dim >= 3840:
+            return "4K"
+        elif max_dim >= 2560:
+            return "2K"
+        elif max_dim >= 1920:
+            return "1080p"
+        elif max_dim >= 1280:
+            return "720p"
+        else:
+            return "SD"
+    
     async def save_uploaded_file(
         self, 
         file_content: bytes, 
         original_filename: str
-    ) -> Tuple[str, str, str]:
+    ) -> Tuple[str, str, str, Optional[int], Optional[int]]:
         """保存上传的文件
         
         Args:
@@ -67,7 +121,8 @@ class UploadService:
             original_filename: 原始文件名
             
         Returns:
-            Tuple[str, str, str]: (保存的文件路径, 访问 URL, 真实文件类型)
+            Tuple[str, str, str, Optional[int], Optional[int]]: 
+                (保存的文件路径, 访问 URL, 真实文件类型, 宽度, 高度)
         """
         start_time = time.time()
         logger.info(f"保存上传文件: {original_filename}, 大小: {len(file_content)} 字节")
@@ -87,12 +142,18 @@ class UploadService:
             if not self._validate_extension(extension):
                 raise ValueError(f"不支持的文件类型: {extension}")
             
-            # 使用 PIL 检测真实的图片格式
+            # 使用 PIL 检测真实的图片格式和分辨率
             real_format = extension  # 默认使用扩展名
+            width, height = None, None
             try:
                 from PIL import Image
                 import io
                 img = Image.open(io.BytesIO(file_content))
+                # 提取分辨率
+                width, height = img.size
+                logger.debug(f"图片分辨率: {width}x{height}")
+                
+                # 检测格式
                 detected_format = img.format.lower() if img.format else None
                 if detected_format:
                     # 标准化格式名称（PIL 内部格式 -> 常用扩展名）
@@ -119,7 +180,7 @@ class UploadService:
                     real_format = format_map.get(detected_format, detected_format)
                     logger.debug(f"PIL 检测到格式: {detected_format} -> {real_format}")
             except Exception as e:
-                logger.warning(f"PIL 检测图片格式失败: {str(e)}，使用扩展名: {extension}")
+                logger.warning(f"PIL 检测图片失败: {str(e)}，使用扩展名: {extension}")
             
             # 生成新文件名
             new_filename = self._generate_filename(extension)
@@ -134,9 +195,9 @@ class UploadService:
             
             process_time = time.time() - start_time
             perf_logger.info(f"文件保存耗时: {process_time:.4f}秒")
-            logger.info(f"文件保存成功: {file_path}, 格式: {real_format}")
+            logger.info(f"文件保存成功: {file_path}, 格式: {real_format}, 分辨率: {width}x{height}")
             
-            return str(file_path), access_url, real_format
+            return str(file_path), access_url, real_format, width, height
             
         except Exception as e:
             logger.error(f"保存文件失败: {str(e)}")

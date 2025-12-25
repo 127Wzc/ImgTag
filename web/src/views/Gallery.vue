@@ -286,6 +286,20 @@
               <h3>描述</h3>
               <p class="description-text">{{ selectedImage.description || '暂无描述' }}</p>
             </div>
+
+            <div class="info-section" v-if="selectedImage.width || selectedImage.file_size">
+              <h3>图片信息</h3>
+              <div class="image-meta">
+                <span v-if="selectedImage.width && selectedImage.height" class="meta-item">
+                  <el-icon><Picture /></el-icon>
+                  {{ selectedImage.width }} × {{ selectedImage.height }} px
+                </span>
+                <span v-if="selectedImage.file_size" class="meta-item">
+                  <el-icon><Document /></el-icon>
+                  {{ selectedImage.file_size.toFixed(2) }} MB
+                </span>
+              </div>
+            </div>
             
             <div class="info-section">
               <h3 class="section-title ai-title">
@@ -527,7 +541,7 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { FolderAdd, Setting, Select, Close, CollectionTag, User, Delete, Monitor, Star, StarFilled, Plus } from '@element-plus/icons-vue'
+import { FolderAdd, Setting, Select, Close, CollectionTag, User, Delete, Monitor, Star, StarFilled, Plus, Picture, Document } from '@element-plus/icons-vue'
 import { getImages, getImage, updateImage, deleteImage, batchDeleteImages, batchUpdateTags, addToQueue, getQueueStatus, getCollections, createCollection, addImageToCollection, getCollectionImages, getTags, searchSimilar, getAllConfigs } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 
@@ -1739,6 +1753,24 @@ onUnmounted(() => {
   font-size: 15px;
   line-height: 1.6;
   color: var(--text-primary);
+}
+
+.image-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.meta-item .el-icon {
+  font-size: 16px;
 }
 
 .tags-display {

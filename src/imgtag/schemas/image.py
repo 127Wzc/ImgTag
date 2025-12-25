@@ -50,8 +50,10 @@ class ImageResponse(BaseModel):
     tags: List[str] = Field(default_factory=list, description="标签列表（向后兼容）")
     tags_with_source: List[TagWithSource] = Field(default_factory=list, description="带来源的标签列表")
     description: Optional[str] = Field(default=None, description="图像描述")
-    source_type: str = Field(default="url", description="来源类型: local/url")
     original_url: Optional[str] = Field(default=None, description="原始 URL")
+    width: Optional[int] = Field(default=None, description="图片宽度（像素）")
+    height: Optional[int] = Field(default=None, description="图片高度（像素）")
+    file_size: Optional[float] = Field(default=None, description="文件大小（MB）")
 
 
 class ImageWithSimilarity(ImageResponse):

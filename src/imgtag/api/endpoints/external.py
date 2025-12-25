@@ -159,7 +159,6 @@ async def analyze_image_from_url(
             tags=request.tags,
             embedding=None,
             description=request.description,
-            source_type="url",
             original_url=request.image_url,
             file_path=file_path,
             file_hash=file_hash

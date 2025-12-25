@@ -51,7 +51,6 @@ async def create_image_manual(image: ImageCreateManual, user: Dict = Depends(get
             tags=image.tags,
             embedding=embedding_vector,
             description=image.description,
-            source_type="url",
             original_url=image.image_url
         )
         
@@ -91,7 +90,6 @@ async def analyze_and_create_from_url(request: ImageCreateByUrl, background_task
             tags=tags,
             embedding=None,  # 待分析，暂无向量
             description=description,
-            source_type="url",
             original_url=request.image_url
         )
         
@@ -141,8 +139,8 @@ async def upload_and_analyze(
         # 读取文件内容
         file_content = await file.read()
         
-        # 保存文件（返回真实文件类型）
-        file_path, access_url, file_type = await upload_service.save_uploaded_file(
+        # 保存文件（返回真实文件类型和分辨率）
+        file_path, access_url, file_type, width, height = await upload_service.save_uploaded_file(
             file_content, 
             file.filename
         )
@@ -163,11 +161,12 @@ async def upload_and_analyze(
             tags=final_tags,
             embedding=None,  # 待分析，暂无向量
             description=final_description,
-            source_type="upload",
             file_path=file_path,
             file_hash=file_hash,
             file_type=file_type,
-            file_size=file_size
+            file_size=file_size,
+            width=width,
+            height=height
         )
         
         if not new_id:
@@ -240,8 +239,8 @@ async def upload_zip(
                     # 解压文件
                     file_content = zf.read(zip_info.filename)
                     
-                    # 保存文件（返回真实文件类型）
-                    file_path, access_url, file_type = await upload_service.save_uploaded_file(
+                    # 保存文件（返回真实文件类型和分辨率）
+                    file_path, access_url, file_type, width, height = await upload_service.save_uploaded_file(
                         file_content,
                         filename
                     )
@@ -255,10 +254,11 @@ async def upload_zip(
                         tags=[],
                         embedding=None,  # 待分析，暂无向量
                         description="",
-                        source_type="local",
                         file_path=file_path,
                         file_type=file_type,
-                        file_size=file_size
+                        file_size=file_size,
+                        width=width,
+                        height=height
                     )
                     
                     if new_id:

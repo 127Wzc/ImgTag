@@ -368,11 +368,10 @@ async def calculate_missing_hashes(
                 file_hash = None
                 
                 # 本地文件
-                if img.get('source_type') == 'upload' and img.get('file_path'):
-                    file_path = img['file_path']
-                    if os.path.exists(file_path):
-                        with open(file_path, 'rb') as f:
-                            file_hash = hashlib.md5(f.read()).hexdigest()
+                file_path = img.get('file_path')
+                if file_path and os.path.exists(file_path):
+                    with open(file_path, 'rb') as f:
+                        file_hash = hashlib.md5(f.read()).hexdigest()
                 
                 # URL 图片 - 下载并计算哈希
                 elif img.get('image_url'):
@@ -406,3 +405,81 @@ async def calculate_missing_hashes(
         logger.error(f"计算哈希失败: {str(e)}")
         return {"error": str(e)}
 
+
+# ========== 分辨率补全 API ==========
+
+
+@router.get("/resolution/status")
+async def get_resolution_status(admin: Dict = Depends(require_admin)):
+    """获取分辨率补全状态（管理员）"""
+    logger.info("获取分辨率补全状态")
+    
+    try:
+        total = db.count_images()
+        missing = db.count_images_without_resolution()
+        completed = total - missing
+        
+        return {
+            "total": total,
+            "completed": completed,
+            "missing": missing,
+            "percentage": round((completed / total * 100) if total > 0 else 0, 1)
+        }
+    except Exception as e:
+        logger.error(f"获取分辨率状态失败: {str(e)}")
+        return {"error": str(e)}
+
+
+@router.post("/resolution/backfill")
+async def backfill_resolution(
+    limit: int = 100,
+    admin: Dict = Depends(require_admin)
+):
+    """批量补全缺失的图片分辨率（管理员）
+    
+    扫描 width 为 NULL 的图片，从本地文件读取分辨率并更新。
+    仅处理有本地 file_path 的图片。
+    """
+    from PIL import Image
+    
+    logger.info(f"开始补全分辨率，限制 {limit} 张")
+    
+    try:
+        images = db.get_images_without_resolution(limit)
+        
+        processed = 0
+        skipped = 0
+        errors = []
+        
+        for img in images:
+            try:
+                file_path = img.get('file_path')
+                
+                # 只处理有本地文件的图片
+                if not file_path or not os.path.exists(file_path):
+                    skipped += 1
+                    continue
+                
+                # 读取图片分辨率
+                with Image.open(file_path) as pil_img:
+                    width, height = pil_img.size
+                
+                # 更新数据库
+                db.update_image_resolution(img['id'], width, height)
+                processed += 1
+                    
+            except Exception as e:
+                errors.append(f"图片 {img['id']}: {str(e)}")
+        
+        remaining = db.count_images_without_resolution()
+        
+        return {
+            "message": f"已处理 {processed} 张图片，跳过 {skipped} 张（无本地文件）",
+            "processed": processed,
+            "skipped": skipped,
+            "remaining": remaining,
+            "errors": errors[:10]
+        }
+    except Exception as e:
+        logger.error(f"补全分辨率失败: {str(e)}")
+        return {"error": str(e)}

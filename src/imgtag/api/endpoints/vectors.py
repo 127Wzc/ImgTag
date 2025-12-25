@@ -383,11 +383,17 @@ async def rebuild_vectors_task():
     }
     
     try:
-        # 获取所有图片
+        # 获取所有图片及其标签
         with db._get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
-                SELECT id, tags, description FROM images ORDER BY id;
+                SELECT i.id, i.description,
+                       ARRAY(
+                           SELECT t.name FROM tags t
+                           JOIN image_tags it ON t.id = it.tag_id
+                           WHERE it.image_id = i.id
+                       ) as tags
+                FROM images i ORDER BY i.id;
                 """)
                 images = cursor.fetchall()
         
@@ -396,7 +402,7 @@ async def rebuild_vectors_task():
         
         logger.info(f"开始重建向量: 共 {len(images)} 张图片")
         
-        for image_id, tags, description in images:
+        for image_id, description, tags in images:
             try:
                 # 生成新的向量
                 embedding = await embedding_service.get_embedding_combined(

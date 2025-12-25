@@ -169,7 +169,7 @@ uv sync
 uv sync --extra local
 
 # 启动服务
-uv run uvicorn imgtag.main:app --reload --host 0.0.0.0
+uv run python -m uvicorn imgtag.main:app --reload --host 0.0.0.0
 ```
 
 #### 4. 启动前端

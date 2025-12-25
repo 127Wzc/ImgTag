@@ -25,7 +25,7 @@ perf_logger = get_perf_logger()
 # - major: 不兼容的结构变化
 # - minor: 新增表/字段
 # - patch: 索引优化等小改动
-SCHEMA_VERSION = "1.2.0"
+SCHEMA_VERSION = "1.2.1"
 
 
 class PGVectorDB:
@@ -157,7 +157,6 @@ class PGVectorDB:
                     file_type VARCHAR(20),
                     file_size DECIMAL(10,2),
                     description TEXT,
-                    source_type VARCHAR(20) DEFAULT 'url',
                     file_path TEXT,
                     original_url TEXT,
                     file_hash VARCHAR(64),
@@ -176,7 +175,6 @@ class PGVectorDB:
                 COMMENT ON COLUMN public.images.file_type IS '文件类型(jpg/png/gif等)';
                 COMMENT ON COLUMN public.images.file_size IS '文件大小(MB)';
                 COMMENT ON COLUMN public.images.description IS '图片描述';
-                COMMENT ON COLUMN public.images.source_type IS '来源类型(url/upload/local)';
                 COMMENT ON COLUMN public.images.file_path IS '本地文件路径';
                 COMMENT ON COLUMN public.images.original_url IS '原始URL';
                 COMMENT ON COLUMN public.images.file_hash IS '文件MD5哈希';
@@ -439,7 +437,6 @@ class PGVectorDB:
         """检查并添加新列"""
         # images 表新列（注意：uploaded_by 不使用外键约束以避免顺序问题）
         images_columns = [
-            ("source_type", "VARCHAR(20) DEFAULT 'url'"),
             ("file_path", "TEXT"),
             ("original_url", "TEXT"),
             ("updated_at", "TIMESTAMP WITH TIME ZONE DEFAULT NOW()"),
@@ -447,6 +444,12 @@ class PGVectorDB:
             ("file_hash", "VARCHAR(64)"),  # 文件 MD5 哈希，用于去重
             ("file_type", "VARCHAR(20)"),  # 文件类型，如 jpg、png、gif
             ("file_size", "DECIMAL(10,2)"),  # 文件大小 (MB)
+            # v1.2.1 新增
+            ("width", "INTEGER"),  # 图片宽度（像素）
+            ("height", "INTEGER"),  # 图片高度（像素）
+            ("storage_type", "VARCHAR(20) DEFAULT 'local'"),  # 存储类型: local/s3
+            ("s3_path", "TEXT"),  # S3 完整存储路径
+            ("local_exists", "BOOLEAN DEFAULT TRUE"),  # 本地文件是否存在
         ]
         
         for col_name, col_type in images_columns:
@@ -514,6 +517,19 @@ class PGVectorDB:
         if not cursor.fetchone()[0]:
             logger.info("添加 users 表新列: api_key")
             cursor.execute("ALTER TABLE users ADD COLUMN api_key VARCHAR(64) UNIQUE;")
+        
+        # image_tags 表新列（v1.2.1：标签排序）
+        cursor.execute("""
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns 
+            WHERE table_schema = 'public' 
+            AND table_name = 'image_tags' 
+            AND column_name = 'sort_order'
+        );
+        """)
+        if not cursor.fetchone()[0]:
+            logger.info("添加 image_tags 表新列: sort_order")
+            cursor.execute("ALTER TABLE image_tags ADD COLUMN sort_order INTEGER DEFAULT 99;")
         
         # 优化索引：删除废弃索引，确保核心索引存在
         self._optimize_indexes(cursor)
@@ -684,18 +700,27 @@ class PGVectorDB:
         tags: List[str],
         embedding: List[float] = None,
         description: str = None,
-        source_type: str = "url",
         file_path: str = None,
         original_url: str = None,
         tag_source: str = "ai",
         file_hash: str = None,
         file_type: str = None,
-        file_size: float = None
+        file_size: float = None,
+        width: int = None,
+        height: int = None,
+        storage_type: str = "local",
+        s3_path: str = None,
+        local_exists: bool = True
     ) -> Optional[int]:
         """插入一条图像记录
         
         Args:
             embedding: 向量嵌入，可为 None 表示未生成向量
+            width: 图片宽度（像素）
+            height: 图片高度（像素）
+            storage_type: 存储类型 local/s3
+            s3_path: S3 完整存储路径
+            local_exists: 本地文件是否存在
         """
         start_time = time.time()
         logger.debug(f"插入图像记录: {image_url}")
@@ -717,8 +742,8 @@ class PGVectorDB:
             
             # 不再存储 tags 到 images 表
             query = """
-            INSERT INTO images (image_url, embedding, description, source_type, file_path, original_url, file_hash, file_type, file_size)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO images (image_url, embedding, description, file_path, original_url, file_hash, file_type, file_size, width, height, storage_type, s3_path, local_exists)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id;
             """
             
@@ -726,7 +751,8 @@ class PGVectorDB:
                 with conn.cursor() as cursor:
                     cursor.execute(query, (
                         image_url, embedding_value, description,
-                        source_type, file_path, original_url, file_hash, file_type, file_size
+                        file_path, original_url, file_hash, file_type, file_size,
+                        width, height, storage_type, s3_path, local_exists
                     ))
                     new_id = cursor.fetchone()[0]
                 conn.commit()
@@ -836,7 +862,7 @@ class PGVectorDB:
             
             tag_placeholders = ','.join(['%s'] * len(tags))
             query = f"""
-            SELECT i.id, i.image_url, i.description, i.source_type, i.original_url
+            SELECT i.id, i.image_url, i.description, i.original_url
             FROM images i
             WHERE i.id IN (
                 SELECT it.image_id FROM image_tags it
@@ -860,7 +886,7 @@ class PGVectorDB:
                     tags_map = {}
                     if image_ids:
                         cursor.execute("""
-                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.added_at)
+                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.sort_order ASC, it.added_at)
                         FROM image_tags it
                         JOIN tags t ON it.tag_id = t.id
                         WHERE it.image_id = ANY(%s)
@@ -876,8 +902,7 @@ class PGVectorDB:
                     "image_url": row[1],
                     "tags": tags_map.get(row[0], []),
                     "description": row[2],
-                    "source_type": row[3],
-                    "original_url": row[4]
+                    "original_url": row[3]
                 })
             
             process_time = time.time() - start_time
@@ -907,7 +932,7 @@ class PGVectorDB:
             vector_str = ','.join(map(str, query_vector))
             
             query = """
-            SELECT id, image_url, description, source_type, original_url,
+            SELECT id, image_url, description, original_url,
                    1 - (embedding <=> %s) as similarity
             FROM images
             WHERE 1 - (embedding <=> %s) > %s
@@ -928,7 +953,7 @@ class PGVectorDB:
                     tags_map = {}
                     if image_ids:
                         cursor.execute("""
-                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.added_at)
+                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.sort_order ASC, it.added_at)
                         FROM image_tags it
                         JOIN tags t ON it.tag_id = t.id
                         WHERE it.image_id = ANY(%s)
@@ -947,9 +972,8 @@ class PGVectorDB:
                     "image_url": row[1],
                     "tags": tags_map.get(row[0], []),
                     "description": row[2],
-                    "source_type": row[3],
-                    "original_url": row[4],
-                    "similarity": row[5]
+                    "original_url": row[3],
+                    "similarity": row[4]
                 })
             
             total_time = time.time() - start_time
@@ -995,7 +1019,7 @@ class PGVectorDB:
                 JOIN tags t ON it.tag_id = t.id
                 WHERE t.name = %s
             )
-            SELECT i.id, i.image_url, i.description, i.source_type, i.original_url,
+            SELECT i.id, i.image_url, i.description, i.original_url,
                    (1 - (i.embedding <=> %s)) as vector_score,
                    (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) as tag_score
             FROM images i
@@ -1028,7 +1052,7 @@ class PGVectorDB:
                     tags_map = {}
                     if image_ids:
                         cursor.execute("""
-                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.added_at)
+                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.sort_order ASC, it.added_at)
                         FROM image_tags it
                         JOIN tags t ON it.tag_id = t.id
                         WHERE it.image_id = ANY(%s)
@@ -1039,8 +1063,8 @@ class PGVectorDB:
             
             images = []
             for row in results:
-                vector_score = float(row[5])
-                tag_score = float(row[6])
+                vector_score = float(row[4])
+                tag_score = float(row[5])
                 final_score = vector_score * vector_weight + tag_score * tag_weight
                 
                 images.append({
@@ -1048,8 +1072,7 @@ class PGVectorDB:
                     "image_url": row[1],
                     "tags": tags_map.get(row[0], []),
                     "description": row[2],
-                    "source_type": row[3],
-                    "original_url": row[4],
+                    "original_url": row[3],
                     "similarity": final_score,
                     "vector_score": vector_score,
                     "tag_score": tag_score
@@ -1198,7 +1221,7 @@ class PGVectorDB:
             
             # 获取图片列表
             query = f"""
-            SELECT i.id, i.image_url, i.description, i.source_type, i.original_url
+            SELECT i.id, i.image_url, i.description, i.original_url
             FROM images i
             WHERE {where_clause}
             ORDER BY {sort_field} {sort_order}
@@ -1217,7 +1240,7 @@ class PGVectorDB:
                     tags_map = {}
                     if image_ids:
                         cursor.execute("""
-                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.added_at)
+                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.sort_order ASC, it.added_at)
                         FROM image_tags it
                         JOIN tags t ON it.tag_id = t.id
                         WHERE it.image_id = ANY(%s)
@@ -1233,8 +1256,7 @@ class PGVectorDB:
                     "image_url": row[1],
                     "tags": tags_map.get(row[0], []),
                     "description": row[2],
-                    "source_type": row[3],
-                    "original_url": row[4]
+                    "original_url": row[3]
                 })
             
             # 获取总数
@@ -1307,7 +1329,7 @@ class PGVectorDB:
                     tags_map = {}
                     if image_ids:
                         cursor.execute("""
-                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.added_at)
+                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.sort_order ASC, it.added_at)
                         FROM image_tags it
                         JOIN tags t ON it.tag_id = t.id
                         WHERE it.image_id = ANY(%s)
@@ -1598,7 +1620,7 @@ class PGVectorDB:
         try:
             # 获取图片基本信息
             query = """
-            SELECT id, image_url, description, source_type, file_path, original_url
+            SELECT id, image_url, description, file_path, original_url, width, height, file_size
             FROM images
             WHERE id = %s;
             """
@@ -1617,7 +1639,7 @@ class PGVectorDB:
                     SELECT t.name FROM image_tags it
                     JOIN tags t ON it.tag_id = t.id
                     WHERE it.image_id = %s
-                    ORDER BY it.added_at;
+                    ORDER BY it.sort_order ASC, it.added_at;
                     """, (image_id,))
                     tags = [row[0] for row in cursor.fetchall()]
             
@@ -1626,9 +1648,11 @@ class PGVectorDB:
                 "image_url": result[1],
                 "tags": tags,  # 从关联表获取
                 "description": result[2],
-                "source_type": result[3],
-                "file_path": result[4],
-                "original_url": result[5]
+                "file_path": result[3],
+                "original_url": result[4],
+                "width": result[5],
+                "height": result[6],
+                "file_size": float(result[7]) if result[7] else None
             }
             
             process_time = time.time() - start_time
@@ -1718,7 +1742,7 @@ class PGVectorDB:
                         # 使用 image_tags 关联表过滤标签
                         tag_placeholders = ','.join(['%s'] * len(tags))
                         query = f"""
-                        SELECT i.id, i.image_url, i.description, i.source_type, 
+                        SELECT i.id, i.image_url, i.description, 
                                i.file_path, i.original_url
                         FROM images i
                         JOIN image_collections ic ON i.id = ic.image_id
@@ -1733,7 +1757,7 @@ class PGVectorDB:
                         params = [collection_ids] + list(tags)
                     else:
                         query = """
-                        SELECT i.id, i.image_url, i.description, i.source_type, 
+                        SELECT i.id, i.image_url, i.description, 
                                i.file_path, i.original_url
                         FROM images i
                         JOIN image_collections ic ON i.id = ic.image_id
@@ -1750,7 +1774,7 @@ class PGVectorDB:
                     
                     # 获取该图片的标签
                     cursor.execute("""
-                    SELECT ARRAY_AGG(t.name ORDER BY it.added_at)
+                    SELECT ARRAY_AGG(t.name ORDER BY it.sort_order ASC, it.added_at)
                     FROM image_tags it
                     JOIN tags t ON it.tag_id = t.id
                     WHERE it.image_id = %s;
@@ -1763,9 +1787,8 @@ class PGVectorDB:
                 "image_url": result[1],
                 "tags": image_tags,
                 "description": result[2],
-                "source_type": result[3],
-                "file_path": result[4],
-                "original_url": result[5]
+                "file_path": result[3],
+                "original_url": result[4]
             }
         except Exception as e:
             logger.error(f"获取随机图片失败: {str(e)}")
@@ -1900,7 +1923,7 @@ class PGVectorDB:
                 with conn.cursor() as cursor:
                     # 获取图片列表
                     cursor.execute("""
-                    SELECT i.id, i.image_url, i.description, i.source_type, i.file_path, i.original_url
+                    SELECT i.id, i.image_url, i.description, i.file_path, i.original_url
                     FROM images i
                     JOIN image_collections ic ON i.id = ic.image_id
                     WHERE ic.collection_id = %s
@@ -1914,7 +1937,7 @@ class PGVectorDB:
                     tags_map = {}
                     if image_ids:
                         cursor.execute("""
-                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.added_at)
+                        SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.sort_order ASC, it.added_at)
                         FROM image_tags it
                         JOIN tags t ON it.tag_id = t.id
                         WHERE it.image_id = ANY(%s)
@@ -1934,9 +1957,8 @@ class PGVectorDB:
                 "image_url": row[1],
                 "tags": tags_map.get(row[0], []),
                 "description": row[2],
-                "source_type": row[3],
-                "file_path": row[4],
-                "original_url": row[5]
+                "file_path": row[3],
+                "original_url": row[4]
             } for row in results]
             
             return {
@@ -2293,6 +2315,53 @@ class PGVectorDB:
             logger.error(f"更新图片哈希失败: {str(e)}")
             return False
     
+    # ========== 分辨率管理 ==========
+    
+    def count_images_without_resolution(self) -> int:
+        """统计缺少分辨率的图片数量"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM images WHERE width IS NULL")
+                    return cur.fetchone()[0]
+        except Exception as e:
+            logger.error(f"统计缺失分辨率图片失败: {str(e)}")
+            return 0
+    
+    def get_images_without_resolution(self, limit: int = 100) -> List[Dict]:
+        """获取缺少分辨率的图片列表"""
+        try:
+            with self._get_connection() as conn:
+                from psycopg.rows import dict_row
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("""
+                        SELECT id, image_url, file_path 
+                        FROM images 
+                        WHERE width IS NULL 
+                        ORDER BY id 
+                        LIMIT %s
+                    """, (limit,))
+                    return list(cur.fetchall())
+        except Exception as e:
+            logger.error(f"获取缺失分辨率图片失败: {str(e)}")
+            return []
+    
+    def update_image_resolution(self, image_id: int, width: int, height: int) -> bool:
+        """更新图片的分辨率"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE images SET width = %s, height = %s WHERE id = %s",
+                        (width, height, image_id)
+                    )
+                conn.commit()
+                logger.debug(f"更新图片 {image_id} 分辨率: {width}x{height}")
+                return True
+        except Exception as e:
+            logger.error(f"更新图片分辨率失败: {str(e)}")
+            return False
+    
     def find_image_by_hash(self, file_hash: str) -> Optional[Dict]:
         """根据哈希查找图片"""
         try:
@@ -2354,7 +2423,7 @@ class PGVectorDB:
                 from psycopg.rows import dict_row
                 with conn.cursor(row_factory=dict_row) as cur:
                     cur.execute("""
-                        SELECT id, image_url, file_path, source_type
+                        SELECT id, image_url, file_path
                         FROM images
                         WHERE file_hash IS NULL OR file_hash = ''
                         ORDER BY id
@@ -2392,7 +2461,6 @@ class PGVectorDB:
                             i.id,
                             i.image_url,
                             i.description,
-                            i.source_type,
                             i.original_url,
                             i.file_path,
                             i.created_at,
@@ -2495,18 +2563,16 @@ class PGVectorDB:
                 with conn.cursor() as cur:
                     # 插入图片（embedding 为 NULL，待后续生成）
                     cur.execute("""
-                        INSERT INTO images (image_url, description, embedding, source_type, original_url, file_path)
-                        VALUES (%s, %s, NULL, %s, %s, %s)
+                        INSERT INTO images (image_url, description, embedding, original_url, file_path)
+                        VALUES (%s, %s, NULL, %s, %s)
                         ON CONFLICT (image_url) DO UPDATE SET
                             description = EXCLUDED.description,
-                            source_type = EXCLUDED.source_type,
                             original_url = EXCLUDED.original_url,
                             file_path = EXCLUDED.file_path
                         RETURNING id
                     """, (
                         img_data.get('image_url'),
                         img_data.get('description', ''),
-                        img_data.get('source_type', 'url'),
                         img_data.get('original_url'),
                         img_data.get('file_path')
                     ))
