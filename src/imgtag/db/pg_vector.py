@@ -12,7 +12,7 @@ from psycopg_pool import ConnectionPool
 from psycopg.types.json import Json
 import time
 import os
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from imgtag.core.logging_config import get_logger, get_perf_logger
 from imgtag.core.config import settings
@@ -531,8 +531,59 @@ class PGVectorDB:
             logger.info("添加 image_tags 表新列: sort_order")
             cursor.execute("ALTER TABLE image_tags ADD COLUMN sort_order INTEGER DEFAULT 99;")
         
+        # 预插入系统标签（v1.2.1）
+        self._ensure_system_tags(cursor)
+        
         # 优化索引：删除废弃索引，确保核心索引存在
         self._optimize_indexes(cursor)
+    
+    def _ensure_system_tags(self, cursor):
+        """确保系统标签存在（主分类 level=0，分辨率 level=1）"""
+        # 主分类标签（level=0, id=1-99）
+        # ID 10 "待分类" 是新图片的默认分类
+        main_categories = [
+            (1, '风景', '自然风光、城市景观', 1),
+            (2, '人像', '真人照片、人物特写', 2),
+            (3, '动漫', '动画、漫画、二次元', 3),
+            (4, '表情包', '表情、梗图、搞笑图', 4),
+            (5, '产品', '商品、摄影棚照片', 5),
+            (6, '艺术', '绘画、设计作品', 6),
+            (7, '截图', '屏幕截图、界面', 7),
+            (8, '文档', '文字、表格、证件', 8),
+            (9, '其他', '无法分类', 99),
+            (10, '待分类', '新图片默认分类，等待人工分类', 0),  # 排序为 0，置顶
+        ]
+        
+        for tag_id, name, desc, sort_order in main_categories:
+            cursor.execute("""
+            INSERT INTO tags (id, name, level, source, description, sort_order)
+            VALUES (%s, %s, 0, 'system', %s, %s)
+            ON CONFLICT (name) DO NOTHING;
+            """, (tag_id, name, desc, sort_order))
+        
+        # 分辨率标签（level=1, id=100-105）
+        resolution_tags = [
+            (100, '8K', '超高清 8K 分辨率 (≥7680px)', 100),
+            (101, '4K', '超高清 4K 分辨率 (≥3840px)', 101),
+            (102, '2K', '高清 2K 分辨率 (≥2560px)', 102),
+            (103, '1080p', '全高清 1080p (≥1920px)', 103),
+            (104, '720p', '高清 720p (≥1280px)', 104),
+            (105, 'SD', '标清 (<1280px)', 105),
+        ]
+        
+        for tag_id, name, desc, sort_order in resolution_tags:
+            cursor.execute("""
+            INSERT INTO tags (id, name, level, source, description, sort_order)
+            VALUES (%s, %s, 1, 'system', %s, %s)
+            ON CONFLICT (name) DO NOTHING;
+            """, (tag_id, name, desc, sort_order))
+        
+        # 确保序列从 1000 开始（为 AI/用户标签预留空间）
+        cursor.execute("""
+        SELECT setval('tags_id_seq', GREATEST(1000, (SELECT COALESCE(MAX(id), 0) FROM tags)));
+        """)
+        
+        logger.info("系统标签检查完成（主分类 + 分辨率），序列已设置为从 1000 开始")
     
     def _optimize_indexes(self, cursor):
         """优化索引：删除废弃索引，确保核心索引存在"""
@@ -761,6 +812,9 @@ class PGVectorDB:
             if tags and len(tags) > 0:
                 self.set_image_tags(new_id, tags, source=tag_source)
             
+            # 自动分配系统标签（level 0 待分类 + level 1 分辨率）
+            self.auto_assign_system_tags(new_id, width, height)
+            
             process_time = time.time() - start_time
             logger.info(f"插入成功，ID: {new_id}, 耗时: {process_time:.4f}秒")
             
@@ -827,10 +881,10 @@ class PGVectorDB:
                     # 只为新增的标签创建关联
                     if tags_to_add:
                         for tag_name in tags_to_add:
-                            # 确保标签存在
+                            # 确保标签存在（AI/用户创建的标签 level=2）
                             cursor.execute("""
-                            INSERT INTO tags (name, source)
-                            VALUES (%s, %s)
+                            INSERT INTO tags (name, source, level)
+                            VALUES (%s, %s, 2)
                             ON CONFLICT (name) DO UPDATE SET usage_count = tags.usage_count + 1
                             RETURNING id;
                             """, (tag_name, source))
@@ -995,7 +1049,9 @@ class PGVectorDB:
         limit: int = None,
         threshold: float = None,
         vector_weight: float = 0.7,
-        tag_weight: float = 0.3
+        tag_weight: float = 0.3,
+        category_id: int = None,
+        resolution_id: int = None
     ) -> List[Dict]:
         """混合搜索：向量相似度 + 标签匹配（优化版，使用 LEFT JOIN 替代多次 EXISTS）"""
         if limit is None:
@@ -1004,15 +1060,27 @@ class PGVectorDB:
             threshold = settings.DEFAULT_SIMILARITY_THRESHOLD
             
         start_time = time.time()
-        logger.info(f"混合搜索: '{query_text}', 阈值: {threshold}")
+        logger.info(f"混合搜索: '{query_text}', 阈值: {threshold}, 分类: {category_id}, 分辨率: {resolution_id}")
         
         try:
             vector_str = ','.join(map(str, query_vector))
             
+            # 构建额外的过滤条件
+            extra_conditions = []
+            extra_params = []
+            if category_id:
+                extra_conditions.append("i.id IN (SELECT image_id FROM image_tags WHERE tag_id = %s)")
+                extra_params.append(category_id)
+            if resolution_id:
+                extra_conditions.append("i.id IN (SELECT image_id FROM image_tags WHERE tag_id = %s)")
+                extra_params.append(resolution_id)
+            
+            extra_where = " AND " + " AND ".join(extra_conditions) if extra_conditions else ""
+            
             # 优化版：使用 LEFT JOIN 一次性计算标签匹配，避免多次 EXISTS 子查询
             # tag_match 子查询只执行一次，结果通过 LEFT JOIN 关联
             # 过滤掉 NULL 向量：未生成向量的图片不参与相似度搜索
-            query = """
+            query = f"""
             WITH tag_match AS (
                 SELECT DISTINCT it.image_id
                 FROM image_tags it
@@ -1026,6 +1094,7 @@ class PGVectorDB:
             LEFT JOIN tag_match tm ON i.id = tm.image_id
             WHERE i.embedding IS NOT NULL
               AND ((1 - (i.embedding <=> %s)) > %s OR tm.image_id IS NOT NULL)
+              {extra_where}
             ORDER BY (
                 (1 - (i.embedding <=> %s)) * %s + 
                 (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) * %s
@@ -1035,16 +1104,18 @@ class PGVectorDB:
             
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(query, (
+                    params = [
                         query_text,
                         f"[{vector_str}]", 
                         f"[{vector_str}]", 
-                        threshold, 
+                        threshold
+                    ] + extra_params + [
                         f"[{vector_str}]",
                         vector_weight,
                         tag_weight,
                         limit
-                    ))
+                    ]
+                    cursor.execute(query, params)
                     results = cursor.fetchall()
                     
                     # 批量获取标签
@@ -1147,6 +1218,8 @@ class PGVectorDB:
         url_contains: str = None,
         description_contains: str = None,
         keyword: str = None,
+        category_id: int = None,
+        resolution_id: int = None,
         pending_only: bool = False,
         duplicates_only: bool = False,
         limit: int = 10,
@@ -1156,11 +1229,25 @@ class PGVectorDB:
     ) -> Dict[str, Any]:
         """高级图像搜索"""
         start_time = time.time()
-        logger.info(f"高级图像搜索: 标签:{tags}, URL包含:{url_contains}, 关键字:{keyword}, 待分析:{pending_only}, 重复:{duplicates_only}")
+        logger.info(f"高级图像搜索: 标签:{tags}, URL包含:{url_contains}, 关键字:{keyword}, 分类:{category_id}, 分辨率:{resolution_id}")
         
         try:
             conditions = []
             params = []
+            
+            # 主分类过滤 (level=0)
+            if category_id:
+                conditions.append("""
+                    i.id IN (SELECT image_id FROM image_tags WHERE tag_id = %s)
+                """)
+                params.append(category_id)
+            
+            # 分辨率过滤 (level=1)
+            if resolution_id:
+                conditions.append("""
+                    i.id IN (SELECT image_id FROM image_tags WHERE tag_id = %s)
+                """)
+                params.append(resolution_id)
             
             # 待分析过滤：无标签的图片
             if pending_only:
@@ -1539,10 +1626,10 @@ class PGVectorDB:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
                     for tag_name in tags:
-                        # 确保 tag 存在于 tags 表
+                        # 确保 tag 存在于 tags 表（用户标签 level=2）
                         cursor.execute("""
-                        INSERT INTO tags (name, source)
-                        VALUES (%s, %s)
+                        INSERT INTO tags (name, source, level)
+                        VALUES (%s, %s, 2)
                         ON CONFLICT (name) DO UPDATE SET usage_count = tags.usage_count + 1
                         RETURNING id;
                         """, (tag_name, source))
@@ -2581,9 +2668,9 @@ class PGVectorDB:
                     # 导入标签关联
                     tags = img_data.get('tags', [])
                     for tag_name in tags:
-                        # 确保标签存在
+                        # 确保标签存在（导入标签 level=2）
                         cur.execute("""
-                            INSERT INTO tags (name) VALUES (%s)
+                            INSERT INTO tags (name, level) VALUES (%s, 2)
                             ON CONFLICT (name) DO NOTHING
                         """, (tag_name,))
                         cur.execute("SELECT id FROM tags WHERE name = %s", (tag_name,))
@@ -2605,8 +2692,9 @@ class PGVectorDB:
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
+                    # 导入标签 level=2
                     cur.execute("""
-                        INSERT INTO tags (name) VALUES (%s)
+                        INSERT INTO tags (name, level) VALUES (%s, 2)
                         ON CONFLICT (name) DO NOTHING
                     """, (tag_data.get('name'),))
                 conn.commit()
@@ -2823,6 +2911,302 @@ class PGVectorDB:
         except Exception as e:
             logger.error(f"获取审计日志失败: {str(e)}")
             return {"logs": [], "total": 0}
+
+    # ============= 标签层级管理 =============
+    
+    def get_main_categories(self) -> List[Dict]:
+        """获取主分类标签（level=0）"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                    SELECT id, name, description, sort_order, 
+                           (SELECT COUNT(*) FROM image_tags WHERE tag_id = tags.id) as usage_count
+                    FROM tags 
+                    WHERE level = 0 
+                    ORDER BY sort_order ASC, id ASC;
+                    """)
+                    results = cursor.fetchall()
+                    return [
+                        {
+                            "id": row[0],
+                            "name": row[1],
+                            "description": row[2],
+                            "sort_order": row[3],
+                            "usage_count": row[4]
+                        }
+                        for row in results
+                    ]
+        except Exception as e:
+            logger.error(f"获取主分类失败: {str(e)}")
+            return []
+    
+    def get_resolution_tags(self) -> List[Dict]:
+        """获取分辨率标签（level=1）"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                    SELECT id, name, description, sort_order
+                    FROM tags 
+                    WHERE level = 1 
+                    ORDER BY sort_order ASC, id ASC;
+                    """)
+                    results = cursor.fetchall()
+                    return [
+                        {
+                            "id": row[0],
+                            "name": row[1],
+                            "description": row[2],
+                            "sort_order": row[3]
+                        }
+                        for row in results
+                    ]
+        except Exception as e:
+            logger.error(f"获取分辨率标签失败: {str(e)}")
+            return []
+    
+    def create_main_category(self, name: str, description: str = None, sort_order: int = 0) -> Optional[int]:
+        """创建主分类标签（仅管理员）"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 检查是否已存在
+                    cursor.execute("SELECT id FROM tags WHERE name = %s", (name,))
+                    if cursor.fetchone():
+                        logger.warning(f"标签 '{name}' 已存在")
+                        return None
+                    
+                    # 获取最大 level=0 的 ID（保持在 1-99 范围）
+                    cursor.execute("SELECT COALESCE(MAX(id), 0) FROM tags WHERE level = 0")
+                    max_id = cursor.fetchone()[0]
+                    new_id = max_id + 1 if max_id < 99 else None
+                    
+                    if new_id is None:
+                        logger.error("主分类 ID 已用尽（最多 99 个）")
+                        return None
+                    
+                    cursor.execute("""
+                    INSERT INTO tags (id, name, level, source, description, sort_order)
+                    VALUES (%s, %s, 0, 'system', %s, %s)
+                    RETURNING id;
+                    """, (new_id, name, description, sort_order))
+                    result = cursor.fetchone()
+                conn.commit()
+                return result[0] if result else None
+        except Exception as e:
+            logger.error(f"创建主分类失败: {str(e)}")
+            return None
+    
+    def delete_main_category(self, tag_id: int) -> Tuple[bool, str]:
+        """删除主分类标签
+        
+        Returns:
+            Tuple[bool, str]: (成功与否, 消息)
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 检查是否是主分类
+                    cursor.execute("SELECT level FROM tags WHERE id = %s", (tag_id,))
+                    result = cursor.fetchone()
+                    if not result:
+                        return False, "标签不存在"
+                    if result[0] != 0:
+                        return False, "只能删除主分类标签"
+                    
+                    # 检查是否被使用
+                    cursor.execute("SELECT COUNT(*) FROM image_tags WHERE tag_id = %s", (tag_id,))
+                    usage_count = cursor.fetchone()[0]
+                    if usage_count > 0:
+                        return False, f"该分类已被 {usage_count} 张图片使用，无法删除"
+                    
+                    # 删除
+                    cursor.execute("DELETE FROM tags WHERE id = %s", (tag_id,))
+                conn.commit()
+                return True, "删除成功"
+        except Exception as e:
+            logger.error(f"删除主分类失败: {str(e)}")
+            return False, str(e)
+    
+    def can_create_user_tag(self, name: str) -> Tuple[bool, str]:
+        """检查是否可以创建用户标签（不能与 level 0/1 同名）
+        
+        Returns:
+            Tuple[bool, str]: (可以创建, 原因)
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                    SELECT level FROM tags WHERE name = %s AND level IN (0, 1)
+                    """, (name,))
+                    result = cursor.fetchone()
+                    if result:
+                        level_name = "主分类" if result[0] == 0 else "分辨率"
+                        return False, f"'{name}' 是系统{level_name}标签，不允许创建"
+                    return True, ""
+        except Exception as e:
+            logger.error(f"检查标签名称失败: {str(e)}")
+            return False, str(e)
+    
+    def get_category_by_name(self, name: str) -> Optional[Dict]:
+        """根据名称获取主分类信息"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                    SELECT id, name, description, sort_order
+                    FROM tags WHERE name = %s AND level = 0
+                    """, (name,))
+                    result = cursor.fetchone()
+                    if result:
+                        return {
+                            "id": result[0],
+                            "name": result[1],
+                            "description": result[2],
+                            "sort_order": result[3]
+                        }
+                    return None
+        except Exception as e:
+            logger.error(f"获取分类失败: {str(e)}")
+            return None
+    
+    def get_resolution_tag_by_level(self, resolution_level: str) -> Optional[int]:
+        """根据分辨率等级获取对应的 tag_id"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                    SELECT id FROM tags WHERE name = %s AND level = 1
+                    """, (resolution_level,))
+                    result = cursor.fetchone()
+                    return result[0] if result else None
+        except Exception as e:
+            logger.error(f"获取分辨率标签失败: {str(e)}")
+            return None
+    
+    def get_resolution_level_for_dimensions(self, width: int, height: int) -> str:
+        """根据图片尺寸计算分辨率等级
+        
+        Resolution levels:
+        - 8K: ≥7680px (max dimension)
+        - 4K: ≥3840px
+        - 2K: ≥2560px
+        - 1080p: ≥1920px
+        - 720p: ≥1280px
+        - SD: <1280px
+        """
+        max_dim = max(width or 0, height or 0)
+        if max_dim >= 7680:
+            return "8K"
+        elif max_dim >= 3840:
+            return "4K"
+        elif max_dim >= 2560:
+            return "2K"
+        elif max_dim >= 1920:
+            return "1080p"
+        elif max_dim >= 1280:
+            return "720p"
+        else:
+            return "SD"
+    
+    def auto_assign_system_tags(self, image_id: int, width: int = None, height: int = None):
+        """自动为图片分配系统标签（level 0 待分类 + level 1 分辨率）
+        
+        - Level 0: 默认分配 "待分类" (ID=10)
+        - Level 1: 根据分辨率自动计算
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 1. 分配 level 0 "待分类" 标签 (ID=10)
+                    cursor.execute("""
+                    INSERT INTO image_tags (image_id, tag_id, source)
+                    VALUES (%s, 10, 'system')
+                    ON CONFLICT (image_id, tag_id) DO NOTHING;
+                    """, (image_id,))
+                    
+                    # 2. 根据分辨率分配 level 1 标签
+                    if width and height:
+                        resolution_level = self.get_resolution_level_for_dimensions(width, height)
+                        # 获取对应的 tag_id
+                        cursor.execute("""
+                        SELECT id FROM tags WHERE name = %s AND level = 1
+                        """, (resolution_level,))
+                        result = cursor.fetchone()
+                        if result:
+                            cursor.execute("""
+                            INSERT INTO image_tags (image_id, tag_id, source)
+                            VALUES (%s, %s, 'system')
+                            ON CONFLICT (image_id, tag_id) DO NOTHING;
+                            """, (image_id, result[0]))
+                            logger.debug(f"图片 {image_id} 自动分配分辨率标签: {resolution_level}")
+                
+                conn.commit()
+                logger.debug(f"图片 {image_id} 自动分配系统标签完成")
+        except Exception as e:
+            logger.error(f"自动分配系统标签失败: {str(e)}")
+    
+    def get_category_by_id(self, tag_id: int) -> Optional[Dict]:
+        """根据 ID 获取标签信息"""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                    SELECT id, name, level, description, sort_order
+                    FROM tags WHERE id = %s
+                    """, (tag_id,))
+                    result = cursor.fetchone()
+                    if result:
+                        return {
+                            "id": result[0],
+                            "name": result[1],
+                            "level": result[2],
+                            "description": result[3],
+                            "sort_order": result[4]
+                        }
+                    return None
+        except Exception as e:
+            logger.error(f"获取标签失败: {str(e)}")
+            return None
+    
+    def set_image_category(self, image_id: int, category_id: int) -> bool:
+        """设置图片的主分类（level=0）
+        
+        会先删除图片现有的 level=0 标签，再添加新的分类标签。
+        
+        Args:
+            image_id: 图片 ID
+            category_id: 目标主分类 tag_id
+            
+        Returns:
+            bool: 是否成功
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 1. 删除现有的 level=0 标签
+                    cursor.execute("""
+                    DELETE FROM image_tags
+                    WHERE image_id = %s AND tag_id IN (
+                        SELECT id FROM tags WHERE level = 0
+                    );
+                    """, (image_id,))
+                    
+                    # 2. 添加新的主分类标签
+                    cursor.execute("""
+                    INSERT INTO image_tags (image_id, tag_id, source)
+                    VALUES (%s, %s, 'user')
+                    ON CONFLICT (image_id, tag_id) DO NOTHING;
+                    """, (image_id, category_id))
+                
+                conn.commit()
+                logger.debug(f"图片 {image_id} 主分类设置为 {category_id}")
+                return True
+        except Exception as e:
+            logger.error(f"设置图片分类失败: {str(e)}")
+            return False
 
     @classmethod
     def close_pool(cls):

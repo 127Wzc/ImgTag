@@ -79,6 +79,8 @@ class ImageSearchRequest(BaseModel):
     url_contains: Optional[str] = Field(default=None, description="URL 包含的文本")
     description_contains: Optional[str] = Field(default=None, description="描述包含的文本（向后兼容）")
     keyword: Optional[str] = Field(default=None, description="关键字，模糊匹配标签和描述")
+    category_id: Optional[int] = Field(default=None, description="主分类 tag_id (level=0)")
+    resolution_id: Optional[int] = Field(default=None, description="分辨率 tag_id (level=1)")
     pending_only: bool = Field(default=False, description="仅显示待分析的图片（无标签）")
     duplicates_only: bool = Field(default=False, description="仅显示重复的图片")
     limit: int = Field(default=10, ge=1, le=100, description="返回结果数量")
@@ -91,6 +93,8 @@ class SimilarSearchRequest(BaseModel):
     """相似度搜索请求"""
     text: str = Field(..., description="搜索文本")
     tags: Optional[List[str]] = Field(default=None, description="标签列表")
+    category_id: Optional[int] = Field(default=None, description="主分类 tag_id (level=0)")
+    resolution_id: Optional[int] = Field(default=None, description="分辨率 tag_id (level=1)")
     limit: int = Field(default=10, ge=1, le=100, description="返回结果数量")
     threshold: float = Field(default=0.7, ge=0, le=1, description="相似度阈值")
     vector_weight: float = Field(default=0.7, ge=0, le=1, description="向量相似度权重")

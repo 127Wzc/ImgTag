@@ -79,3 +79,53 @@ async def delete_tag(tag_name: str, admin: Dict = Depends(require_admin)):
         "message": f"标签 '{tag_name}' 已删除",
         "deleted_name": tag_name
     }
+
+
+# ============= 主分类管理 =============
+
+@router.get("/categories", response_model=List[Dict[str, Any]])
+async def get_categories():
+    """获取主分类列表（level=0）"""
+    return db.get_main_categories()
+
+
+@router.post("/categories", response_model=Dict[str, Any])
+async def create_category(
+    name: str,
+    description: str = None,
+    sort_order: int = 0,
+    admin: Dict = Depends(require_admin)
+):
+    """创建主分类（仅管理员）"""
+    # 检查是否已存在
+    if db.tag_exists(name):
+        raise HTTPException(status_code=409, detail=f"标签 '{name}' 已存在")
+    
+    tag_id = db.create_main_category(name, description, sort_order)
+    if not tag_id:
+        raise HTTPException(status_code=500, detail="创建主分类失败（可能 ID 已用尽）")
+    
+    return {
+        "message": f"主分类 '{name}' 创建成功",
+        "id": tag_id,
+        "name": name
+    }
+
+
+@router.delete("/categories/{tag_id}", response_model=Dict[str, Any])
+async def delete_category(tag_id: int, admin: Dict = Depends(require_admin)):
+    """删除主分类（仅管理员，已使用则禁止删除）"""
+    success, message = db.delete_main_category(tag_id)
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    
+    return {"message": message}
+
+
+# ============= 分辨率标签 =============
+
+@router.get("/resolutions", response_model=List[Dict[str, Any]])
+async def get_resolutions():
+    """获取分辨率标签列表（level=1）"""
+    return db.get_resolution_tags()
+

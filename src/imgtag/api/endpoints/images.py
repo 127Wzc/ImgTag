@@ -327,6 +327,8 @@ async def search_images(request: ImageSearchRequest):
             url_contains=request.url_contains,
             description_contains=request.description_contains,
             keyword=request.keyword,
+            category_id=request.category_id,
+            resolution_id=request.resolution_id,
             pending_only=request.pending_only,
             duplicates_only=request.duplicates_only,
             limit=request.limit,
@@ -559,3 +561,55 @@ async def batch_update_tags(
         "process_time": f"{process_time:.4f}秒"
     }
 
+
+class BatchSetCategoryRequest(BaseModel):
+    image_ids: List[int]
+    category_id: int  # 目标主分类 tag_id (level=0)
+
+
+from imgtag.api.endpoints.auth import require_admin
+
+
+@router.post("/batch/set-category", response_model=Dict[str, Any])
+async def batch_set_category(
+    request: BatchSetCategoryRequest,
+    admin: Dict = Depends(require_admin)
+):
+    """批量修改图片主分类（仅管理员）
+    
+    将多张图片的 level=0 分类切换到指定分类。
+    会先删除图片现有的 level=0 标签，再添加新的分类。
+    """
+    start_time = time.time()
+    logger.info(f"批量设置主分类: {len(request.image_ids)} 张图片 -> 分类ID {request.category_id}")
+    
+    # 验证目标分类是否存在且为 level=0
+    category = db.get_category_by_id(request.category_id)
+    if not category:
+        raise HTTPException(status_code=404, detail="目标分类不存在")
+    if category.get("level") != 0:
+        raise HTTPException(status_code=400, detail="目标标签不是主分类 (level=0)")
+    
+    success_count = 0
+    fail_count = 0
+    
+    for image_id in request.image_ids:
+        try:
+            if db.set_image_category(image_id, request.category_id):
+                success_count += 1
+            else:
+                fail_count += 1
+        except Exception as e:
+            logger.error(f"设置图片 {image_id} 分类失败: {str(e)}")
+            fail_count += 1
+    
+    process_time = time.time() - start_time
+    perf_logger.info(f"批量设置分类耗时: {process_time:.4f}秒")
+    
+    return {
+        "message": f"批量设置主分类完成: 成功 {success_count} 张，失败 {fail_count} 张",
+        "success_count": success_count,
+        "fail_count": fail_count,
+        "category_name": category.get("name"),
+        "process_time": f"{process_time:.4f}秒"
+    }

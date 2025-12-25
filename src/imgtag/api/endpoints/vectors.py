@@ -383,7 +383,7 @@ async def rebuild_vectors_task():
     }
     
     try:
-        # 获取所有图片及其标签
+        # 获取所有图片及其标签（只使用 level=2 的普通标签进行向量化）
         with db._get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
@@ -391,7 +391,7 @@ async def rebuild_vectors_task():
                        ARRAY(
                            SELECT t.name FROM tags t
                            JOIN image_tags it ON t.id = it.tag_id
-                           WHERE it.image_id = i.id
+                           WHERE it.image_id = i.id AND t.level = 2
                        ) as tags
                 FROM images i ORDER BY i.id;
                 """)

@@ -47,7 +47,9 @@ async def search_similar(request: SimilarSearchRequest):
             limit=request.limit,
             threshold=request.threshold,
             vector_weight=request.vector_weight,
-            tag_weight=request.tag_weight
+            tag_weight=request.tag_weight,
+            category_id=request.category_id,
+            resolution_id=request.resolution_id
         )
         
         # 转换为响应模型

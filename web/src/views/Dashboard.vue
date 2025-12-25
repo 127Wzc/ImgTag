@@ -366,7 +366,7 @@ onMounted(async () => {
 
 .image-card img {
   width: 100%;
-  height: 100px;
+  height: 140px;
   object-fit: cover;
   transition: transform 0.3s ease;
 }

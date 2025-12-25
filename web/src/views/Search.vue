@@ -37,6 +37,40 @@
         </el-form-item>
         
         <div class="search-options">
+          <!-- 主分类筛选 -->
+          <el-form-item label="分类">
+            <el-select
+              v-model="filterCategory"
+              placeholder="全部"
+              clearable
+              style="width: 100px"
+            >
+              <el-option
+                v-for="cat in categoryOptions"
+                :key="cat.id"
+                :label="cat.name"
+                :value="cat.id"
+              />
+            </el-select>
+          </el-form-item>
+          
+          <!-- 分辨率筛选 -->
+          <el-form-item label="分辨率">
+            <el-select
+              v-model="filterResolution"
+              placeholder="全部"
+              clearable
+              style="width: 90px"
+            >
+              <el-option
+                v-for="res in resolutionOptions"
+                :key="res.id"
+                :label="res.name"
+                :value="res.id"
+              />
+            </el-select>
+          </el-form-item>
+          
           <el-form-item label="相似度阈值">
             <el-slider
               v-model="threshold"
@@ -140,9 +174,9 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { searchSimilar } from '@/api'
+import { searchSimilar, getCategories, getResolutions } from '@/api'
 
 const searchText = ref('')
 const searchTags = ref([])
@@ -151,6 +185,12 @@ const vectorWeight = ref(0.7)
 const tagWeight = ref(0.3)
 const limit = ref(10)
 
+// 分类/分辨率筛选
+const filterCategory = ref('')
+const filterResolution = ref('')
+const categoryOptions = ref([])
+const resolutionOptions = ref([])
+
 const searching = ref(false)
 const searched = ref(false)
 const results = ref([])
@@ -158,6 +198,20 @@ const results = ref([])
 const getImageUrl = (url) => {
   if (url.startsWith('http')) return url
   return url
+}
+
+// 获取分类/分辨率选项
+const fetchFilterOptions = async () => {
+  try {
+    const [cats, ress] = await Promise.all([
+      getCategories(),
+      getResolutions()
+    ])
+    categoryOptions.value = cats || []
+    resolutionOptions.value = ress || []
+  } catch (e) {
+    console.error('获取筛选选项失败', e)
+  }
 }
 
 const handleSearch = async () => {
@@ -170,13 +224,16 @@ const handleSearch = async () => {
   searched.value = false
   
   try {
+    // 传递分类和分辨率 ID 给后端
     const response = await searchSimilar(
       searchText.value,
       searchTags.value,
       limit.value,
       threshold.value,
       vectorWeight.value,
-      tagWeight.value
+      tagWeight.value,
+      filterCategory.value || null,
+      filterResolution.value || null
     )
     
     results.value = response.images
@@ -191,6 +248,10 @@ const handleSearch = async () => {
     searching.value = false
   }
 }
+
+onMounted(() => {
+  fetchFilterOptions()
+})
 </script>
 
 <style scoped>

@@ -4,6 +4,40 @@
       <!-- 搜索筛选栏 -->
       <div class="card filter-bar">
         <el-form :inline="true" @submit.prevent="handleSearch">
+        <!-- 主分类筛选 -->
+          <el-form-item label="分类">
+            <el-select
+              v-model="filters.category"
+              placeholder="全部分类"
+              clearable
+              style="width: 120px"
+            >
+              <el-option
+                v-for="cat in categoryOptions"
+                :key="cat.id"
+                :label="cat.name"
+                :value="cat.id"
+              />
+            </el-select>
+          </el-form-item>
+          
+          <!-- 分辨率筛选 -->
+          <el-form-item label="分辨率">
+            <el-select
+              v-model="filters.resolution"
+              placeholder="全部"
+              clearable
+              style="width: 100px"
+            >
+              <el-option
+                v-for="res in resolutionOptions"
+                :key="res.id"
+                :label="res.name"
+                :value="res.id"
+              />
+            </el-select>
+          </el-form-item>
+          
           <el-form-item label="标签">
             <el-select
               v-model="filters.tags"
@@ -107,6 +141,14 @@
                 :loading="batchLoading"
               >
                 批量分析
+              </el-button>
+              <el-button 
+                v-if="authStore.isAdmin" 
+                type="warning" 
+                size="small" 
+                @click="showBatchCategoryDialog = true"
+              >
+                批量分类
               </el-button>
               <el-button 
                 v-if="authStore.isAdmin" 
@@ -533,6 +575,42 @@
       </template>
     </el-dialog>
 
+    <!-- 批量设置主分类对话框 -->
+    <el-dialog
+      v-model="showBatchCategoryDialog"
+      title="批量设置主分类"
+      width="400px"
+    >
+      <el-form label-width="80px">
+        <el-form-item label="目标分类">
+          <el-select v-model="batchCategoryId" placeholder="选择主分类" style="width: 100%;">
+            <el-option
+              v-for="cat in categoryOptions"
+              :key="cat.id"
+              :label="cat.name"
+              :value="cat.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <p style="color: var(--text-secondary); font-size: 13px; margin: 0;">
+            将 {{ selectedIds.length }} 张图片的主分类更改为选定的分类
+          </p>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showBatchCategoryDialog = false">取消</el-button>
+        <el-button 
+          type="primary" 
+          @click="handleBatchSetCategory" 
+          :loading="batchCategoryLoading"
+          :disabled="!batchCategoryId"
+        >
+          应用
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 标签管理器 -->
     <TagManager v-model="showTagManager" @tags-updated="fetchTags" />
   </div>
@@ -542,7 +620,7 @@
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { FolderAdd, Setting, Select, Close, CollectionTag, User, Delete, Monitor, Star, StarFilled, Plus, Picture, Document } from '@element-plus/icons-vue'
-import { getImages, getImage, updateImage, deleteImage, batchDeleteImages, batchUpdateTags, addToQueue, getQueueStatus, getCollections, createCollection, addImageToCollection, getCollectionImages, getTags, searchSimilar, getAllConfigs } from '@/api'
+import { getImages, getImage, updateImage, deleteImage, batchDeleteImages, batchUpdateTags, addToQueue, getQueueStatus, getCollections, createCollection, addImageToCollection, getCollectionImages, getTags, searchSimilar, getAllConfigs, getCategories, getResolutions, batchSetCategory } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 
 import TagManager from '@/components/TagManager.vue'
@@ -564,6 +642,11 @@ const batchTags = ref([])
 const batchTagMode = ref('add')
 const batchTagLoading = ref(false)
 
+// 批量设置主分类
+const showBatchCategoryDialog = ref(false)
+const batchCategoryId = ref(null)
+const batchCategoryLoading = ref(false)
+
 // 搜索权重
 const vectorWeight = ref(0.7)
 const tagWeight = ref(0.3)
@@ -572,8 +655,14 @@ const filters = reactive({
   tags: [],
   keyword: '',
   pendingOnly: false,
-  duplicatesOnly: false
+  duplicatesOnly: false,
+  category: '',
+  resolution: ''
 })
+
+// 分类/分辨率选项
+const categoryOptions = ref([])
+const resolutionOptions = ref([])
 
 // 收藏夹相关
 const collections = ref([])
@@ -825,6 +914,8 @@ const fetchImages = async () => {
       result = await getImages({
         tags: filters.tags.length > 0 ? filters.tags : null,
         keyword: filters.keyword || null,
+        category_id: filters.category || null,
+        resolution_id: filters.resolution || null,
         pendingOnly: filters.pendingOnly,
         duplicatesOnly: filters.duplicatesOnly,
         limit: pageSize.value,
@@ -851,6 +942,8 @@ const resetFilters = () => {
   filters.keyword = ''
   filters.pendingOnly = false
   filters.duplicatesOnly = false
+  filters.category = ''
+  filters.resolution = ''
   currentPage.value = 1
   fetchImages()
 }
@@ -1071,6 +1164,32 @@ const handleBatchTag = async () => {
   }
 }
 
+const handleBatchSetCategory = async () => {
+  if (!batchCategoryId.value) {
+    ElMessage.warning('请选择目标分类')
+    return
+  }
+  if (selectedIds.value.length === 0) {
+    ElMessage.warning('请先选择图片')
+    return
+  }
+  
+  const count = selectedIds.value.length
+  batchCategoryLoading.value = true
+  try {
+    const result = await batchSetCategory(selectedIds.value, batchCategoryId.value)
+    ElMessage.success(result.message || `已为 ${count} 张图片设置主分类`)
+    showBatchCategoryDialog.value = false
+    batchCategoryId.value = null
+    clearSelection()
+    fetchImages() // 刷新列表以显示新分类
+  } catch (e) {
+    ElMessage.error('批量设置分类失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    batchCategoryLoading.value = false
+  }
+}
+
 const handleBatchDelete = async () => {
   if (selectedIds.value.length === 0) {
     ElMessage.warning('请先选择图片')
@@ -1188,12 +1307,27 @@ const startQueuePolling = () => {
   }, 5000) // 5 秒轮询间隔
 }
 
+// 获取分类和分辨率选项
+const fetchCategoryAndResolutionOptions = async () => {
+  try {
+    const [cats, ress] = await Promise.all([
+      getCategories(),
+      getResolutions()
+    ])
+    categoryOptions.value = cats || []
+    resolutionOptions.value = ress || []
+  } catch (e) {
+    console.error('获取分类/分辨率选项失败', e)
+  }
+}
+
 onMounted(() => {
   fetchImages()
   fetchCollections()
   fetchTags()
   fetchQueueStatus()
   startQueuePolling()
+  fetchCategoryAndResolutionOptions()
 })
 
 onUnmounted(() => {

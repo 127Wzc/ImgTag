@@ -45,6 +45,8 @@ export const getImages = (params = {}) => {
         url_contains: params.urlContains || null,
         description_contains: params.descriptionContains || null,
         keyword: params.keyword || null,
+        category_id: params.category_id || null,
+        resolution_id: params.resolution_id || null,
         pending_only: params.pendingOnly || false,
         duplicates_only: params.duplicatesOnly || false,
         limit: params.limit || 20,
@@ -112,10 +114,12 @@ export const batchUpdateTags = (imageIds, tags, mode = 'add') => {
 // ============ 搜索 API ============
 
 // 相似度搜索
-export const searchSimilar = (text, tags = [], limit = 10, threshold = 0.5, vectorWeight = 0.7, tagWeight = 0.3) => {
+export const searchSimilar = (text, tags = [], limit = 10, threshold = 0.5, vectorWeight = 0.7, tagWeight = 0.3, categoryId = null, resolutionId = null) => {
     return api.post('/search/similar', {
         text,
         tags: tags.length > 0 ? tags : null,
+        category_id: categoryId,
+        resolution_id: resolutionId,
         limit,
         threshold,
         vector_weight: vectorWeight,
@@ -344,6 +348,34 @@ export const renameTag = (oldName, newName) => {
 
 export const deleteTag = (tagName) => {
     return api.delete(`/tags/${encodeURIComponent(tagName)}`)
+}
+
+// 主分类管理 API
+export const getCategories = () => {
+    return api.get('/tags/categories')
+}
+
+export const createCategory = (name, description = null, sortOrder = 0) => {
+    return api.post('/tags/categories', null, {
+        params: { name, description, sort_order: sortOrder }
+    })
+}
+
+export const deleteCategory = (tagId) => {
+    return api.delete(`/tags/categories/${tagId}`)
+}
+
+// 分辨率标签 API
+export const getResolutions = () => {
+    return api.get('/tags/resolutions')
+}
+
+// 批量设置主分类（仅管理员）
+export const batchSetCategory = (imageIds, categoryId) => {
+    return api.post('/images/batch/set-category', {
+        image_ids: imageIds,
+        category_id: categoryId
+    })
 }
 
 // 任务相关 API
