@@ -1,19 +1,24 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""
-认证 API 端点
+"""Authentication API endpoints.
+
+Provides user authentication, registration, and management.
 """
 
-from typing import Dict, Any
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from typing import Any, Optional
 
-from imgtag.schemas.user import UserCreate, UserLogin, UserResponse, Token
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
-from imgtag.services import auth_service
-from imgtag.db import db
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from imgtag.core.logging_config import get_logger
+from imgtag.db import config_db, get_async_session
+from imgtag.db.repositories import user_repository
+from imgtag.models.user import User
+from imgtag.schemas.user import Token, UserCreate, UserLogin, UserResponse
+from imgtag.services import auth_service
 
 logger = get_logger(__name__)
 
@@ -21,108 +26,202 @@ router = APIRouter()
 security = HTTPBearer(auto_error=False)
 
 
+def _user_to_dict(user: User) -> dict[str, Any]:
+    """Convert User model to dictionary.
+
+    Args:
+        user: User model instance.
+
+    Returns:
+        Dictionary representation of user.
+    """
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "role": user.role,
+        "is_active": user.is_active,
+        "password_hash": user.password_hash,
+        "api_key": user.api_key,
+        "created_at": user.created_at,
+        "last_login_at": user.last_login_at,
+    }
+
+
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-) -> Dict[str, Any]:
-    """获取当前登录用户"""
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    """Get current authenticated user.
+
+    Args:
+        credentials: HTTP Bearer credentials.
+        session: Database session.
+
+    Returns:
+        User dictionary.
+
+    Raises:
+        HTTPException: If authentication fails.
+    """
     if not credentials:
         raise HTTPException(status_code=401, detail="未提供认证凭据")
-    
+
     payload = auth_service.decode_token(credentials.credentials)
     if not payload:
         raise HTTPException(status_code=401, detail="Token 无效或已过期")
-    
+
     user_id = int(payload["sub"])
-    user = db.get_user_by_id(user_id)
-    
+    user = await user_repository.get_by_id(session, user_id)
+
     if not user:
         raise HTTPException(status_code=401, detail="用户不存在")
-    
-    if not user.get("is_active", True):
+
+    if not user.is_active:
         raise HTTPException(status_code=403, detail="用户已被禁用")
-    
-    return user
+
+    return _user_to_dict(user)
 
 
 async def get_current_user_optional(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-) -> Dict[str, Any]:
-    """获取当前用户（可选，不强制登录）"""
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    session: AsyncSession = Depends(get_async_session),
+) -> Optional[dict[str, Any]]:
+    """Get current user if authenticated (optional).
+
+    Args:
+        credentials: HTTP Bearer credentials.
+        session: Database session.
+
+    Returns:
+        User dictionary or None.
+    """
     if not credentials:
         return None
-    
+
     try:
-        return await get_current_user(credentials)
+        return await get_current_user(credentials, session)
     except HTTPException:
         return None
 
 
-async def require_admin(user: Dict = Depends(get_current_user)) -> Dict:
-    """要求管理员权限"""
+async def require_admin(
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """Require admin role.
+
+    Args:
+        user: Current user dictionary.
+
+    Returns:
+        User dictionary if admin.
+
+    Raises:
+        HTTPException: If user is not admin.
+    """
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return user
 
 
 @router.post("/login", response_model=Token)
-async def login(data: UserLogin):
-    """用户登录"""
-    user = auth_service.authenticate_user(data.username, data.password)
-    
+async def login(
+    data: UserLogin,
+    session: AsyncSession = Depends(get_async_session),
+):
+    """User login.
+
+    Args:
+        data: Login credentials.
+        session: Database session.
+
+    Returns:
+        JWT access token.
+    """
+    user = await user_repository.get_by_username(session, data.username)
+
     if not user:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    
-    token = auth_service.create_access_token(
-        user["id"], 
-        user["username"], 
-        user["role"]
-    )
-    
+
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+    if not auth_service.verify_password(data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+    # Update last login time
+    await user_repository.update_last_login(session, user)
+
+    token = auth_service.create_access_token(user.id, user.username, user.role)
+
     return {
         "access_token": token,
         "token_type": "bearer",
-        "expires_in": auth_service.JWT_EXPIRE_HOURS * 3600
+        "expires_in": auth_service.JWT_EXPIRE_HOURS * 3600,
     }
 
 
 @router.get("/public-config")
 async def get_public_config():
-    """获取公开配置（无需认证）"""
-    from imgtag.db import config_db
-    
+    """Get public configuration (no auth required).
+
+    Returns:
+        Public config including registration status.
+    """
     return {
         "allow_register": config_db.get("allow_register", "false").lower() == "true"
     }
 
 
-@router.post("/register", response_model=Dict[str, Any])
-async def register(data: UserCreate):
-    """用户注册"""
-    from imgtag.db import config_db
-    
-    # 检查是否允许注册
+@router.post("/register", response_model=dict[str, Any])
+async def register(
+    data: UserCreate,
+    session: AsyncSession = Depends(get_async_session),
+):
+    """User registration.
+
+    Args:
+        data: Registration data.
+        session: Database session.
+
+    Returns:
+        Success message with user ID.
+    """
+    # Check if registration is allowed
     allow_register = config_db.get("allow_register", "false").lower() == "true"
     if not allow_register:
         raise HTTPException(status_code=403, detail="注册功能已关闭")
-    
-    user_id = auth_service.register_user(
-        data.username, 
-        data.password, 
-        data.email
-    )
-    
-    if not user_id:
-        raise HTTPException(status_code=400, detail="用户名已存在或注册失败")
-    
-    return {
-        "message": "注册成功",
-        "user_id": user_id
-    }
+
+    # Check if username exists
+    if await user_repository.username_exists(session, data.username):
+        raise HTTPException(status_code=400, detail="用户名已存在")
+
+    password_hash = auth_service.hash_password(data.password)
+
+    try:
+        user = await user_repository.create_user(
+            session,
+            username=data.username,
+            password_hash=password_hash,
+            email=data.email,
+        )
+        logger.info(f"用户注册成功: {data.username} (ID: {user.id})")
+        return {"message": "注册成功", "user_id": user.id}
+    except Exception as e:
+        logger.error(f"用户注册失败: {e}")
+        raise HTTPException(status_code=400, detail="注册失败")
 
 
 @router.get("/me", response_model=UserResponse)
-async def get_me(user: Dict = Depends(get_current_user)):
-    """获取当前用户信息"""
+async def get_me(user: dict = Depends(get_current_user)):
+    """Get current user information.
+
+    Args:
+        user: Current user dictionary.
+
+    Returns:
+        User response.
+    """
     return UserResponse(
         id=user["id"],
         username=user["username"],
@@ -130,99 +229,180 @@ async def get_me(user: Dict = Depends(get_current_user)):
         role=user["role"],
         is_active=user.get("is_active", True),
         created_at=user["created_at"],
-        last_login_at=user.get("last_login_at")
+        last_login_at=user.get("last_login_at"),
     )
 
 
 @router.post("/logout")
-async def logout(user: Dict = Depends(get_current_user)):
-    """用户登出（客户端需删除 Token）"""
+async def logout(user: dict = Depends(get_current_user)):
+    """User logout (client should delete token).
+
+    Args:
+        user: Current user dictionary.
+
+    Returns:
+        Logout confirmation.
+    """
     return {"message": "已登出"}
 
 
-# ========== 用户管理（管理员） ==========
+# ========== User Management (Admin) ==========
+
 
 @router.get("/users")
-async def list_users(admin: Dict = Depends(require_admin)):
-    """获取所有用户列表（管理员）"""
-    users = db.get_all_users()
-    return {"users": users}
+async def list_users(
+    admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """List all users (admin only).
+
+    Args:
+        admin: Current admin user.
+        session: Database session.
+
+    Returns:
+        List of users.
+    """
+    users = await user_repository.get_all_users(session)
+    return {"users": [_user_to_dict(u) for u in users]}
 
 
 @router.put("/users/{user_id}")
 async def update_user(
     user_id: int,
-    is_active: bool = None,
-    role: str = None,
-    admin: Dict = Depends(require_admin)
+    is_active: Optional[bool] = None,
+    role: Optional[str] = None,
+    admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
 ):
-    """更新用户信息（管理员）"""
-    # 不允许修改自己
+    """Update user (admin only).
+
+    Args:
+        user_id: Target user ID.
+        is_active: Active status to set.
+        role: Role to set.
+        admin: Current admin user.
+        session: Database session.
+
+    Returns:
+        Update confirmation.
+    """
     if user_id == admin["id"]:
         raise HTTPException(status_code=400, detail="不能修改自己的权限")
-    
+
     if role is not None and role not in ["user", "admin"]:
         raise HTTPException(status_code=400, detail="无效的角色")
-    
-    success = db.update_user(user_id, is_active=is_active, role=role)
-    if not success:
-        raise HTTPException(status_code=500, detail="更新失败")
-    
+
+    user = await user_repository.get_by_id(session, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    if is_active is not None:
+        await user_repository.set_active(session, user, is_active)
+    if role is not None:
+        await user_repository.set_role(session, user, role)
+
     return {"message": "更新成功"}
 
 
 @router.delete("/users/{user_id}")
-async def delete_user(user_id: int, admin: Dict = Depends(require_admin)):
-    """删除用户（管理员）"""
-    # 不允许删除自己
+async def delete_user(
+    user_id: int,
+    admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Delete user (admin only).
+
+    Args:
+        user_id: Target user ID.
+        admin: Current admin user.
+        session: Database session.
+
+    Returns:
+        Delete confirmation.
+    """
     if user_id == admin["id"]:
         raise HTTPException(status_code=400, detail="不能删除自己")
-    
-    success = db.delete_user(user_id)
-    if not success:
-        raise HTTPException(status_code=500, detail="删除失败")
-    
+
+    user = await user_repository.get_by_id(session, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    await user_repository.delete(session, user)
     return {"message": "删除成功"}
 
 
 @router.post("/users")
 async def create_user_by_admin(
     data: UserCreate,
-    admin: Dict = Depends(require_admin)
+    admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
 ):
-    """管理员创建用户"""
-    user_id = auth_service.register_user(
-        data.username, 
-        data.password, 
-        data.email
-    )
-    
-    if not user_id:
-        raise HTTPException(status_code=400, detail="用户名已存在或创建失败")
-    
-    return {"message": "创建成功", "user_id": user_id}
+    """Create user (admin only).
+
+    Args:
+        data: User creation data.
+        admin: Current admin user.
+        session: Database session.
+
+    Returns:
+        Created user ID.
+    """
+    if await user_repository.username_exists(session, data.username):
+        raise HTTPException(status_code=400, detail="用户名已存在")
+
+    password_hash = auth_service.hash_password(data.password)
+
+    try:
+        user = await user_repository.create_user(
+            session,
+            username=data.username,
+            password_hash=password_hash,
+            email=data.email,
+        )
+        return {"message": "创建成功", "user_id": user.id}
+    except Exception as e:
+        logger.error(f"创建用户失败: {e}")
+        raise HTTPException(status_code=400, detail="创建失败")
 
 
 @router.put("/users/{user_id}/password")
 async def change_user_password(
     user_id: int,
     new_password: str,
-    admin: Dict = Depends(require_admin)
+    admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
 ):
-    """管理员修改用户密码"""
+    """Change user password (admin only).
+
+    Args:
+        user_id: Target user ID.
+        new_password: New password.
+        admin: Current admin user.
+        session: Database session.
+
+    Returns:
+        Update confirmation.
+    """
     if len(new_password) < 6:
         raise HTTPException(status_code=400, detail="密码至少6位")
-    
-    success = db.change_user_password(user_id, new_password)
-    if not success:
-        raise HTTPException(status_code=500, detail="修改密码失败")
-    
+
+    user = await user_repository.get_by_id(session, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    password_hash = auth_service.hash_password(new_password)
+    await user_repository.update_password(session, user, password_hash)
+
     return {"message": "密码修改成功"}
 
 
-# ========== 个人中心 ==========
+# ========== Personal Settings ==========
+
 
 class ChangePasswordRequest(BaseModel):
+    """Password change request."""
+
     old_password: str
     new_password: str = Field(..., min_length=6)
 
@@ -230,62 +410,98 @@ class ChangePasswordRequest(BaseModel):
 @router.put("/me/password")
 async def change_my_password(
     data: ChangePasswordRequest,
-    user: Dict = Depends(get_current_user)
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
 ):
-    """修改自己的密码（需验证旧密码）"""
-    # 获取完整用户信息（包含密码哈希）
-    full_user = db.get_user_by_id(user["id"])
+    """Change own password (requires old password).
+
+    Args:
+        data: Password change data.
+        user: Current user dictionary.
+        session: Database session.
+
+    Returns:
+        Update confirmation.
+    """
+    full_user = await user_repository.get_by_id(session, user["id"])
     if not full_user:
         raise HTTPException(status_code=404, detail="用户不存在")
-    
-    # 验证旧密码
-    if not auth_service.verify_password(data.old_password, full_user["password_hash"]):
+
+    if not auth_service.verify_password(data.old_password, full_user.password_hash):
         raise HTTPException(status_code=400, detail="旧密码错误")
-    
-    # 修改密码
-    success = db.change_user_password(user["id"], data.new_password)
-    if not success:
-        raise HTTPException(status_code=500, detail="修改密码失败")
-    
+
+    password_hash = auth_service.hash_password(data.new_password)
+    await user_repository.update_password(session, full_user, password_hash)
+
     return {"message": "密码修改成功"}
 
 
 @router.post("/me/api-key")
-async def generate_my_api_key(user: Dict = Depends(get_current_user)):
-    """生成新的个人 API 密钥（会覆盖旧密钥）"""
-    api_key = db.generate_user_api_key(user["id"])
-    if not api_key:
-        raise HTTPException(status_code=500, detail="生成 API 密钥失败")
-    
-    return {
-        "api_key": api_key,
-        "message": "API 密钥生成成功，请妥善保存"
-    }
+async def generate_my_api_key(
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Generate new personal API key (overwrites old key).
+
+    Args:
+        user: Current user dictionary.
+        session: Database session.
+
+    Returns:
+        Generated API key.
+    """
+    full_user = await user_repository.get_by_id(session, user["id"])
+    if not full_user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    api_key = await user_repository.generate_api_key(session, full_user)
+
+    return {"api_key": api_key, "message": "API 密钥生成成功，请妥善保存"}
 
 
 @router.get("/me/api-key")
-async def get_my_api_key(user: Dict = Depends(get_current_user)):
-    """获取当前 API 密钥（脱敏显示）"""
-    api_key = db.get_user_api_key(user["id"])
-    
-    if not api_key:
+async def get_my_api_key(
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Get current API key (masked).
+
+    Args:
+        user: Current user dictionary.
+        session: Database session.
+
+    Returns:
+        API key status and masked key.
+    """
+    full_user = await user_repository.get_by_id(session, user["id"])
+    if not full_user or not full_user.api_key:
         return {"has_key": False, "masked_key": None}
-    
-    # 脱敏显示：前8位...后8位
+
+    # Mask: first 8...last 8
+    api_key = full_user.api_key
     masked_key = f"{api_key[:8]}...{api_key[-8:]}"
-    
-    return {
-        "has_key": True,
-        "masked_key": masked_key
-    }
+
+    return {"has_key": True, "masked_key": masked_key}
 
 
 @router.delete("/me/api-key")
-async def delete_my_api_key(user: Dict = Depends(get_current_user)):
-    """删除个人 API 密钥"""
-    success = db.delete_user_api_key(user["id"])
-    if not success:
-        raise HTTPException(status_code=500, detail="删除 API 密钥失败")
-    
-    return {"message": "API 密钥已删除"}
+async def delete_my_api_key(
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Delete personal API key.
 
+    Args:
+        user: Current user dictionary.
+        session: Database session.
+
+    Returns:
+        Delete confirmation.
+    """
+    full_user = await user_repository.get_by_id(session, user["id"])
+    if not full_user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    await user_repository.delete_api_key(session, full_user)
+
+    return {"message": "API 密钥已删除"}

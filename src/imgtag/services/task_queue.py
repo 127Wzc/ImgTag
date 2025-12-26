@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import os
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
@@ -270,7 +271,6 @@ class TaskQueueService:
                 
             else:
                 # 获取文件扩展名
-                import os
                 file_ext = ""
                 if image_url.startswith("/uploads/"):
                     file_ext = os.path.splitext(image_url)[1].lower().lstrip(".")

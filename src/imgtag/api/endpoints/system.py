@@ -1,48 +1,63 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""
-系统 API 端点
-系统状态和健康检查
+"""System API endpoints.
+
+System status, health checks, and maintenance operations.
 """
 
 import hashlib
 import json
 import os
-from datetime import datetime
-from typing import Dict, Any
+from datetime import date, datetime
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import JSONResponse
+from PIL import Image as PILImage
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
 from imgtag.core.config import settings
 from imgtag.core.logging_config import get_logger
-from imgtag.db import config_db, db
+from imgtag.db import config_db, db, get_async_session
+from imgtag.db.repositories import image_repository
 from imgtag.services.embedding_service import embedding_service
+from imgtag.services.task_queue import task_queue
 
 logger = get_logger(__name__)
 
 router = APIRouter()
 
-@router.get("/status", response_model=Dict[str, Any])
-async def get_system_status():
-    """获取系统状态"""
+
+@router.get("/status", response_model=dict[str, Any])
+async def get_system_status(
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Get system status.
+
+    Args:
+        session: Database session.
+
+    Returns:
+        System status.
+    """
     logger.info("获取系统状态")
-    
+
     try:
-        image_count = db.count_images()
-        
-        # 从配置数据库实时读取
+        image_count = await image_repository.count_images(session)
+
         vision_model = config_db.get("vision_model", settings.VISION_MODEL)
         embedding_mode = config_db.get("embedding_mode", "local")
-        
+
         if embedding_mode == "local":
-            embedding_model = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
+            embedding_model = config_db.get(
+                "embedding_local_model", "BAAI/bge-small-zh-v1.5"
+            )
         else:
             embedding_model = config_db.get("embedding_model", settings.EMBEDDING_MODEL)
-        
+
         return {
             "status": "running",
             "version": settings.PROJECT_VERSION,
@@ -52,101 +67,116 @@ async def get_system_status():
             "embedding_dimensions": embedding_service.get_dimensions(),
         }
     except Exception as e:
-        logger.error(f"获取系统状态失败: {str(e)}")
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+        logger.error(f"获取系统状态失败: {e}")
+        return {"status": "error", "error": str(e)}
 
 
 @router.get("/health")
 async def health_check():
-    """健康检查端点"""
+    """Health check endpoint.
+
+    Returns:
+        Health status.
+    """
     return {"status": "healthy"}
 
 
-@router.get("/dashboard", response_model=Dict[str, Any])
-async def get_dashboard_stats():
-    """获取仪表盘综合统计数据"""
+@router.get("/dashboard", response_model=dict[str, Any])
+async def get_dashboard_stats(
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Get dashboard statistics.
+
+    Uses Repository methods with efficient single queries.
+
+    Args:
+        session: Database session.
+
+    Returns:
+        Dashboard stats.
+    """
     logger.info("获取仪表盘统计数据")
-    
+
     try:
-        from imgtag.services.task_queue import task_queue
-        from datetime import date
-        
-        # === 图片统计 ===
-        total_images = db.count_images()
-        
-        # 待分析图片数（没有 description 或 没有标签的）
-        pending_images = db.count_pending_images()
-        
-        # 已分析图片数
+        # Image stats - 3 queries
+        total_images = await image_repository.count_images(session)
+        pending_images = await image_repository.count_pending_images(session)
         analyzed_images = total_images - pending_images
-        
-        # === 今日统计 ===
-        today = date.today().isoformat()
-        today_uploaded = db.count_images_by_date(today, "uploaded")
-        today_analyzed = db.count_images_by_date(today, "analyzed")
-        
-        # === 任务队列统计 ===
+
+        # Today stats - pass date object directly
+        today = date.today()
+        today_uploaded = await image_repository.count_by_date(
+            session, today, "uploaded"
+        )
+        today_analyzed = await image_repository.count_by_date(
+            session, today, "analyzed"
+        )
+
+        # Queue stats
         queue_status = task_queue.get_status()
-        total_tasks = queue_status.get("pending_count", 0) + queue_status.get("processing_count", 0) + queue_status.get("completed_count", 0)
-        processing_tasks = queue_status.get("processing_count", 0)
-        pending_tasks = queue_status.get("pending_count", 0)
-        queue_running = queue_status.get("running", False)
-        
-        # === 系统配置 ===
+        total_tasks = (
+            queue_status.get("pending_count", 0)
+            + queue_status.get("processing_count", 0)
+            + queue_status.get("completed_count", 0)
+        )
+
+        # System config
         vision_model = config_db.get("vision_model", settings.VISION_MODEL)
         embedding_mode = config_db.get("embedding_mode", "local")
-        
+
         if embedding_mode == "local":
-            embedding_model = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
+            embedding_model = config_db.get(
+                "embedding_local_model", "BAAI/bge-small-zh-v1.5"
+            )
         else:
             embedding_model = config_db.get("embedding_model", settings.EMBEDDING_MODEL)
-        
-        embedding_dimensions = embedding_service.get_dimensions()
-        
+
         return {
-            # 图片统计
             "images": {
                 "total": total_images,
                 "pending": pending_images,
-                "analyzed": analyzed_images
+                "analyzed": analyzed_images,
             },
-            # 今日统计
             "today": {
                 "uploaded": today_uploaded,
-                "analyzed": today_analyzed
+                "analyzed": today_analyzed,
             },
-            # 任务队列
             "queue": {
                 "total": total_tasks,
-                "processing": processing_tasks,
-                "pending": pending_tasks,
-                "running": queue_running
+                "processing": queue_status.get("processing_count", 0),
+                "pending": queue_status.get("pending_count", 0),
+                "running": queue_status.get("running", False),
             },
-            # 系统配置
             "system": {
                 "vision_model": vision_model,
                 "embedding_model": embedding_model,
-                "embedding_dimensions": embedding_dimensions,
-                "version": settings.PROJECT_VERSION
-            }
+                "embedding_dimensions": embedding_service.get_dimensions(),
+                "version": settings.PROJECT_VERSION,
+            },
         }
     except Exception as e:
-        logger.error(f"获取仪表盘统计失败: {str(e)}")
+        logger.error(f"获取仪表盘统计失败: {e}")
         return {
             "error": str(e),
             "images": {"total": 0, "pending": 0, "analyzed": 0},
             "today": {"uploaded": 0, "analyzed": 0},
             "queue": {"total": 0, "processing": 0, "pending": 0, "running": False},
-            "system": {"vision_model": "-", "embedding_model": "-", "embedding_dimensions": 0, "version": "-"}
+            "system": {
+                "vision_model": "-",
+                "embedding_model": "-",
+                "embedding_dimensions": 0,
+                "version": "-",
+            },
         }
 
 
-@router.get("/config", response_model=Dict[str, Any])
+@router.get("/config", response_model=dict[str, Any])
 async def get_config():
-    """获取当前配置（不含敏感信息）"""
+    """Get current config (non-sensitive).
+
+    Returns:
+        Public config values.
+    """
     return {
         "project_name": settings.PROJECT_NAME,
         "project_version": settings.PROJECT_VERSION,
@@ -160,73 +190,71 @@ async def get_config():
     }
 
 
-
 @router.get("/models")
 async def get_available_models():
-    """获取可用的模型列表"""
+    """Get available model list.
+
+    Returns:
+        Available models from API.
+    """
     logger.info("获取可用模型列表")
-    
+
     try:
-        # 从配置数据库读取 API 配置
         api_base_url = config_db.get("vision_api_base_url", settings.VISION_API_BASE_URL)
         api_key = config_db.get("vision_api_key", "")
-        
+
         if not api_base_url or not api_key:
             return {"models": [], "error": "未配置 API 地址或密钥"}
-        
-        # 调用 OpenAI 兼容的 /models 端点
+
         models_url = f"{api_base_url.rstrip('/')}/models"
-        
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                models_url,
-                headers={"Authorization": f"Bearer {api_key}"}
+                models_url, headers={"Authorization": f"Bearer {api_key}"}
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
-                # 提取模型 ID 列表
                 models = []
                 if "data" in data:
                     models = [m.get("id") for m in data["data"] if m.get("id")]
                 elif isinstance(data, list):
                     models = [m.get("id") for m in data if m.get("id")]
-                
                 return {"models": sorted(models)}
             else:
                 return {"models": [], "error": f"API 返回 {response.status_code}"}
-                
+
     except httpx.TimeoutException:
         return {"models": [], "error": "请求超时"}
     except Exception as e:
-        logger.error(f"获取模型列表失败: {str(e)}")
+        logger.error(f"获取模型列表失败: {e}")
         return {"models": [], "error": str(e)}
 
 
-
+# ========== Export/Import (keep legacy db calls for now) ==========
 
 
 @router.get("/export")
-async def export_database(admin: Dict = Depends(require_admin)):
-    """导出数据库记录（管理员）"""
+async def export_database(admin: dict = Depends(require_admin)):
+    """Export database records (admin).
+
+    Note: Uses legacy db calls for complex export logic.
+
+    Args:
+        admin: Admin user.
+
+    Returns:
+        Export JSON file.
+    """
     logger.info("开始导出数据库")
-    
+
     try:
-        # 导出图片数据（不含向量）
         images = db.export_all_images()
-        
-        # 导出标签数据
         tags = db.export_all_tags()
-        
-        # 导出收藏夹数据
         collections = db.export_all_collections()
-        
-        # 导出配置
         configs = config_db.get_all()
-        
-        # 导出用户（不含密码）
         users = db.export_all_users()
-        
+
         export_data = {
             "version": "1.0",
             "exported_at": datetime.now().isoformat(),
@@ -239,247 +267,307 @@ async def export_database(admin: Dict = Depends(require_admin)):
                 "image_count": len(images),
                 "tag_count": len(tags),
                 "collection_count": len(collections),
-                "user_count": len(users)
-            }
+                "user_count": len(users),
+            },
         }
-        
-        logger.info(f"导出完成: {len(images)} 张图片, {len(tags)} 个标签, {len(collections)} 个收藏夹")
-        
+
+        logger.info(
+            f"导出完成: {len(images)} 张图片, "
+            f"{len(tags)} 个标签, {len(collections)} 个收藏夹"
+        )
+
         return JSONResponse(
             content=export_data,
             headers={
-                "Content-Disposition": f'attachment; filename="imgtag_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json"'
-            }
+                "Content-Disposition": (
+                    f'attachment; filename="imgtag_backup_'
+                    f'{datetime.now().strftime("%Y%m%d_%H%M%S")}.json"'
+                )
+            },
         )
     except Exception as e:
-        logger.error(f"导出失败: {str(e)}")
+        logger.error(f"导出失败: {e}")
         return {"error": str(e)}
 
 
 @router.post("/import")
 async def import_database(
     file: UploadFile = File(...),
-    admin: Dict = Depends(require_admin)
+    admin: dict = Depends(require_admin),
 ):
-    """导入数据库记录（管理员）"""
+    """Import database records (admin).
+
+    Note: Uses legacy db calls for complex import logic.
+
+    Args:
+        file: Upload file.
+        admin: Admin user.
+
+    Returns:
+        Import stats.
+    """
     logger.info(f"开始导入数据库: {file.filename}")
-    
+
     try:
         content = await file.read()
-        data = json.loads(content.decode('utf-8'))
-        
+        data = json.loads(content.decode("utf-8"))
+
         stats = {
             "images_imported": 0,
             "tags_imported": 0,
             "collections_imported": 0,
             "configs_imported": 0,
-            "errors": []
+            "errors": [],
         }
-        
-        # 导入配置
+
+        # Import configs
         if "configs" in data and data["configs"]:
             for key, value in data["configs"].items():
                 try:
                     config_db.set(key, value)
                     stats["configs_imported"] += 1
                 except Exception as e:
-                    stats["errors"].append(f"配置 {key}: {str(e)}")
-        
-        # 导入标签
+                    stats["errors"].append(f"配置 {key}: {e}")
+
+        # Import tags
         if "tags" in data:
             for tag in data["tags"]:
                 try:
                     db.import_tag(tag)
                     stats["tags_imported"] += 1
                 except Exception as e:
-                    stats["errors"].append(f"标签 {tag.get('name')}: {str(e)}")
-        
-        # 导入图片
+                    stats["errors"].append(f"标签 {tag.get('name')}: {e}")
+
+        # Import images
         if "images" in data:
             for img in data["images"]:
                 try:
                     db.import_image(img)
                     stats["images_imported"] += 1
                 except Exception as e:
-                    stats["errors"].append(f"图片 {img.get('id')}: {str(e)}")
-        
-        # 导入收藏夹
+                    stats["errors"].append(f"图片 {img.get('id')}: {e}")
+
+        # Import collections
         if "collections" in data:
             for col in data["collections"]:
                 try:
                     db.import_collection(col)
                     stats["collections_imported"] += 1
                 except Exception as e:
-                    stats["errors"].append(f"收藏夹 {col.get('name')}: {str(e)}")
-        
+                    stats["errors"].append(f"收藏夹 {col.get('name')}: {e}")
+
         logger.info(f"导入完成: {stats}")
-        
-        return {
-            "message": "导入完成",
-            "stats": stats
-        }
+
+        return {"message": "导入完成", "stats": stats}
     except json.JSONDecodeError:
         return {"error": "无效的 JSON 文件"}
     except Exception as e:
-        logger.error(f"导入失败: {str(e)}")
+        logger.error(f"导入失败: {e}")
         return {"error": str(e)}
 
 
-# ========== 重复检测 API ==========
-
+# ========== Duplicate Detection ==========
 
 
 @router.get("/duplicates")
-async def get_duplicate_images(admin: Dict = Depends(require_admin)):
-    """获取重复的图片列表（管理员）"""
+async def get_duplicate_images(
+    admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Get duplicate images (admin).
+
+    Args:
+        admin: Admin user.
+        session: Database session.
+
+    Returns:
+        Duplicate groups.
+    """
     logger.info("扫描重复图片")
-    
+
     try:
-        duplicates = db.find_duplicate_images()
-        no_hash_count = db.count_images_without_hash()
-        
+        duplicates = await image_repository.find_duplicates(session)
+        no_hash_count = await image_repository.count_without_hash(session)
+
         return {
             "duplicate_groups": duplicates,
             "total_groups": len(duplicates),
-            "total_duplicates": sum(d['count'] - 1 for d in duplicates),
-            "images_without_hash": no_hash_count
+            "total_duplicates": sum(d["count"] - 1 for d in duplicates),
+            "images_without_hash": no_hash_count,
         }
     except Exception as e:
-        logger.error(f"扫描重复图片失败: {str(e)}")
+        logger.error(f"扫描重复图片失败: {e}")
         return {"error": str(e)}
 
 
 @router.post("/duplicates/calculate-hashes")
 async def calculate_missing_hashes(
     limit: int = 100,
-    admin: Dict = Depends(require_admin)
+    admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
 ):
-    """批量计算缺失的文件哈希（管理员）"""
+    """Calculate missing file hashes (admin).
+
+    Batch processes images without hash.
+
+    Args:
+        limit: Max images to process.
+        admin: Admin user.
+        session: Database session.
+
+    Returns:
+        Processing result.
+    """
     logger.info(f"开始计算文件哈希，限制 {limit} 张")
-    
+
     try:
-        images = db.get_images_without_hash(limit)
-        
-        processed = 0
+        images = await image_repository.get_without_hash(session, limit)
+
+        # Batch collect updates
+        hash_updates = []
         errors = []
-        
+
         for img in images:
             try:
                 file_hash = None
-                
-                # 本地文件
-                file_path = img.get('file_path')
+
+                # Local file
+                file_path = img.get("file_path")
                 if file_path and os.path.exists(file_path):
-                    with open(file_path, 'rb') as f:
+                    with open(file_path, "rb") as f:
                         file_hash = hashlib.md5(f.read()).hexdigest()
-                
-                # URL 图片 - 下载并计算哈希
-                elif img.get('image_url'):
-                    url = img['image_url']
-                    # 处理相对 URL
-                    if url.startswith('/'):
+
+                # URL image - download and hash
+                elif img.get("image_url"):
+                    url = img["image_url"]
+                    if url.startswith("/"):
                         base_url = config_db.get("base_url", "http://localhost:8000")
-                        url = base_url.rstrip('/') + url
-                    
+                        url = base_url.rstrip("/") + url
+
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         response = await client.get(url)
                         if response.status_code == 200:
                             file_hash = hashlib.md5(response.content).hexdigest()
-                
+
                 if file_hash:
-                    db.update_image_hash(img['id'], file_hash)
-                    processed += 1
-                    
+                    hash_updates.append({"id": img["id"], "hash": file_hash})
+
             except Exception as e:
-                errors.append(f"图片 {img['id']}: {str(e)}")
-        
-        remaining = db.count_images_without_hash()
-        
+                errors.append(f"图片 {img['id']}: {e}")
+
+        # Batch update
+        if hash_updates:
+            await image_repository.batch_update_hashes(session, hash_updates)
+
+        remaining = await image_repository.count_without_hash(session)
+
         return {
-            "message": f"已处理 {processed} 张图片",
-            "processed": processed,
+            "message": f"已处理 {len(hash_updates)} 张图片",
+            "processed": len(hash_updates),
             "remaining": remaining,
-            "errors": errors[:10]
+            "errors": errors[:10],
         }
     except Exception as e:
-        logger.error(f"计算哈希失败: {str(e)}")
+        logger.error(f"计算哈希失败: {e}")
         return {"error": str(e)}
 
 
-# ========== 分辨率补全 API ==========
+# ========== Resolution Backfill ==========
 
 
 @router.get("/resolution/status")
-async def get_resolution_status(admin: Dict = Depends(require_admin)):
-    """获取分辨率补全状态（管理员）"""
+async def get_resolution_status(
+    admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Get resolution backfill status (admin).
+
+    Args:
+        admin: Admin user.
+        session: Database session.
+
+    Returns:
+        Resolution status.
+    """
     logger.info("获取分辨率补全状态")
-    
+
     try:
-        total = db.count_images()
-        missing = db.count_images_without_resolution()
+        total = await image_repository.count_images(session)
+        missing = await image_repository.count_without_resolution(session)
         completed = total - missing
-        
+
         return {
             "total": total,
             "completed": completed,
             "missing": missing,
-            "percentage": round((completed / total * 100) if total > 0 else 0, 1)
+            "percentage": round((completed / total * 100) if total > 0 else 0, 1),
         }
     except Exception as e:
-        logger.error(f"获取分辨率状态失败: {str(e)}")
+        logger.error(f"获取分辨率状态失败: {e}")
         return {"error": str(e)}
 
 
 @router.post("/resolution/backfill")
 async def backfill_resolution(
     limit: int = 100,
-    admin: Dict = Depends(require_admin)
+    admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
 ):
-    """批量补全缺失的图片分辨率（管理员）
-    
-    扫描 width 为 NULL 的图片，从本地文件读取分辨率并更新。
-    仅处理有本地 file_path 的图片。
+    """Backfill missing image resolutions (admin).
+
+    Batch processes images without width/height.
+
+    Args:
+        limit: Max images to process.
+        admin: Admin user.
+        session: Database session.
+
+    Returns:
+        Processing result.
     """
-    from PIL import Image
-    
     logger.info(f"开始补全分辨率，限制 {limit} 张")
-    
+
     try:
-        images = db.get_images_without_resolution(limit)
-        
-        processed = 0
+        images = await image_repository.get_without_resolution(session, limit)
+
+        # Batch collect updates
+        resolution_updates = []
         skipped = 0
         errors = []
-        
+
         for img in images:
             try:
-                file_path = img.get('file_path')
-                
-                # 只处理有本地文件的图片
+                file_path = img.get("file_path")
+
                 if not file_path or not os.path.exists(file_path):
                     skipped += 1
                     continue
-                
-                # 读取图片分辨率
-                with Image.open(file_path) as pil_img:
+
+                with PILImage.open(file_path) as pil_img:
                     width, height = pil_img.size
-                
-                # 更新数据库
-                db.update_image_resolution(img['id'], width, height)
-                processed += 1
-                    
+
+                resolution_updates.append({
+                    "id": img["id"],
+                    "width": width,
+                    "height": height,
+                })
+
             except Exception as e:
-                errors.append(f"图片 {img['id']}: {str(e)}")
-        
-        remaining = db.count_images_without_resolution()
-        
+                errors.append(f"图片 {img['id']}: {e}")
+
+        # Batch update
+        if resolution_updates:
+            await image_repository.batch_update_resolutions(session, resolution_updates)
+
+        remaining = await image_repository.count_without_resolution(session)
+
         return {
-            "message": f"已处理 {processed} 张图片，跳过 {skipped} 张（无本地文件）",
-            "processed": processed,
+            "message": f"已处理 {len(resolution_updates)} 张图片，跳过 {skipped} 张",
+            "processed": len(resolution_updates),
             "skipped": skipped,
             "remaining": remaining,
-            "errors": errors[:10]
+            "errors": errors[:10],
         }
     except Exception as e:
-        logger.error(f"补全分辨率失败: {str(e)}")
+        logger.error(f"补全分辨率失败: {e}")
         return {"error": str(e)}

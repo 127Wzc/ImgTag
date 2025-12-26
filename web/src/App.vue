@@ -352,8 +352,8 @@ onMounted(async () => {
   
   // 每30秒刷新健康状态
   healthTimer = setInterval(checkHealth, 30000)
-  // 每10秒刷新进行中的任务
-  tasksTimer = setInterval(fetchProcessingTasks, 10000)
+  // 每30秒刷新进行中的任务（仅用于导航栏徽章显示）
+  tasksTimer = setInterval(fetchProcessingTasks, 30000)
 })
 
 onUnmounted(() => {

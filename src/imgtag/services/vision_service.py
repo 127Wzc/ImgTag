@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""
-视觉模型服务
-使用 OpenAI 兼容的 API 分析图像
+"""Vision model service.
+
+Analyzes images using OpenAI-compatible vision APIs via httpx.
 """
 
-# 标准库
 import base64
 import io
 import json
@@ -14,53 +13,60 @@ import re
 import time
 import datetime
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
-# 第三方库
 import httpx
 from PIL import Image
-from openai import AsyncOpenAI
 
-# 本地模块
 from imgtag.core.logging_config import get_logger
+from imgtag.db import config_db
 
 logger = get_logger(__name__)
 
 
 @dataclass
 class ImageAnalysisResult:
-    """图像分析结果"""
-    tags: List[str]
+    """Result from image analysis.
+
+    Attributes:
+        tags: Extracted image tags.
+        description: Image description text.
+        raw_response: Raw API response for debugging.
+    """
+
+    tags: list[str]
     description: str
     raw_response: Optional[str] = None
 
 
 class VisionService:
-    """视觉模型服务类"""
-    
-    def __init__(self):
-        """初始化视觉模型服务"""
+    """Vision model service class.
+
+    Uses httpx to call OpenAI-compatible vision APIs for image analysis.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the vision service."""
         logger.info("初始化视觉模型服务")
-    
-    def _get_client(self) -> AsyncOpenAI:
-        """获取 OpenAI 客户端（从数据库配置）"""
-        from imgtag.db import config_db
-        
+
+    def _get_api_config(self) -> tuple[str, str, str]:
+        """Get API configuration from database.
+
+        Returns:
+            Tuple of (api_base_url, api_key, model_name).
+
+        Raises:
+            ValueError: If API key is not configured.
+        """
+
         api_base = config_db.get("vision_api_base_url", "https://api.openai.com/v1")
         api_key = config_db.get("vision_api_key", "")
-        
+        model = config_db.get("vision_model", "gpt-4o-mini")
+
         if not api_key:
             raise ValueError("视觉模型 API 密钥未配置，请在系统设置中配置")
-        
-        return AsyncOpenAI(
-            api_key=api_key,
-            base_url=api_base
-        )
-    
-    def _get_model(self) -> str:
-        """获取模型名称"""
-        from imgtag.db import config_db
-        return config_db.get("vision_model", "gpt-4o-mini")
+
+        return api_base, api_key, model
     
     def _compress_image(self, image_data: bytes, max_size: int = 1024 * 1024, max_dimension: int = 2048) -> tuple:
         """压缩图片到指定大小以内（优化识别效果）
@@ -165,9 +171,12 @@ class VisionService:
         logger.warning(f"图片压缩后仍超限: {len(buffer.getvalue())/1024:.1f}KB (原始: {original_format} {original_size})")
         return buffer.getvalue(), "image/jpeg"
     
+    def _get_model(self) -> str:
+        """获取视觉模型名称"""
+        return config_db.get("vision_model", "gpt-4o-mini")
+    
     def _get_prompt(self) -> str:
         """获取分析提示词"""
-        from imgtag.db import config_db
         return config_db.get("vision_prompt", """请分析这张图片，并按以下格式返回JSON响应:
 {
     "tags": ["标签1", "标签2", "标签3", ...],
@@ -181,57 +190,69 @@ class VisionService:
 请只返回JSON格式，不要添加任何其他文字。""")
     
     async def analyze_image_url(self, image_url: str) -> ImageAnalysisResult:
-        """分析远程图像 URL"""
+        """Analyze a remote image by URL.
+
+        Args:
+            image_url: URL of the image to analyze.
+
+        Returns:
+            ImageAnalysisResult with tags and description.
+
+        Raises:
+            ValueError: If API is not configured or request fails.
+        """
         logger.info(f"分析远程图像: {image_url[:50]}...")
-        
+
         try:
-            client = self._get_client()
-            model = self._get_model()
+            api_base, api_key, model = self._get_api_config()
             prompt = self._get_prompt()
-            
-            # DEBUG: 打印请求参数
-            from imgtag.db import config_db
-            api_base = config_db.get("vision_api_base_url", "https://api.openai.com/v1")
-            logger.debug(f"视觉模型 API 请求参数:")
-            logger.debug(f"  - API Base: {api_base}")
-            logger.debug(f"  - Model: {model}")
-            logger.debug(f"  - Image URL: {image_url}")
-            logger.debug(f"  - Prompt: {prompt[:100]}...")
-            logger.debug(f"  - stream: False")
-            
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": image_url}}
-                        ]
-                    }
-                ],
-                stream=False,  # 明确禁用流式响应
-            )
-            
-            # DEBUG: 打印响应元数据
-            logger.debug(f"视觉模型 API 响应:")
-            logger.debug(f"  - Model: {getattr(response, 'model', None)}")
-            logger.debug(f"  - Response Type: {type(response)}")
-            
-            # 使用统一的内容提取方法（支持 OpenAI 和 Google 格式）
-            content = self._extract_content_from_response(response)
-            logger.debug(f"  - Extracted content length: {len(content)}")
-                
+
+            logger.debug(f"视觉模型 API 请求: base={api_base}, model={model}")
+
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    f"{api_base.rstrip('/')}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {"type": "image_url", "image_url": {"url": image_url}},
+                                ],
+                            }
+                        ],
+                        "stream": False,
+                    },
+                )
+
+                if response.status_code != 200:
+                    error_text = response.text[:500] if response.text else "无响应内容"
+                    logger.error(f"API 请求失败: HTTP {response.status_code}, {error_text}")
+                    raise ValueError(f"API 请求失败: HTTP {response.status_code}")
+
+                response_data = response.json()
+
+            content = self._extract_content_from_response(response_data)
             return self._parse_response(content)
-            
+
+        except httpx.ConnectError as e:
+            logger.error(f"视觉模型 API 连接失败: {e}")
+            raise ValueError(f"无法连接到 API") from e
+        except httpx.TimeoutException as e:
+            logger.error(f"视觉模型 API 请求超时: {e}")
+            raise ValueError("API 请求超时") from e
         except Exception as e:
-            logger.error(f"视觉模型分析失败: {str(e)}")
+            logger.error(f"视觉模型分析失败: {e}")
             raise
     
     async def analyze_image_base64(self, image_data: bytes, mime_type: str = "image/jpeg") -> ImageAnalysisResult:
         """分析 Base64 编码的图像（支持 OpenAI 和 Gemini 原生格式）"""
-        from imgtag.db import config_db
-        
         original_size = len(image_data)
         logger.info(f"分析 Base64 图像, 类型: {mime_type}, 原始大小: {original_size/1024:.1f} KB")
         
@@ -246,7 +267,6 @@ class VisionService:
             logger.info(f"压缩后: {len(image_data)/1024:.1f} KB, 类型: {mime_type}")
         
         try:
-            from imgtag.db import config_db
             
             api_base = config_db.get("vision_api_base_url", "https://api.openai.com/v1")
             api_key = config_db.get("vision_api_key", "")

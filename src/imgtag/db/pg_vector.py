@@ -2,14 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-PostgreSQL 向量数据库操作
-包含对 images 表的增删改查操作
-使用连接池管理数据库连接
+[DEPRECATED] PostgreSQL 向量数据库操作 - Legacy 代码
+
+⚠️  此模块已弃用，请使用 imgtag.db.repositories 中的 Repository 类
+    新代码应使用:
+    - image_repository (ImageRepository)
+    - tag_repository (TagRepository)
+    - user_repository (UserRepository)
+    - collection_repository (CollectionRepository)
+
+    此模块仅用于向后兼容，将在未来版本中移除。
+    目前仅 export/import 功能仍在使用此模块。
 """
 
 import psycopg
 from psycopg_pool import ConnectionPool
 from psycopg.types.json import Json
+import hashlib
+import secrets
 import time
 import os
 from typing import List, Optional, Dict, Any, Tuple
@@ -319,23 +329,23 @@ class PGVectorDB:
                 """)
                 cursor.execute("CREATE INDEX idx_users_role ON public.users(role);")
                 
-                # 插入默认管理员账号 (密码: admin123)
-                import hashlib
-                import secrets
+                # 插入默认管理员账号
+                admin_user = os.getenv("ADMIN_USERNAME", "admin")
+                admin_pass = os.getenv("ADMIN_PASSWORD", "admin123")
                 salt = secrets.token_hex(16)
                 pw_hash = hashlib.pbkdf2_hmac(
                     'sha256', 
-                    'admin'.encode('utf-8'), 
+                    admin_pass.encode('utf-8'), 
                     salt.encode('utf-8'), 
                     100000
                 )
                 password_hash = f"{salt}${pw_hash.hex()}"
                 cursor.execute("""
                 INSERT INTO users (username, password_hash, role)
-                VALUES ('admin', %s, 'admin')
+                VALUES (%s, %s, 'admin')
                 ON CONFLICT (username) DO NOTHING;
-                """, (password_hash,))
-                logger.info("users 表创建成功，默认管理员账号已创建 (admin/admin)")
+                """, (admin_user, password_hash))
+                logger.info(f"users 表创建成功，默认管理员账号已创建 ({admin_user}/{admin_pass})")
             
             # 检查 approvals 表
             cursor.execute("""
@@ -727,21 +737,21 @@ class PGVectorDB:
         """确保默认管理员账号存在"""
         cursor.execute("SELECT COUNT(*) FROM users WHERE username = 'admin'")
         if cursor.fetchone()[0] == 0:
-            import hashlib
-            import secrets
+            admin_user = os.getenv("ADMIN_USERNAME", "admin")
+            admin_pass = os.getenv("ADMIN_PASSWORD", "admin123")
             salt = secrets.token_hex(16)
             pw_hash = hashlib.pbkdf2_hmac(
                 'sha256', 
-                'admin'.encode('utf-8'), 
+                admin_pass.encode('utf-8'), 
                 salt.encode('utf-8'), 
                 100000
             )
             password_hash = f"{salt}${pw_hash.hex()}"
             cursor.execute("""
             INSERT INTO users (username, password_hash, role)
-            VALUES ('admin', %s, 'admin');
-            """, (password_hash,))
-            logger.info("默认管理员账号已创建 (admin/admin)")
+            VALUES (%s, %s, 'admin');
+            """, (admin_user, password_hash))
+            logger.info(f"默认管理员账号已创建 ({admin_user}/{admin_pass})")
         else:
             logger.info("默认管理员账号已存在")
     
@@ -787,7 +797,6 @@ class PGVectorDB:
             
             # 自动从 URL 截取文件类型
             if not file_type:
-                import os
                 url_path = image_url.split("?")[0]  # 去掉查询参数
                 file_type = os.path.splitext(url_path)[1].lower().lstrip(".")
                 if not file_type:
@@ -2306,7 +2315,6 @@ class PGVectorDB:
     def generate_user_api_key(self, user_id: int) -> Optional[str]:
         """生成并保存新的用户 API 密钥"""
         try:
-            import secrets
             # 生成 32 字节的随机密钥，编码为 64 字符的十六进制字符串
             api_key = secrets.token_hex(32)
             
@@ -2372,9 +2380,6 @@ class PGVectorDB:
     def change_user_password(self, user_id: int, new_password: str) -> bool:
         """修改用户密码"""
         try:
-            import secrets
-            import hashlib
-            
             salt = secrets.token_hex(16)
             pw_hash = hashlib.pbkdf2_hmac(
                 'sha256', 

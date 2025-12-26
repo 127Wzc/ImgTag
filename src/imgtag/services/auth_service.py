@@ -124,7 +124,7 @@ def register_user(username: str, password: str, email: str = None, role: str = "
 def init_default_admin():
     """初始化默认管理员账号"""
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
-    admin_password = os.getenv("ADMIN_PASSWORD", "admin")
+    admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
     
     existing = db.get_user_by_username(admin_username)
     if not existing:

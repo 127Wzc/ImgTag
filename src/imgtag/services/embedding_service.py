@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from imgtag.core.logging_config import get_logger
+from imgtag.db import config_db
 
 logger = get_logger(__name__)
 
@@ -115,7 +116,6 @@ class ONNXEmbeddingModel:
         └── onnx/
             └── model.onnx
         """
-        from imgtag.db import config_db
         
         try:
             import onnxruntime as ort
@@ -323,13 +323,11 @@ class EmbeddingService:
     
     def _get_mode(self) -> str:
         """获取嵌入模式 (api 或 local)"""
-        from imgtag.db import config_db
         return config_db.get("embedding_mode", "local")
     
     def _get_local_model(self) -> ONNXEmbeddingModel:
         """获取本地 ONNX 模型实例"""
         if EmbeddingService._local_model is None:
-            from imgtag.db import config_db
             model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
             
             # 获取 ONNX 模型仓库名
@@ -350,7 +348,6 @@ class EmbeddingService:
     
     def get_dimensions(self) -> int:
         """获取向量维度"""
-        from imgtag.db import config_db
         mode = self._get_mode()
         
         if mode == "local":
@@ -395,36 +392,63 @@ class EmbeddingService:
             logger.error(f"本地向量生成失败: {str(e)}")
             raise
     
-    async def _get_embedding_api(self, text: str) -> List[float]:
-        """使用 API 生成向量"""
-        from imgtag.db import config_db
-        from openai import AsyncOpenAI
-        
+    async def _get_embedding_api(self, text: str) -> list[float]:
+        """Generate embedding using API.
+
+        Args:
+            text: Text to embed.
+
+        Returns:
+            List of floats representing the embedding vector.
+
+        Raises:
+            ValueError: If API is not configured or request fails.
+        """
+        import httpx
+
         api_base = config_db.get("embedding_api_base_url", "https://api.openai.com/v1")
         api_key = config_db.get("embedding_api_key", "")
-        
-        if not api_key:
-            raise ValueError("嵌入模型 API 密钥未配置，请在系统设置中配置")
-        
-        client = AsyncOpenAI(api_key=api_key, base_url=api_base)
         model = config_db.get("embedding_model", "text-embedding-3-small")
         dimensions = config_db.get_int("embedding_dimensions", 1536)
-        
+
+        if not api_key:
+            raise ValueError("嵌入模型 API 密钥未配置，请在系统设置中配置")
+
         logger.info(f"使用 API 生成向量: {text[:50]}...")
-        
+
         try:
-            response = await client.embeddings.create(
-                model=model,
-                input=text.strip(),
-                dimensions=dimensions
-            )
-            
-            embedding = response.data[0].embedding
-            logger.info(f"API 向量生成成功，维度: {len(embedding)}")
-            return embedding
-            
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    f"{api_base.rstrip('/')}/embeddings",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "input": text.strip(),
+                        "dimensions": dimensions,
+                    },
+                )
+
+                if response.status_code != 200:
+                    error_text = response.text[:500] if response.text else "无响应内容"
+                    logger.error(f"API 请求失败: HTTP {response.status_code}, {error_text}")
+                    raise ValueError(f"API 请求失败: HTTP {response.status_code}")
+
+                data = response.json()
+                embedding = data["data"][0]["embedding"]
+                logger.info(f"API 向量生成成功，维度: {len(embedding)}")
+                return embedding
+
+        except httpx.ConnectError as e:
+            logger.error(f"嵌入模型 API 连接失败: {e}")
+            raise ValueError("无法连接到 API") from e
+        except httpx.TimeoutException as e:
+            logger.error(f"嵌入模型 API 请求超时: {e}")
+            raise ValueError("API 请求超时") from e
         except Exception as e:
-            logger.error(f"API 向量生成失败: {str(e)}")
+            logger.error(f"API 向量生成失败: {e}")
             raise
     
     async def get_embedding_combined(

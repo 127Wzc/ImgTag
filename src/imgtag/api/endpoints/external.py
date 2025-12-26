@@ -1,21 +1,26 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""
-外部 API 端点
-专用于第三方接入，使用 API 密钥认证
+"""External API endpoints.
+
+Third-party integration using API key authentication.
 """
 
+import hashlib
 import time
-from typing import Dict, Any, List
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Depends, Query, Header
-
-from imgtag.db import db, config_db
-from imgtag.api.dependencies import require_api_key, verify_api_key
-from imgtag.core.logging_config import get_logger, get_perf_logger
-from imgtag.services.task_queue import task_queue
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from imgtag.api.dependencies import require_api_key, verify_api_key
+from imgtag.core.config import settings
+from imgtag.core.logging_config import get_logger, get_perf_logger
+from imgtag.db import config_db, get_async_session
+from imgtag.db.repositories import image_repository, image_tag_repository
+from imgtag.services.task_queue import task_queue
+from imgtag.services.upload_service import upload_service
 
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
@@ -24,20 +29,28 @@ router = APIRouter()
 
 
 class ExternalImageCreate(BaseModel):
-    """外部 API 创建图片请求"""
+    """External API image create request."""
+
     image_url: str
-    tags: List[str] = []
+    tags: list[str] = []
     description: str = ""
     auto_analyze: bool = True
 
 
 def get_full_url(url: str) -> str:
-    """将相对路径转换为完整 URL"""
+    """Convert relative path to full URL.
+
+    Args:
+        url: Image URL or path.
+
+    Returns:
+        Full URL with base_url prepended if relative.
+    """
     if not url:
         return url
     if url.startswith("http"):
         return url
-    base_url = config_db.get("base_url", "")
+    base_url = config_db.get("base_url", settings.BASE_URL)
     if base_url and url.startswith("/"):
         return base_url.rstrip("/") + url
     return url
@@ -45,217 +58,220 @@ def get_full_url(url: str) -> str:
 
 @router.get("/random")
 async def random_images(
-    tags: List[str] = Query([], description="标签列表（AND 关系）"),
+    tags: list[str] = Query([], description="标签列表（AND 关系）"),
     count: int = Query(1, ge=1, le=50, description="返回数量"),
     include_full_url: bool = Query(True, description="是否返回完整 URL"),
-    api_user: Dict = Depends(verify_api_key)
+    api_user: dict = Depends(verify_api_key),
+    session: AsyncSession = Depends(get_async_session),
 ):
-    """
-    根据标签获取随机图片
-    
-    - **tags**: 标签列表，支持多个标签（AND 关系）
-    - **count**: 返回图片数量，默认 1，最大 50
-    - **include_full_url**: 是否返回完整 URL（拼接 base_url）
-    - **api_key**: 鉴权密钥（参数或 Header 方式）
-    
-    返回示例：
-    ```json
-    {
-        "images": [
-            {
-                "id": 1,
-                "url": "http://example.com/uploads/xxx.jpg",
-                "description": "图片描述",
-                "tags": ["标签1", "标签2"]
-            }
-        ],
-        "count": 1
-    }
-    ```
+    """Get random images by tags.
+
+    Single query with JOIN for performance.
+
+    Args:
+        tags: Tag filter (AND logic).
+        count: Number of images.
+        include_full_url: Whether to include full URL.
+        api_user: API user.
+        session: Database session.
+
+    Returns:
+        Random images list.
     """
     start_time = time.time()
-    username = api_user.get('username') if api_user else 'anonymous'
+    username = api_user.get("username") if api_user else "anonymous"
     logger.info(f"[外部API] 随机图片请求: tags={tags}, count={count}, user={username}")
-    
+
     try:
-        # 获取 base_url 配置
-        base_url = ""
-        if include_full_url:
-            base_url = config_db.get("base_url", "")
-        
-        # 查询随机图片
-        result = db.get_random_images_by_tags(tags, count)
-        
+        # Single query with optional tag filter
+        result = await image_repository.get_random_by_tags(session, tags, count)
+
+        # Process URLs
+        base_url = config_db.get("base_url", "") if include_full_url else ""
         images = []
         for img in result:
-            url = img.get("image_url", "")
+            url = img["image_url"]
             if include_full_url and base_url and url.startswith("/"):
                 url = base_url.rstrip("/") + url
-            
+
             images.append({
-                "id": img.get("id"),
+                "id": img["id"],
                 "url": url,
-                "description": img.get("description", ""),
-                "tags": img.get("tags", [])
+                "description": img["description"],
+                "tags": img["tags"],
             })
-        
+
         process_time = time.time() - start_time
         perf_logger.info(f"[外部API] 随机图片查询耗时: {process_time:.4f}秒")
-        
-        return {
-            "images": images,
-            "count": len(images)
-        }
+
+        return {"images": images, "count": len(images)}
     except Exception as e:
-        logger.error(f"[外部API] 随机图片查询失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+        logger.error(f"[外部API] 随机图片查询失败: {e}")
+        raise HTTPException(status_code=500, detail=f"查询失败: {e}")
 
 
 @router.post("/add-image")
 async def analyze_image_from_url(
     request: ExternalImageCreate,
-    api_user: Dict = Depends(require_api_key)
+    api_user: dict = Depends(require_api_key),
+    session: AsyncSession = Depends(get_async_session),
 ):
+    """Add and analyze image from URL.
+
+    Downloads image, saves locally, queues for analysis.
+
+    Args:
+        request: Image URL and options.
+        api_user: API user.
+        session: Database session.
+
+    Returns:
+        Created image info.
     """
-    通过 URL 添加并分析图片
-    
-    图片会被下载保存到本地，原始 URL 将被记录。
-    
-    - **image_url**: 图片 URL（必填）
-    - **tags**: 初始标签列表
-    - **description**: 图片描述
-    - **auto_analyze**: 是否自动分析（默认 true）
-    - **api_key**: 鉴权密钥（必填）
-    
-    返回示例：
-    ```json
-    {
-        "id": 123,
-        "image_url": "/uploads/xxx.jpg",
-        "original_url": "https://example.com/image.jpg",
-        "tags": [],
-        "description": "",
-        "process_time": "0.05秒"
-    }
-    ```
-    """
-    from imgtag.services.upload_service import upload_service
-    
     start_time = time.time()
-    username = api_user.get('username')
+    username = api_user.get("username")
     logger.info(f"[外部API] 添加图片: {request.image_url}, user={username}")
-    
+
     try:
-        # 下载并保存图片到本地
-        file_path, local_url, content = await upload_service.save_remote_image(request.image_url)
-        
-        # 计算文件哈希
-        import hashlib
+        # Download and save image
+        file_path, local_url, content = await upload_service.save_remote_image(
+            request.image_url
+        )
+
+        # Calculate hash
         file_hash = hashlib.md5(content).hexdigest()
-        
-        # 插入记录，image_url 为本地地址，original_url 为原始远程地址
-        new_id = db.insert_image(
+        file_size = round(len(content) / (1024 * 1024), 2)
+
+        # Create image record
+        new_image = await image_repository.create_image(
+            session,
             image_url=local_url,
-            tags=request.tags,
-            embedding=None,
+            file_path=file_path,
+            file_hash=file_hash,
+            file_size=file_size,
             description=request.description,
             original_url=request.image_url,
-            file_path=file_path,
-            file_hash=file_hash
+            embedding=None,
+            uploaded_by=api_user.get("id"),
         )
-        
-        if not new_id:
-            raise HTTPException(status_code=500, detail="数据库插入失败")
-        
-        # 如果需要自动分析，添加到任务队列
+
+        # Set tags if provided
+        if request.tags:
+            await image_tag_repository.set_image_tags(
+                session,
+                new_image.id,
+                request.tags,
+                source="user",
+                added_by=api_user.get("id"),
+            )
+
+        # Queue for analysis if requested
         if request.auto_analyze:
-            task_queue.add_tasks([new_id])
-        
+            task_queue.add_tasks([new_image.id])
+
         process_time = time.time() - start_time
-        
+
         return {
-            "id": new_id,
+            "id": new_image.id,
             "image_url": get_full_url(local_url),
             "original_url": request.image_url,
             "tags": request.tags,
             "description": request.description,
-            "process_time": f"{process_time:.4f}秒"
+            "process_time": f"{process_time:.4f}秒",
         }
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[外部API] 添加图片失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"添加失败: {str(e)}")
+        logger.error(f"[外部API] 添加图片失败: {e}")
+        raise HTTPException(status_code=500, detail=f"添加失败: {e}")
 
 
 @router.get("/image/{image_id}")
 async def get_image_info(
     image_id: int,
-    api_user: Dict = Depends(verify_api_key)
+    api_user: dict = Depends(verify_api_key),
+    session: AsyncSession = Depends(get_async_session),
 ):
+    """Get image details.
+
+    Args:
+        image_id: Image ID.
+        api_user: API user.
+        session: Database session.
+
+    Returns:
+        Image details.
     """
-    获取图片详情
-    
-    - **image_id**: 图片 ID
-    - **api_key**: 鉴权密钥（可选）
-    """
-    username = api_user.get('username') if api_user else 'anonymous'
+    username = api_user.get("username") if api_user else "anonymous"
     logger.info(f"[外部API] 获取图片: id={image_id}, user={username}")
-    
-    image = db.get_image(image_id)
+
+    image = await image_repository.get_with_tags(session, image_id)
     if not image:
         raise HTTPException(status_code=404, detail="图片不存在")
-    
+
     return {
-        "id": image.get("id"),
-        "url": get_full_url(image.get("image_url")),
-        "description": image.get("description", ""),
-        "tags": image.get("tags", []),
-        "created_at": image.get("created_at")
+        "id": image.id,
+        "url": get_full_url(image.image_url),
+        "description": image.description or "",
+        "tags": [t.name for t in image.tags if t.level == 2],
+        "created_at": image.created_at,
     }
 
 
 @router.get("/search")
 async def search_images(
     keyword: str = Query(None, description="关键词搜索"),
-    tags: List[str] = Query([], description="标签筛选"),
+    tags: list[str] = Query([], description="标签筛选"),
     limit: int = Query(20, ge=1, le=100, description="返回数量"),
     offset: int = Query(0, ge=0, description="偏移量"),
-    api_user: Dict = Depends(verify_api_key)
+    api_user: dict = Depends(verify_api_key),
+    session: AsyncSession = Depends(get_async_session),
 ):
+    """Search images.
+
+    Uses existing search_images Repository method.
+
+    Args:
+        keyword: Keyword search.
+        tags: Tag filter.
+        limit: Max results.
+        offset: Pagination offset.
+        api_user: API user.
+        session: Database session.
+
+    Returns:
+        Search results.
     """
-    搜索图片
-    
-    - **keyword**: 关键词（搜索描述）
-    - **tags**: 标签列表
-    - **limit**: 返回数量，最大 100
-    - **offset**: 分页偏移
-    - **api_key**: 鉴权密钥（可选）
-    """
-    username = api_user.get('username') if api_user else 'anonymous'
+    username = api_user.get("username") if api_user else "anonymous"
     logger.info(f"[外部API] 搜索图片: keyword={keyword}, tags={tags}, user={username}")
-    
+
     try:
-        result = db.search_images(
+        result = await image_repository.search_images(
+            session,
             tags=tags if tags else None,
             keyword=keyword,
             limit=limit,
-            offset=offset
+            offset=offset,
         )
-        
-        # 处理图片 URL
-        images_with_full_url = []
-        for img in result.get("images", []):
-            img_copy = dict(img)
-            img_copy["image_url"] = get_full_url(img.get("image_url", ""))
-            images_with_full_url.append(img_copy)
-        
+
+        # Process URLs
+        images = [
+            {
+                "id": img.id,
+                "image_url": get_full_url(img.image_url),
+                "description": img.description or "",
+                "tags": [t.name for t in img.tags] if hasattr(img, "tags") else [],
+                "created_at": img.created_at,
+            }
+            for img in result["images"]
+        ]
+
         return {
-            "images": images_with_full_url,
-            "total": result.get("total", 0),
+            "images": images,
+            "total": result["total"],
             "limit": limit,
-            "offset": offset
+            "offset": offset,
         }
     except Exception as e:
-        logger.error(f"[外部API] 搜索失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+        logger.error(f"[外部API] 搜索失败: {e}")
+        raise HTTPException(status_code=500, detail=f"搜索失败: {e}")

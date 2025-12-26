@@ -16,6 +16,7 @@ import httpx
 
 from imgtag.core.config import settings
 from imgtag.core.logging_config import get_logger, get_perf_logger
+from imgtag.db import config_db
 
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
@@ -129,7 +130,6 @@ class UploadService:
         
         try:
             # 从配置数据库获取最大上传大小 (MB 转换为字节)
-            from imgtag.db import config_db
             max_size_mb = config_db.get_int("max_upload_size", 10)
             max_size_bytes = max_size_mb * 1024 * 1024
             
