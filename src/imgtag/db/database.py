@@ -67,13 +67,27 @@ def get_async_database_url(url: str) -> str:
 
 # Create async engine with connection pooling
 _async_url = get_async_database_url(settings.PG_CONNECTION_STRING)
+
+# 连接池优化配置
 engine = create_async_engine(
     _async_url,
-    pool_size=5,
-    max_overflow=10,
-    pool_timeout=30,
-    pool_recycle=300,  # Recycle connections after 5 minutes
+    # 连接池大小（根据并发量调整）
+    pool_size=10,  # 常驻连接数
+    max_overflow=20,  # 超出 pool_size 时可额外创建的连接数
+    # 超时设置
+    pool_timeout=10,  # 获取连接的超时时间（秒）
+    pool_recycle=600,  # 连接回收时间（秒），防止连接被数据库服务端关闭
+    # 连接健康检查（略微增加延迟但防止使用失效连接）
+    pool_pre_ping=True,
+    # 调试模式
     echo=False,  # Set to True for SQL debugging
+    # 连接参数 - 减少连接建立时间
+    connect_args={
+        "command_timeout": 30,  # 查询超时
+        "server_settings": {
+            "application_name": "imgtag",
+        },
+    },
 )
 
 # Session factory for creating new sessions

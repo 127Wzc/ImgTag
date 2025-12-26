@@ -27,13 +27,13 @@ async def get_tasks(
     status: str = Query(None, description="任务状态筛选")
 ):
     """获取任务列表"""
-    return task_service.get_tasks(limit, offset, status)
+    return await task_service.get_tasks(limit, offset, status)
 
 
 @router.get("/{task_id}", response_model=Task)
 async def get_task(task_id: str):
     """获取任务详情"""
-    task = task_service.get_task(task_id)
+    task = await task_service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     return task
@@ -42,7 +42,7 @@ async def get_task(task_id: str):
 @router.post("/cleanup", response_model=Dict[str, Any])
 async def cleanup_tasks(days: int = Query(7, ge=1, description="保留天数"), user: Dict = Depends(get_current_user)):
     """清理旧任务（需登录）"""
-    count = task_service.cleanup_old_tasks(days)
+    count = await task_service.cleanup_old_tasks(days)
     return {"message": f"已清理 {count} 个旧任务"}
 
 
@@ -53,7 +53,7 @@ async def create_vectorize_task(
     user: Dict = Depends(get_current_user)
 ):
     """创建批量向量化任务（需登录）"""
-    task_id = task_service.create_task(
+    task_id = await task_service.create_task(
         "vectorize_batch",
         {"image_ids": image_ids, "force": force}
     )

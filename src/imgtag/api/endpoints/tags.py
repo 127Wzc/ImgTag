@@ -26,6 +26,7 @@ router = APIRouter()
 async def get_tags(
     limit: int = Query(100, ge=1, le=1000),
     sort_by: str = Query("usage_count", pattern="^(usage_count|name)$"),
+    level: int = Query(2, ge=0, le=2, description="标签级别: 0=分类, 1=分辨率, 2=普通标签"),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Get tag list for autocomplete.
@@ -33,12 +34,13 @@ async def get_tags(
     Args:
         limit: Maximum tags to return.
         sort_by: Sort field (usage_count or name).
+        level: Tag level filter (default: 2 for normal tags).
         session: Database session.
 
     Returns:
         List of tags.
     """
-    return await tag_repository.get_all_sorted(session, limit=limit, sort_by=sort_by)
+    return await tag_repository.get_all_sorted(session, limit=limit, sort_by=sort_by, level=level)
 
 
 @router.post("/sync", response_model=dict[str, Any])

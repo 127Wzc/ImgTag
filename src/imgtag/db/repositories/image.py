@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import and_, asc, desc, func, or_, select, text
+from sqlalchemy import and_, asc, desc, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -165,6 +165,51 @@ class ImageRepository(BaseRepository[Image]):
             }
             for row in result
         ]
+
+    async def get_batch_image_tags_with_source(
+        self,
+        session: AsyncSession,
+        image_ids: list[int],
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Get tags with source for multiple images in one query.
+
+        Args:
+            session: Database session.
+            image_ids: List of image IDs.
+
+        Returns:
+            Dict mapping image_id to list of tag dicts with source, level, sort_order.
+        """
+        if not image_ids:
+            return {}
+
+        stmt = (
+            select(
+                ImageTag.image_id,
+                Tag.id,
+                Tag.name,
+                Tag.level,
+                ImageTag.source,
+                ImageTag.sort_order,
+            )
+            .join(Tag, Tag.id == ImageTag.tag_id)
+            .where(ImageTag.image_id.in_(image_ids))
+            .order_by(ImageTag.image_id, Tag.level, ImageTag.sort_order)
+        )
+        result = await session.execute(stmt)
+
+        # Group by image_id
+        tags_map: dict[int, list[dict[str, Any]]] = {img_id: [] for img_id in image_ids}
+        for row in result:
+            tags_map[row.image_id].append({
+                "id": row.id,
+                "name": row.name,
+                "level": row.level,
+                "source": row.source,
+                "sort_order": row.sort_order,
+            })
+
+        return tags_map
 
     async def update_image(
         self,
@@ -532,19 +577,31 @@ class ImageRepository(BaseRepository[Image]):
         # Get image IDs for tag lookup
         image_ids = [row[0] for row in rows]
 
-        # Batch fetch tags
-        tags_map = {}
+        # Batch fetch tags with full info (level, source) - SQLAlchemy 2.0 ORM style
+        tags_map: dict[int, list[dict[str, Any]]] = {img_id: [] for img_id in image_ids}
         if image_ids:
-            tag_query = text("""
-                SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.sort_order ASC, it.added_at)
-                FROM image_tags it
-                JOIN tags t ON it.tag_id = t.id
-                WHERE it.image_id = ANY(:image_ids) AND t.level = 2
-                GROUP BY it.image_id
-            """)
-            tag_result = await session.execute(tag_query, {"image_ids": image_ids})
-            for row in tag_result:
-                tags_map[row[0]] = row[1]
+            tag_stmt = (
+                select(
+                    ImageTag.image_id,
+                    Tag.id,
+                    Tag.name,
+                    Tag.level,
+                    ImageTag.source,
+                    ImageTag.sort_order,
+                )
+                .join(Tag, Tag.id == ImageTag.tag_id)
+                .where(ImageTag.image_id.in_(image_ids))
+                .order_by(ImageTag.image_id, Tag.level, ImageTag.sort_order)
+            )
+            tag_result = await session.execute(tag_stmt)
+            for tag_row in tag_result:
+                tags_map[tag_row.image_id].append({
+                    "id": tag_row.id,
+                    "name": tag_row.name,
+                    "level": tag_row.level,
+                    "source": tag_row.source,
+                    "sort_order": tag_row.sort_order,
+                })
 
         # Build response
         images = []
@@ -894,10 +951,8 @@ class ImageRepository(BaseRepository[Image]):
             image_id: Image ID.
             file_hash: MD5 hash.
         """
-        await session.execute(
-            text("UPDATE images SET file_hash = :hash WHERE id = :id"),
-            {"hash": file_hash, "id": image_id},
-        )
+        stmt = update(Image).where(Image.id == image_id).values(file_hash=file_hash)
+        await session.execute(stmt)
 
     async def count_without_resolution(
         self,
@@ -951,10 +1006,8 @@ class ImageRepository(BaseRepository[Image]):
             width: Image width.
             height: Image height.
         """
-        await session.execute(
-            text("UPDATE images SET width = :w, height = :h WHERE id = :id"),
-            {"w": width, "h": height, "id": image_id},
-        )
+        stmt = update(Image).where(Image.id == image_id).values(width=width, height=height)
+        await session.execute(stmt)
 
     async def batch_update_hashes(
         self,
@@ -973,11 +1026,9 @@ class ImageRepository(BaseRepository[Image]):
         if not updates:
             return 0
 
-        for update in updates:
-            await session.execute(
-                text("UPDATE images SET file_hash = :hash WHERE id = :id"),
-                {"hash": update["hash"], "id": update["id"]},
-            )
+        for upd in updates:
+            stmt = update(Image).where(Image.id == upd["id"]).values(file_hash=upd["hash"])
+            await session.execute(stmt)
         await session.flush()
         return len(updates)
 
@@ -998,11 +1049,11 @@ class ImageRepository(BaseRepository[Image]):
         if not updates:
             return 0
 
-        for update in updates:
-            await session.execute(
-                text("UPDATE images SET width = :w, height = :h WHERE id = :id"),
-                {"w": update["width"], "h": update["height"], "id": update["id"]},
+        for upd in updates:
+            stmt = update(Image).where(Image.id == upd["id"]).values(
+                width=upd["width"], height=upd["height"]
             )
+            await session.execute(stmt)
         await session.flush()
         return len(updates)
 

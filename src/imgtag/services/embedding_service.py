@@ -12,8 +12,8 @@ from pathlib import Path
 
 import numpy as np
 
+from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
-from imgtag.db import config_db
 
 logger = get_logger(__name__)
 
@@ -83,10 +83,11 @@ def _download_file(url: str, dest_path: Path, timeout: int = 300, stream: bool =
 
 
 class ONNXEmbeddingModel:
-    """ONNX 嵌入模型封装"""
+    """СONNX 嵌入模型封装"""
     
-    def __init__(self, model_name: str):
+    def __init__(self, model_name: str, hf_endpoint: str = "https://hf-mirror.com"):
         self.model_name = model_name
+        self.hf_endpoint = hf_endpoint
         self.session = None
         self.tokenizer = None
         self.dimensions = 512
@@ -170,8 +171,7 @@ class ONNXEmbeddingModel:
         
         if not tokenizer_loaded:
             # 使用 requests 下载 tokenizer 文件到本地目录
-            hf_endpoint = config_db.get("hf_endpoint", "https://hf-mirror.com")
-            logger.info(f"使用镜像站下载 tokenizer: {hf_endpoint}/{self.onnx_repo}")
+            logger.info(f"使用镜像站下载 tokenizer: {self.hf_endpoint}/{self.onnx_repo}")
             
             local_model_dir.mkdir(parents=True, exist_ok=True)
             
@@ -182,7 +182,7 @@ class ONNXEmbeddingModel:
                     logger.info(f"  ✓ 已存在: {filename}")
                     continue
                 
-                url = f"{hf_endpoint}/{self.onnx_repo}/resolve/main/{filename}"
+                url = f"{self.hf_endpoint}/{self.onnx_repo}/resolve/main/{filename}"
                 logger.info(f"  下载: {filename}")
                 
                 if _download_file(url, dest_path, timeout=60):
@@ -215,15 +215,14 @@ class ONNXEmbeddingModel:
             logger.info(f"从本地加载 ONNX 模型: {onnx_path}")
         else:
             # 从网络下载 ONNX 模型
-            hf_endpoint = config_db.get("hf_endpoint", "https://hf-mirror.com")
-            logger.info(f"使用镜像站下载 ONNX 模型: {hf_endpoint}")
+            logger.info(f"使用镜像站下载 ONNX 模型: {self.hf_endpoint}")
             
             target_onnx_path = local_model_dir / "onnx" / "model.onnx"
             
             # 尝试多个可能的路径
             onnx_urls = [
-                f"{hf_endpoint}/{self.onnx_repo}/resolve/main/onnx/model.onnx",
-                f"{hf_endpoint}/{self.onnx_repo}/resolve/main/model.onnx",
+                f"{self.hf_endpoint}/{self.onnx_repo}/resolve/main/onnx/model.onnx",
+                f"{self.hf_endpoint}/{self.onnx_repo}/resolve/main/model.onnx",
             ]
             
             download_success = False
@@ -321,14 +320,15 @@ class EmbeddingService:
         """初始化嵌入模型服务"""
         logger.info("初始化嵌入模型服务")
     
-    def _get_mode(self) -> str:
+    async def _get_mode(self) -> str:
         """获取嵌入模式 (api 或 local)"""
-        return config_db.get("embedding_mode", "local")
+        return await config_cache.get("embedding_mode", "local") or "local"
     
-    def _get_local_model(self) -> ONNXEmbeddingModel:
+    async def _get_local_model(self) -> ONNXEmbeddingModel:
         """获取本地 ONNX 模型实例"""
         if EmbeddingService._local_model is None:
-            model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
+            model_name = await config_cache.get("embedding_local_model", "BAAI/bge-small-zh-v1.5") or "BAAI/bge-small-zh-v1.5"
+            hf_endpoint = await config_cache.get("hf_endpoint", "https://hf-mirror.com") or "https://hf-mirror.com"
             
             # 获取 ONNX 模型仓库名
             if model_name in ONNX_MODEL_MAP:
@@ -338,7 +338,7 @@ class EmbeddingService:
             
             logger.info(f"加载本地嵌入模型: {model_name} -> {onnx_repo}")
             try:
-                EmbeddingService._local_model = ONNXEmbeddingModel(model_name)
+                EmbeddingService._local_model = ONNXEmbeddingModel(model_name, hf_endpoint)
                 logger.info(f"模型加载成功，维度: {EmbeddingService._local_model.get_sentence_embedding_dimension()}")
             except Exception as e:
                 logger.error(f"加载本地模型失败: {str(e)}")
@@ -346,13 +346,13 @@ class EmbeddingService:
         
         return EmbeddingService._local_model
     
-    def get_dimensions(self) -> int:
+    async def get_dimensions(self) -> int:
         """获取向量维度"""
-        mode = self._get_mode()
+        mode = await self._get_mode()
         
         if mode == "local":
             # 本地模型的维度由模型决定
-            model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
+            model_name = await config_cache.get("embedding_local_model", "BAAI/bge-small-zh-v1.5") or "BAAI/bge-small-zh-v1.5"
             if model_name in ONNX_MODEL_MAP:
                 return ONNX_MODEL_MAP[model_name][1]
             if "small" in model_name:
@@ -363,14 +363,15 @@ class EmbeddingService:
                 return 1024
             return 512  # 默认
         else:
-            return config_db.get_int("embedding_dimensions", 1536)
+            dim_str = await config_cache.get("embedding_dimensions", "1536")
+            return int(dim_str) if dim_str else 1536
     
     async def get_embedding(self, text: str) -> List[float]:
         """获取文本的向量嵌入"""
         if not text or not text.strip():
-            return [0.0] * self.get_dimensions()
+            return [0.0] * await self.get_dimensions()
         
-        mode = self._get_mode()
+        mode = await self._get_mode()
         
         if mode == "local":
             return await self._get_embedding_local(text)
@@ -382,7 +383,7 @@ class EmbeddingService:
         logger.info(f"使用本地 ONNX 模型生成向量: {text[:50]}...")
         
         try:
-            model = self._get_local_model()
+            model = await self._get_local_model()
             embedding = model.encode(text.strip(), normalize_embeddings=True)
             
             logger.info(f"本地向量生成成功，维度: {len(embedding)}")
@@ -406,10 +407,11 @@ class EmbeddingService:
         """
         import httpx
 
-        api_base = config_db.get("embedding_api_base_url", "https://api.openai.com/v1")
-        api_key = config_db.get("embedding_api_key", "")
-        model = config_db.get("embedding_model", "text-embedding-3-small")
-        dimensions = config_db.get_int("embedding_dimensions", 1536)
+        api_base = await config_cache.get("embedding_api_base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"
+        api_key = await config_cache.get("embedding_api_key", "") or ""
+        model = await config_cache.get("embedding_model", "text-embedding-3-small") or "text-embedding-3-small"
+        dim_str = await config_cache.get("embedding_dimensions", "1536")
+        dimensions = int(dim_str) if dim_str else 1536
 
         if not api_key:
             raise ValueError("嵌入模型 API 密钥未配置，请在系统设置中配置")

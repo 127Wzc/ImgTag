@@ -6,18 +6,22 @@ API 公共依赖
 统一的认证和验证逻辑
 """
 
-from typing import Optional, Dict, Any, Tuple
-from fastapi import Header, Query, HTTPException
+from typing import Optional, Dict, Any
 
-from imgtag.db import db
+from fastapi import Header, Query, HTTPException, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from imgtag.core.logging_config import get_logger
+from imgtag.db.database import get_async_session
+from imgtag.db.repositories import user_repository
 
 logger = get_logger(__name__)
 
 
 async def verify_api_key(
     api_key: str = Query(None, description="API 密钥"),
-    header_api_key: str = Header(None, alias="api_key", description="API 密钥（Header 方式）")
+    header_api_key: str = Header(None, alias="api_key", description="API 密钥（Header 方式）"),
+    session: AsyncSession = Depends(get_async_session),
 ) -> Optional[Dict[str, Any]]:
     """
     统一的 API 密钥验证逻辑
@@ -43,9 +47,14 @@ async def verify_api_key(
         return None
     
     # 尝试匹配用户密钥
-    user = db.get_user_by_api_key(provided_key)
+    user = await user_repository.get_by_api_key(session, provided_key)
     if user:
-        return user
+        return {
+            "id": user.id,
+            "username": user.username,
+            "role": user.role,
+            "is_active": user.is_active,
+        }
     
     # 密钥无效
     raise HTTPException(status_code=401, detail="无效的 API 密钥")
@@ -53,7 +62,8 @@ async def verify_api_key(
 
 async def require_api_key(
     api_key: str = Query(None, description="API 密钥"),
-    header_api_key: str = Header(None, alias="api_key", description="API 密钥（Header 方式）")
+    header_api_key: str = Header(None, alias="api_key", description="API 密钥（Header 方式）"),
+    session: AsyncSession = Depends(get_async_session),
 ) -> Dict[str, Any]:
     """
     强制要求 API 密钥的验证逻辑
@@ -71,9 +81,13 @@ async def require_api_key(
     if not provided_key:
         raise HTTPException(status_code=401, detail="需要 API 密钥")
     
-    user = db.get_user_by_api_key(provided_key)
+    user = await user_repository.get_by_api_key(session, provided_key)
     if user:
-        return user
+        return {
+            "id": user.id,
+            "username": user.username,
+            "role": user.role,
+            "is_active": user.is_active,
+        }
     
     raise HTTPException(status_code=401, detail="无效的 API 密钥")
-

@@ -157,13 +157,34 @@
           <div class="result-content">
             <p class="description">{{ item.description || '暂无描述' }}</p>
             <div class="result-tags">
+              <!-- 分类标签 (level=0) -->
               <el-tag 
-                v-for="tag in item.tags?.slice(0, 4)" 
-                :key="tag" 
+                v-for="tag in item.tags?.filter(t => t.level === 0)" 
+                :key="tag.name" 
+                size="small"
+                type="primary"
+                effect="dark"
+              >
+                {{ tag.name }}
+              </el-tag>
+              <!-- 分辨率标签 (level=1) -->
+              <el-tag 
+                v-for="tag in item.tags?.filter(t => t.level === 1)" 
+                :key="tag.name" 
+                size="small"
+                type="success"
+                effect="plain"
+              >
+                {{ tag.name }}
+              </el-tag>
+              <!-- 普通标签 (level=2) -->
+              <el-tag 
+                v-for="tag in item.tags?.filter(t => t.level === 2)?.slice(0, 3)" 
+                :key="tag.name" 
                 size="small"
                 type="info"
               >
-                {{ tag }}
+                {{ tag.name }}
               </el-tag>
             </div>
           </div>

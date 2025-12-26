@@ -16,8 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.dependencies import require_api_key, verify_api_key
 from imgtag.core.config import settings
+from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger, get_perf_logger
-from imgtag.db import config_db, get_async_session
+from imgtag.db import get_async_session
 from imgtag.db.repositories import image_repository, image_tag_repository
 from imgtag.services.task_queue import task_queue
 from imgtag.services.upload_service import upload_service
@@ -37,7 +38,7 @@ class ExternalImageCreate(BaseModel):
     auto_analyze: bool = True
 
 
-def get_full_url(url: str) -> str:
+async def get_full_url(url: str) -> str:
     """Convert relative path to full URL.
 
     Args:
@@ -50,7 +51,7 @@ def get_full_url(url: str) -> str:
         return url
     if url.startswith("http"):
         return url
-    base_url = config_db.get("base_url", settings.BASE_URL)
+    base_url = await config_cache.get("base_url", settings.BASE_URL)
     if base_url and url.startswith("/"):
         return base_url.rstrip("/") + url
     return url
@@ -87,7 +88,7 @@ async def random_images(
         result = await image_repository.get_random_by_tags(session, tags, count)
 
         # Process URLs
-        base_url = config_db.get("base_url", "") if include_full_url else ""
+        base_url = await config_cache.get("base_url", "") if include_full_url else ""
         images = []
         for img in result:
             url = img["image_url"]
@@ -167,13 +168,13 @@ async def analyze_image_from_url(
 
         # Queue for analysis if requested
         if request.auto_analyze:
-            task_queue.add_tasks([new_image.id])
+            await task_queue.add_tasks([new_image.id])
 
         process_time = time.time() - start_time
 
         return {
             "id": new_image.id,
-            "image_url": get_full_url(local_url),
+            "image_url": await get_full_url(local_url),
             "original_url": request.image_url,
             "tags": request.tags,
             "description": request.description,
@@ -211,7 +212,7 @@ async def get_image_info(
 
     return {
         "id": image.id,
-        "url": get_full_url(image.image_url),
+        "url": await get_full_url(image.image_url),
         "description": image.description or "",
         "tags": [t.name for t in image.tags if t.level == 2],
         "created_at": image.created_at,
@@ -255,16 +256,15 @@ async def search_images(
         )
 
         # Process URLs
-        images = [
-            {
+        images = []
+        for img in result["images"]:
+            images.append({
                 "id": img.id,
-                "image_url": get_full_url(img.image_url),
+                "image_url": await get_full_url(img.image_url),
                 "description": img.description or "",
                 "tags": [t.name for t in img.tags] if hasattr(img, "tags") else [],
                 "created_at": img.created_at,
-            }
-            for img in result["images"]
-        ]
+            })
 
         return {
             "images": images,

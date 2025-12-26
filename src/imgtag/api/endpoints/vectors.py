@@ -15,10 +15,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
+from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger, get_perf_logger
-from imgtag.db import config_db, get_async_session
+from imgtag.db import get_async_session
 from imgtag.db.database import async_session_maker
-from imgtag.db.repositories import image_repository
+from imgtag.db.repositories import image_repository, config_repository
 from imgtag.services import embedding_service
 
 logger = get_logger(__name__)
@@ -81,10 +82,10 @@ async def get_vector_status(
     """
     try:
         image_count = await image_repository.count_images(session)
-        mode = config_db.get("embedding_mode", "local")
+        mode = await config_cache.get("embedding_mode", "local") or "local"
 
         if mode == "local":
-            model = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
+            model = await config_cache.get("embedding_local_model", "BAAI/bge-small-zh-v1.5") or "BAAI/bge-small-zh-v1.5"
             if "small" in model:
                 dimensions = 512
             elif "base" in model:
@@ -92,8 +93,9 @@ async def get_vector_status(
             else:
                 dimensions = 512
         else:
-            model = config_db.get("embedding_model", "text-embedding-3-small")
-            dimensions = config_db.get_int("embedding_dimensions", 1536)
+            model = await config_cache.get("embedding_model", "text-embedding-3-small") or "text-embedding-3-small"
+            dim_str = await config_cache.get("embedding_dimensions", "1536")
+            dimensions = int(dim_str) if dim_str else 1536
 
         db_dimensions = await get_db_vector_dimensions(session)
 
@@ -137,11 +139,11 @@ async def check_local_dependencies(
 
         result["installed"] = True
 
-        model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
+        model_name = await config_cache.get("embedding_local_model", "BAAI/bge-small-zh-v1.5") or "BAAI/bge-small-zh-v1.5"
         result["model_name"] = model_name
 
         try:
-            model = embedding_service._get_local_model()
+            model = await embedding_service._get_local_model()
             result["model_loaded"] = True
             result["dimensions"] = model.get_sentence_embedding_dimension()
         except Exception as e:
@@ -283,10 +285,10 @@ async def resize_vector_table(
         Resize result.
     """
     try:
-        mode = config_db.get("embedding_mode", "local")
+        mode = await config_cache.get("embedding_mode", "local") or "local"
 
         if mode == "local":
-            model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
+            model_name = await config_cache.get("embedding_local_model", "BAAI/bge-small-zh-v1.5") or "BAAI/bge-small-zh-v1.5"
             if "small" in model_name:
                 new_dim = 512
             elif "base" in model_name:
@@ -294,7 +296,8 @@ async def resize_vector_table(
             else:
                 new_dim = 512
         else:
-            new_dim = config_db.get_int("embedding_dimensions", 1536)
+            dim_str = await config_cache.get("embedding_dimensions", "1536")
+            new_dim = int(dim_str) if dim_str else 1536
 
         current_dim = await get_db_vector_dimensions(session)
 
@@ -316,7 +319,7 @@ async def resize_vector_table(
             USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)
         """))
 
-        config_db.set("embedding_dimensions", str(new_dim))
+        await config_repository.set_value(session, "embedding_dimensions", str(new_dim))
 
         logger.info(f"向量维度修改成功: {new_dim}")
         return {"message": f"数据库向量维度已修改为 {new_dim}，请重建向量数据"}
@@ -348,9 +351,9 @@ async def start_rebuild(
         raise HTTPException(status_code=400, detail="重建任务正在进行中")
 
     # Get expected dimensions
-    mode = config_db.get("embedding_mode", "local")
+    mode = await config_cache.get("embedding_mode", "local") or "local"
     if mode == "local":
-        model_name = config_db.get("embedding_local_model", "BAAI/bge-small-zh-v1.5")
+        model_name = await config_cache.get("embedding_local_model", "BAAI/bge-small-zh-v1.5") or "BAAI/bge-small-zh-v1.5"
         if "small" in model_name:
             expected_dim = 512
         elif "base" in model_name:
@@ -358,7 +361,8 @@ async def start_rebuild(
         else:
             expected_dim = 512
     else:
-        expected_dim = config_db.get_int("embedding_dimensions", 1536)
+        dim_str = await config_cache.get("embedding_dimensions", "1536")
+        expected_dim = int(dim_str) if dim_str else 1536
 
     db_dim = await get_db_vector_dimensions(session)
 
@@ -377,7 +381,7 @@ async def start_rebuild(
                 CREATE INDEX idx_images_embedding ON public.images 
                 USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)
             """))
-            config_db.set("embedding_dimensions", str(expected_dim))
+            await config_repository.set_value(session, "embedding_dimensions", str(expected_dim))
             logger.info(f"向量维度调整完成: {expected_dim}")
         except Exception as e:
             logger.error(f"调整维度失败: {e}")

@@ -15,7 +15,7 @@
               <el-option
                 v-for="cat in categoryOptions"
                 :key="cat.id"
-                :label="`${cat.name} (${cat.usage_count || 0})`"
+                :label="`${cat.name} (${cat.image_count || 0})`"
                 :value="cat.id"
               />
             </el-select>
@@ -32,7 +32,7 @@
               <el-option
                 v-for="res in resolutionOptions"
                 :key="res.id"
-                :label="`${res.name} (${res.usage_count || 0})`"
+                :label="`${res.name} (${res.image_count || 0})`"
                 :value="res.id"
               />
             </el-select>
@@ -234,16 +234,37 @@
             <div class="image-card-content">
               <p class="description">{{ image.description || '暂无描述' }}</p>
               <div class="image-card-tags">
+                <!-- 分类标签 (level=0) -->
                 <el-tag 
-                  v-for="tag in image.tags?.slice(0, 4)" 
-                  :key="tag" 
+                  v-for="tag in getCategoryTags(image.tags)" 
+                  :key="tag.name" 
+                  size="small"
+                  type="primary"
+                  effect="dark"
+                >
+                  {{ tag.name }}
+                </el-tag>
+                <!-- 分辨率标签 (level=1) -->
+                <el-tag 
+                  v-for="tag in getResolutionTags(image.tags)" 
+                  :key="tag.name" 
+                  size="small"
+                  type="success"
+                  effect="plain"
+                >
+                  {{ tag.name }}
+                </el-tag>
+                <!-- 普通标签 (level=2) -->
+                <el-tag 
+                  v-for="tag in getNormalTags(image.tags)?.slice(0, 3)" 
+                  :key="tag.name" 
                   size="small"
                   type="info"
                 >
-                  {{ tag }}
+                  {{ tag.name }}
                 </el-tag>
-                <el-tag v-if="image.tags?.length > 4" size="small">
-                  +{{ image.tags.length - 4 }}
+                <el-tag v-if="getNormalTags(image.tags)?.length > 3" size="small">
+                  +{{ getNormalTags(image.tags).length - 3 }}
                 </el-tag>
               </div>
             </div>
@@ -717,30 +738,30 @@ const displayFullUrl = ref('') // 显示用的完整 URL
 
 // 用户标签和 AI 标签计算属性
 const userTags = computed(() => {
-  const tagsWithSource = selectedImage.value?.tags_with_source || []
-  return tagsWithSource.filter(t => t.source === 'user' && t.level === 2)
+  const tags = selectedImage.value?.tags || []
+  return tags.filter(t => t.source === 'user' && t.level === 2)
 })
 
 const aiTags = computed(() => {
   // 在加载详情时不显示标签，避免跳动
   if (detailLoading.value) return []
   
-  const tagsWithSource = selectedImage.value?.tags_with_source || []
+  const tags = selectedImage.value?.tags || []
   
   // 只使用 level=2 的 AI 标签
-  return tagsWithSource.filter(t => t.source !== 'user' && t.level === 2)
+  return tags.filter(t => t.source !== 'user' && t.level === 2)
 })
 
 // 主分类标签 (level=0)
 const categoryTag = computed(() => {
-  const tagsWithSource = selectedImage.value?.tags_with_source || []
-  return tagsWithSource.find(t => t.level === 0)
+  const tags = selectedImage.value?.tags || []
+  return tags.find(t => t.level === 0)
 })
 
 // 分辨率标签 (level=1)
 const resolutionTag = computed(() => {
-  const tagsWithSource = selectedImage.value?.tags_with_source || []
-  return tagsWithSource.find(t => t.level === 1)
+  const tags = selectedImage.value?.tags || []
+  return tags.find(t => t.level === 1)
 })
 
 // 批量选择
@@ -949,6 +970,19 @@ const fetchImages = async () => {
   } finally {
     loading.value = false
   }
+}
+
+// 标签过滤辅助函数
+const getCategoryTags = (tags) => {
+  return tags?.filter(t => t.level === 0) || []
+}
+
+const getResolutionTags = (tags) => {
+  return tags?.filter(t => t.level === 1) || []
+}
+
+const getNormalTags = (tags) => {
+  return tags?.filter(t => t.level === 2) || []
 }
 
 const handleSearch = () => {

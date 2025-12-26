@@ -14,8 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import get_current_user
 from imgtag.core.logging_config import get_logger
-from imgtag.db import config_db, get_async_session
-from imgtag.db.repositories import image_repository
+from imgtag.core.config_cache import config_cache
+from imgtag.db import get_async_session
+from imgtag.db.database import async_session_maker
+from imgtag.db.repositories import config_repository, image_repository
 from imgtag.services.task_queue import task_queue
 
 logger = get_logger(__name__)
@@ -42,7 +44,7 @@ async def get_queue_status():
     Returns:
         Queue status dict.
     """
-    return task_queue.get_status()
+    return await task_queue.get_status()
 
 
 @router.post("/add", response_model=dict[str, Any])
@@ -64,7 +66,7 @@ async def add_tasks(
     if not request.image_ids:
         raise HTTPException(status_code=400, detail="图片 ID 列表不能为空")
 
-    added = task_queue.add_tasks(request.image_ids)
+    added = await task_queue.add_tasks(request.image_ids)
 
     # Auto-start queue
     if not task_queue._running:
@@ -73,7 +75,7 @@ async def add_tasks(
     return {
         "message": f"已添加 {added} 个任务到队列",
         "added": added,
-        "total_pending": task_queue.get_status()["pending_count"],
+        "total_pending": (await task_queue.get_status())["pending_count"],
     }
 
 
@@ -159,7 +161,9 @@ async def config_workers(
     if request.max_workers > 10:
         raise HTTPException(status_code=400, detail="最大线程数不能超过 10")
 
-    config_db.set("queue_max_workers", str(request.max_workers))
+    async with async_session_maker() as session:
+        await config_repository.set_value(session, "queue_max_workers", str(request.max_workers))
+        await session.commit()
 
     return {
         "message": f"最大工作线程数已设置为 {request.max_workers}",
@@ -192,7 +196,7 @@ async def add_untagged_images(
         if not image_ids:
             return {"message": "没有待分析的图片", "added": 0}
 
-        added = task_queue.add_tasks(image_ids)
+        added = await task_queue.add_tasks(image_ids)
 
         # Auto-start queue
         if not task_queue._running:
@@ -201,7 +205,7 @@ async def add_untagged_images(
         return {
             "message": f"已添加 {added} 个待分析图片到队列",
             "added": added,
-            "total_pending": task_queue.get_status()["pending_count"],
+            "total_pending": (await task_queue.get_status())["pending_count"],
         }
     except Exception as e:
         logger.error(f"添加待分析图片失败: {e}")

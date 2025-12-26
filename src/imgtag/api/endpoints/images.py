@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import get_current_user, require_admin
 from imgtag.core.logging_config import get_logger, get_perf_logger
-from imgtag.db import config_db, get_async_session
+from imgtag.db import get_async_session
 from imgtag.db.repositories import image_repository, image_tag_repository, tag_repository
 from imgtag.models.image import Image
 from imgtag.schemas import (
@@ -78,10 +78,9 @@ def _image_to_response(
         local_exists=image.local_exists,
         original_url=image.original_url,
         description=image.description,
-        tags=[t.name for t in (image.tags or [])],
+        tags=tags_with_source or [],
         created_at=image.created_at,
         updated_at=image.updated_at,
-        tags_with_source=tags_with_source or [],
     )
 
 
@@ -260,6 +259,7 @@ async def upload_and_analyze(
         file_size = round(len(file_content) / (1024 * 1024), 2)
 
         # Create image record
+        t1 = time.time()
         new_image = await image_repository.create_image(
             session,
             image_url=access_url,
@@ -273,9 +273,11 @@ async def upload_and_analyze(
             embedding=None,  # Pending analysis
             uploaded_by=user.get("id"),
         )
+        perf_logger.debug(f"创建图片记录耗时: {time.time() - t1:.4f}秒")
 
         # Set initial tags
         if final_tags:
+            t2 = time.time()
             await image_tag_repository.set_image_tags(
                 session,
                 new_image.id,
@@ -283,20 +285,50 @@ async def upload_and_analyze(
                 source="user",
                 added_by=user.get("id"),
             )
+            perf_logger.info(f"设置用户标签耗时: {time.time() - t2:.4f}秒")
 
         # Set category if provided
         if category_id:
+            t3 = time.time()
             await image_tag_repository.add_tag_to_image(
                 session,
                 new_image.id,
                 category_id,
                 source="user",
                 sort_order=0,
+                added_by=user.get("id"),  # 添加用户ID
             )
+            perf_logger.info(f"设置分类标签耗时: {time.time() - t3:.4f}秒")
+        
+        # Auto-set resolution tag based on image dimensions
+        if width and height:
+            resolution_name = upload_service.get_resolution_level(width, height)
+            logger.info(f"分辨率判断: {width}x{height} -> {resolution_name}")
+            if resolution_name != "unknown":
+                t4 = time.time()
+                # Get or create resolution tag (level=1)
+                resolution_tag = await tag_repository.get_or_create(
+                    session, resolution_name, source="system", level=1
+                )
+                logger.info(f"分辨率标签: id={resolution_tag.id}, name={resolution_tag.name}, level={resolution_tag.level}")
+                perf_logger.info(f"获取/创建分辨率标签耗时: {time.time() - t4:.4f}秒")
+                
+                t5 = time.time()
+                # Add to image
+                await image_tag_repository.add_tag_to_image(
+                    session,
+                    new_image.id,
+                    resolution_tag.id,
+                    source="system",
+                    sort_order=1,
+                )
+                perf_logger.info(f"关联分辨率标签耗时: {time.time() - t5:.4f}秒")
 
         # Queue for analysis
         if auto_analyze and not skip_analyze:
-            task_queue.add_tasks([new_image.id])
+            t6 = time.time()
+            await task_queue.add_tasks([new_image.id])
+            perf_logger.info(f"添加队列任务耗时: {time.time() - t6:.4f}秒")
             if not task_queue._running:
                 background_tasks.add_task(task_queue.start_processing)
 
@@ -489,8 +521,17 @@ async def search_images(
             sort_desc=request.sort_desc,
         )
 
-        # Convert to response (no tags_with_source for list performance)
-        images = [_image_to_response(img) for img in results["images"]]
+        # 批量获取标签信息（包含 level 和 source）
+        image_ids = [img.id for img in results["images"]]
+        tags_map = await image_repository.get_batch_image_tags_with_source(
+            session, image_ids
+        )
+
+        # Convert to response with tags_with_source
+        images = [
+            _image_to_response(img, tags_with_source=tags_map.get(img.id, []))
+            for img in results["images"]
+        ]
 
         response = ImageSearchResponse(
             images=images,

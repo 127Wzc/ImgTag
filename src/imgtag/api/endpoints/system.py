@@ -20,8 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
 from imgtag.core.config import settings
+from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
-from imgtag.db import config_db, db, get_async_session
+from imgtag.db import get_async_session
 from imgtag.db.repositories import image_repository
 from imgtag.services.embedding_service import embedding_service
 from imgtag.services.task_queue import task_queue
@@ -48,15 +49,15 @@ async def get_system_status(
     try:
         image_count = await image_repository.count_images(session)
 
-        vision_model = config_db.get("vision_model", settings.VISION_MODEL)
-        embedding_mode = config_db.get("embedding_mode", "local")
+        vision_model = await config_cache.get("vision_model", settings.VISION_MODEL)
+        embedding_mode = await config_cache.get("embedding_mode", "local")
 
         if embedding_mode == "local":
-            embedding_model = config_db.get(
+            embedding_model = await config_cache.get(
                 "embedding_local_model", "BAAI/bge-small-zh-v1.5"
             )
         else:
-            embedding_model = config_db.get("embedding_model", settings.EMBEDDING_MODEL)
+            embedding_model = await config_cache.get("embedding_model", settings.EMBEDDING_MODEL)
 
         return {
             "status": "running",
@@ -64,7 +65,7 @@ async def get_system_status(
             "image_count": image_count,
             "vision_model": vision_model,
             "embedding_model": embedding_model,
-            "embedding_dimensions": embedding_service.get_dimensions(),
+            "embedding_dimensions": await embedding_service.get_dimensions(),
         }
     except Exception as e:
         logger.error(f"获取系统状态失败: {e}")
@@ -113,7 +114,7 @@ async def get_dashboard_stats(
         )
 
         # Queue stats
-        queue_status = task_queue.get_status()
+        queue_status = await task_queue.get_status()
         total_tasks = (
             queue_status.get("pending_count", 0)
             + queue_status.get("processing_count", 0)
@@ -121,15 +122,15 @@ async def get_dashboard_stats(
         )
 
         # System config
-        vision_model = config_db.get("vision_model", settings.VISION_MODEL)
-        embedding_mode = config_db.get("embedding_mode", "local")
+        vision_model = await config_cache.get("vision_model", settings.VISION_MODEL)
+        embedding_mode = await config_cache.get("embedding_mode", "local")
 
         if embedding_mode == "local":
-            embedding_model = config_db.get(
+            embedding_model = await config_cache.get(
                 "embedding_local_model", "BAAI/bge-small-zh-v1.5"
             )
         else:
-            embedding_model = config_db.get("embedding_model", settings.EMBEDDING_MODEL)
+            embedding_model = await config_cache.get("embedding_model", settings.EMBEDDING_MODEL)
 
         return {
             "images": {
@@ -150,7 +151,7 @@ async def get_dashboard_stats(
             "system": {
                 "vision_model": vision_model,
                 "embedding_model": embedding_model,
-                "embedding_dimensions": embedding_service.get_dimensions(),
+                "embedding_dimensions": await embedding_service.get_dimensions(),
                 "version": settings.PROJECT_VERSION,
             },
         }
@@ -200,8 +201,8 @@ async def get_available_models():
     logger.info("获取可用模型列表")
 
     try:
-        api_base_url = config_db.get("vision_api_base_url", settings.VISION_API_BASE_URL)
-        api_key = config_db.get("vision_api_key", "")
+        api_base_url = await config_cache.get("vision_api_base_url", settings.VISION_API_BASE_URL)
+        api_key = await config_cache.get("vision_api_key", "")
 
         if not api_base_url or not api_key:
             return {"models": [], "error": "未配置 API 地址或密钥"}
@@ -238,56 +239,19 @@ async def get_available_models():
 async def export_database(admin: dict = Depends(require_admin)):
     """Export database records (admin).
 
-    Note: Uses legacy db calls for complex export logic.
+    Note: This feature is temporarily disabled during async refactoring.
 
     Args:
         admin: Admin user.
 
     Returns:
-        Export JSON file.
+        Error message.
     """
-    logger.info("开始导出数据库")
-
-    try:
-        images = db.export_all_images()
-        tags = db.export_all_tags()
-        collections = db.export_all_collections()
-        configs = config_db.get_all()
-        users = db.export_all_users()
-
-        export_data = {
-            "version": "1.0",
-            "exported_at": datetime.now().isoformat(),
-            "images": images,
-            "tags": tags,
-            "collections": collections,
-            "configs": configs,
-            "users": users,
-            "stats": {
-                "image_count": len(images),
-                "tag_count": len(tags),
-                "collection_count": len(collections),
-                "user_count": len(users),
-            },
-        }
-
-        logger.info(
-            f"导出完成: {len(images)} 张图片, "
-            f"{len(tags)} 个标签, {len(collections)} 个收藏夹"
-        )
-
-        return JSONResponse(
-            content=export_data,
-            headers={
-                "Content-Disposition": (
-                    f'attachment; filename="imgtag_backup_'
-                    f'{datetime.now().strftime("%Y%m%d_%H%M%S")}.json"'
-                )
-            },
-        )
-    except Exception as e:
-        logger.error(f"导出失败: {e}")
-        return {"error": str(e)}
+    logger.warning("导出功能暂时不可用（异步重构中）")
+    return {
+        "error": "导出功能暂时不可用，请使用数据库备份工具",
+        "message": "此功能正在重构中，请使用 pg_dump 进行备份"
+    }
 
 
 @router.post("/import")
@@ -297,73 +261,20 @@ async def import_database(
 ):
     """Import database records (admin).
 
-    Note: Uses legacy db calls for complex import logic.
+    Note: This feature is temporarily disabled during async refactoring.
 
     Args:
         file: Upload file.
         admin: Admin user.
 
     Returns:
-        Import stats.
+        Error message.
     """
-    logger.info(f"开始导入数据库: {file.filename}")
-
-    try:
-        content = await file.read()
-        data = json.loads(content.decode("utf-8"))
-
-        stats = {
-            "images_imported": 0,
-            "tags_imported": 0,
-            "collections_imported": 0,
-            "configs_imported": 0,
-            "errors": [],
-        }
-
-        # Import configs
-        if "configs" in data and data["configs"]:
-            for key, value in data["configs"].items():
-                try:
-                    config_db.set(key, value)
-                    stats["configs_imported"] += 1
-                except Exception as e:
-                    stats["errors"].append(f"配置 {key}: {e}")
-
-        # Import tags
-        if "tags" in data:
-            for tag in data["tags"]:
-                try:
-                    db.import_tag(tag)
-                    stats["tags_imported"] += 1
-                except Exception as e:
-                    stats["errors"].append(f"标签 {tag.get('name')}: {e}")
-
-        # Import images
-        if "images" in data:
-            for img in data["images"]:
-                try:
-                    db.import_image(img)
-                    stats["images_imported"] += 1
-                except Exception as e:
-                    stats["errors"].append(f"图片 {img.get('id')}: {e}")
-
-        # Import collections
-        if "collections" in data:
-            for col in data["collections"]:
-                try:
-                    db.import_collection(col)
-                    stats["collections_imported"] += 1
-                except Exception as e:
-                    stats["errors"].append(f"收藏夹 {col.get('name')}: {e}")
-
-        logger.info(f"导入完成: {stats}")
-
-        return {"message": "导入完成", "stats": stats}
-    except json.JSONDecodeError:
-        return {"error": "无效的 JSON 文件"}
-    except Exception as e:
-        logger.error(f"导入失败: {e}")
-        return {"error": str(e)}
+    logger.warning("导入功能暂时不可用（异步重构中）")
+    return {
+        "error": "导入功能暂时不可用，请使用数据库恢复工具",
+        "message": "此功能正在重构中，请使用 pg_restore 进行恢复"
+    }
 
 
 # ========== Duplicate Detection ==========
@@ -441,7 +352,7 @@ async def calculate_missing_hashes(
                 elif img.get("image_url"):
                     url = img["image_url"]
                     if url.startswith("/"):
-                        base_url = config_db.get("base_url", "http://localhost:8000")
+                        base_url = await config_cache.get("base_url", "http://localhost:8000")
                         url = base_url.rstrip("/") + url
 
                     async with httpx.AsyncClient(timeout=10.0) as client:

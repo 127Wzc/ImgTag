@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
@@ -102,7 +102,7 @@ async def get_storage_status(
             "local_only": local_only,
             "s3_only": s3_only,
             "both": both,
-            "s3_enabled": s3_service.is_enabled(),
+            "s3_enabled": await s3_service.is_enabled(),
         }
     except Exception as e:
         logger.error(f"获取存储状态失败: {e}")
@@ -196,7 +196,7 @@ async def test_s3_connection(_=Depends(require_admin)):
         Connection test result.
     """
     try:
-        result = s3_service.test_connection()
+        result = await s3_service.test_connection()
         return result
     except Exception as e:
         logger.error(f"测试 S3 连接失败: {e}")
@@ -218,7 +218,7 @@ async def sync_to_s3(
     Returns:
         Sync result.
     """
-    if not s3_service.is_enabled():
+    if not await s3_service.is_enabled():
         raise HTTPException(status_code=400, detail="S3 未启用")
 
     try:
@@ -256,17 +256,14 @@ async def sync_to_s3(
 
                 # Generate S3 key and upload
                 filename = os.path.basename(image.file_path)
-                s3_key = s3_service.generate_s3_key(filename)
-                s3_service.upload_file(image.file_path, s3_key)
+                s3_key = await s3_service.generate_s3_key(filename)
+                await s3_service.upload_file(image.file_path, s3_key)
 
                 # Update database
-                await session.execute(
-                    text(
-                        "UPDATE images SET s3_path = :s3, storage_type = 'both' "
-                        "WHERE id = :id"
-                    ),
-                    {"s3": s3_key, "id": image.id},
+                stmt = update(Image).where(Image.id == image.id).values(
+                    s3_path=s3_key, storage_type="both"
                 )
+                await session.execute(stmt)
                 success_count += 1
 
             except Exception as e:
@@ -296,7 +293,7 @@ async def sync_to_local(
     Returns:
         Sync result.
     """
-    if not s3_service.is_enabled():
+    if not await s3_service.is_enabled():
         raise HTTPException(status_code=400, detail="S3 未启用")
 
     try:
@@ -334,16 +331,13 @@ async def sync_to_local(
                 # Download from S3
                 filename = os.path.basename(image.s3_path)
                 local_path = str(settings.UPLOADS_DIR / filename)
-                s3_service.download_file(image.s3_path, local_path)
+                await s3_service.download_file(image.s3_path, local_path)
 
                 # Update database
-                await session.execute(
-                    text(
-                        "UPDATE images SET local_exists = true, "
-                        "storage_type = 'both', file_path = :path WHERE id = :id"
-                    ),
-                    {"path": local_path, "id": image.id},
+                stmt = update(Image).where(Image.id == image.id).values(
+                    local_exists=True, storage_type="both", file_path=local_path
                 )
+                await session.execute(stmt)
                 success_count += 1
 
             except Exception as e:

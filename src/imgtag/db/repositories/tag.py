@@ -255,6 +255,7 @@ class TagRepository(BaseRepository[Tag]):
         *,
         limit: int = 100,
         sort_by: str = "usage_count",
+        level: int | None = 2,
     ) -> Sequence[dict[str, Any]]:
         """Get all tags sorted by usage or name.
 
@@ -262,6 +263,7 @@ class TagRepository(BaseRepository[Tag]):
             session: Database session.
             limit: Maximum tags to return.
             sort_by: Sort field (usage_count, name).
+            level: Tag level filter (None for all, 0=category, 1=resolution, 2=normal).
 
         Returns:
             List of tag dicts with usage count.
@@ -278,9 +280,13 @@ class TagRepository(BaseRepository[Tag]):
                 func.count(ImageTag.image_id).label("usage_count"),
             )
             .outerjoin(ImageTag, Tag.id == ImageTag.tag_id)
-            .group_by(Tag.id)
-            .limit(limit)
         )
+        
+        # 添加 level 过滤
+        if level is not None:
+            stmt = stmt.where(Tag.level == level)
+        
+        stmt = stmt.group_by(Tag.id).limit(limit)
 
         if sort_by == "name":
             stmt = stmt.order_by(Tag.name)
@@ -381,6 +387,7 @@ class ImageTagRepository(BaseRepository[ImageTag]):
         *,
         source: str = "ai",
         sort_order: int = 99,
+        added_by: Optional[int] = None,
     ) -> ImageTag:
         """Add a tag to an image.
 
@@ -390,6 +397,7 @@ class ImageTagRepository(BaseRepository[ImageTag]):
             tag_id: Tag ID.
             source: Tag source (ai/user/system).
             sort_order: Display order.
+            added_by: User ID who added this tag.
 
         Returns:
             Created ImageTag association.
@@ -400,6 +408,7 @@ class ImageTagRepository(BaseRepository[ImageTag]):
             tag_id=tag_id,
             source=source,
             sort_order=sort_order,
+            added_by=added_by,
         )
 
     async def remove_tag_from_image(
@@ -512,20 +521,34 @@ class ImageTagRepository(BaseRepository[ImageTag]):
             )
             session.add(new_assoc)
 
-        # Remove tags not in new list
+        # Remove tags not in new list (BUT preserve level=0 and level=1 tags!)
         new_tag_ids = {t.id for t in final_tags}
         tags_to_remove = set(current_tags.keys()) - new_tag_ids
 
         if tags_to_remove:
             from sqlalchemy import delete as sa_delete
 
-            delete_stmt = sa_delete(ImageTag).where(
+            # 只删除 level=2 的普通标签，保留分类(level=0)和分辨率(level=1)标签
+            # 先查询哪些是 level=2 的标签
+            level_check_stmt = select(Tag.id).where(
                 and_(
-                    ImageTag.image_id == image_id,
-                    ImageTag.tag_id.in_(tags_to_remove),
+                    Tag.id.in_(tags_to_remove),
+                    Tag.level == 2,  # 只删除普通标签
                 )
             )
-            await session.execute(delete_stmt)
+            level_result = await session.execute(level_check_stmt)
+            level2_tag_ids = {row.id for row in level_result}
+
+            if level2_tag_ids:
+                # 只删除 source='ai' 的标签关联，保留用户添加的标签
+                delete_stmt = sa_delete(ImageTag).where(
+                    and_(
+                        ImageTag.image_id == image_id,
+                        ImageTag.tag_id.in_(level2_tag_ids),
+                        ImageTag.source == "ai",  # 只删除 AI 标签
+                    )
+                )
+                await session.execute(delete_stmt)
 
         await session.flush()
         return final_tags

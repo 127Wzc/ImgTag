@@ -8,6 +8,7 @@
 
 import asyncio
 import os
+import uuid
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
@@ -15,7 +16,13 @@ from datetime import datetime
 import threading
 
 from imgtag.core.logging_config import get_logger
-from imgtag.db import db, config_db
+from imgtag.db.database import async_session_maker
+from imgtag.db.repositories import (
+    config_repository,
+    image_repository,
+    image_tag_repository,
+    task_repository,
+)
 
 logger = get_logger(__name__)
 
@@ -26,8 +33,6 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
 
-
-import uuid
 
 @dataclass
 class AnalysisTask:
@@ -46,6 +51,10 @@ class TaskQueueService:
     """任务队列服务"""
     
     _instance = None
+    # 配置缓存
+    _config_cache: Dict[str, Any] = {}
+    _config_cache_time: float = 0
+    _config_cache_ttl: float = 30.0  # 30 秒缓存
     
     def __new__(cls):
         if cls._instance is None:
@@ -67,15 +76,39 @@ class TaskQueueService:
         
         logger.info("任务队列服务初始化完成")
     
-    def get_max_workers(self) -> int:
+    async def _get_config(self, key: str, default: Any = None) -> Any:
+        """获取配置值（带缓存）"""
+        import time
+        now = time.time()
+        
+        # 检查缓存
+        if now - self._config_cache_time < self._config_cache_ttl and key in self._config_cache:
+            return self._config_cache.get(key, default)
+        
+        # 刷新缓存
+        async with async_session_maker() as session:
+            value = await config_repository.get_value(session, key, str(default) if default else None)
+            self._config_cache[key] = value
+            self._config_cache_time = now
+            return value
+    
+    async def get_max_workers(self) -> int:
         """获取最大并发数"""
-        return config_db.get_int("queue_max_workers", 2)
+        value = await self._get_config("queue_max_workers", "2")
+        try:
+            return int(value) if value else 2
+        except (ValueError, TypeError):
+            return 2
     
-    def get_batch_interval(self) -> float:
+    async def get_batch_interval(self) -> float:
         """获取任务间隔时间（秒）"""
-        return float(config_db.get("queue_batch_interval", "1") or "1")
+        value = await self._get_config("queue_batch_interval", "1")
+        try:
+            return float(value) if value else 1.0
+        except (ValueError, TypeError):
+            return 1.0
     
-    def add_tasks(self, image_ids: List[int], task_type: str = "analyze_image") -> int:
+    async def add_tasks(self, image_ids: List[int], task_type: str = "analyze_image") -> int:
         """添加任务到队列
         
         Args:
@@ -84,46 +117,52 @@ class TaskQueueService:
                 - analyze_image: 分析图片（视觉模型 + 向量）
                 - rebuild_vector: 重建向量（仅向量）
         """
-        with self._lock:
-            added = 0
-            for image_id in image_ids:
-                # 检查是否已在队列中
-                if any(t.image_id == image_id for t in self._queue):
-                    continue
-                if image_id in self._processing:
-                    continue
-                
-                # 创建任务对象
-                task = AnalysisTask(image_id=image_id, task_type=task_type)
-                self._queue.append(task)
-                
-                # 持久化到数据库
-                try:
-                    db.create_task(
-                        task_id=task.id,
-                        task_type=task_type,
-                        payload={"image_id": image_id}
-                    )
-                except Exception as e:
-                    logger.error(f"创建任务记录失败: {str(e)}")
+        added = 0
+        
+        async with async_session_maker() as session:
+            with self._lock:
+                for image_id in image_ids:
+                    # 检查是否已在队列中
+                    if any(t.image_id == image_id for t in self._queue):
+                        continue
+                    if image_id in self._processing:
+                        continue
                     
-                added += 1
+                    # 创建任务对象
+                    task = AnalysisTask(image_id=image_id, task_type=task_type)
+                    self._queue.append(task)
+                    
+                    # 持久化到数据库
+                    try:
+                        await task_repository.create_task(
+                            session,
+                            task_id=task.id,
+                            task_type=task_type,
+                            payload={"image_id": image_id}
+                        )
+                    except Exception as e:
+                        logger.error(f"创建任务记录失败: {str(e)}")
+                        
+                    added += 1
             
-            logger.info(f"添加了 {added} 个任务到队列 (类型: {task_type})")
-            return added
+            await session.commit()
+        
+        logger.info(f"添加了 {added} 个任务到队列 (类型: {task_type})")
+        return added
     
-    def get_status(self) -> Dict[str, Any]:
+    async def get_status(self) -> Dict[str, Any]:
         """获取队列状态"""
+        max_workers = await self.get_max_workers()
+        batch_interval = await self.get_batch_interval()
+        
         with self._lock:
             pending = [t for t in self._queue]
             processing = list(self._processing.values())
-            
-            # 只保留最近 50 个完成的任务
             recent_completed = self._completed[-50:]
             
             return {
                 "running": self._running,
-                "max_workers": self.get_max_workers(),
+                "max_workers": max_workers,
                 "pending_count": len(pending),
                 "processing_count": len(processing),
                 "completed_count": len(self._completed),
@@ -139,7 +178,7 @@ class TaskQueueService:
                     {"image_id": t.image_id, "status": t.status.value, "error": t.error, "task_id": t.id}
                     for t in recent_completed[-10:]
                 ],
-                "batch_interval": self.get_batch_interval()
+                "batch_interval": batch_interval
             }
     
     async def start_processing(self):
@@ -152,7 +191,7 @@ class TaskQueueService:
         logger.info("启动队列处理")
         
         # 启动工作协程
-        max_workers = self.get_max_workers()
+        max_workers = await self.get_max_workers()
         for i in range(max_workers):
             worker = asyncio.create_task(self._worker(i))
             self._workers.append(worker)
@@ -195,7 +234,9 @@ class TaskQueueService:
                 
                 # 更新数据库状态
                 try:
-                    db.update_task_status(task.id, "failed", error=str(e))
+                    async with async_session_maker() as session:
+                        await task_repository.update_status(session, task.id, "failed", error=str(e))
+                        await session.commit()
                 except Exception as db_e:
                     logger.error(f"更新任务 {task.id} 状态失败: {str(db_e)}")
                 
@@ -205,7 +246,7 @@ class TaskQueueService:
                     self._completed.append(task)
             
             # 任务完成后等待间隔
-            interval = self.get_batch_interval()
+            interval = await self.get_batch_interval()
             if interval > 0:
                 await asyncio.sleep(interval)
         
@@ -222,17 +263,6 @@ class TaskQueueService:
             task.started_at = datetime.now()
             self._processing[task.image_id] = task
             
-            # 更新数据库状态
-            try:
-                # 在锁内或者锁外更新？最好快速释放锁。
-                # 这里为了简单直接更新，注意不要阻塞太久。
-                # 实际上 db 操作可能较慢，建议移出锁外。
-                # 但移出锁外需要重构 _get_next_task 逻辑，这里先这样。
-                # 另起一个线程/任务更新？
-                pass 
-            except Exception:
-                pass
-            
             return task
     
     async def _process_task(self, task: AnalysisTask, worker_id: int):
@@ -243,15 +273,36 @@ class TaskQueueService:
         
         # 更新处理中状态
         try:
-            db.update_task_status(task.id, "processing")
+            async with async_session_maker() as session:
+                await task_repository.update_status(session, task.id, "processing")
+                await session.commit()
         except Exception as e:
             logger.error(f"更新任务 {task.id} 状态失败: {str(e)}")
         
         try:
-            # 获取图片信息
-            image = db.get_image(task.image_id)
-            if not image:
-                raise Exception(f"图片 {task.image_id} 不存在")
+            # 使用 async session 获取图片信息（预加载 tags）
+            async with async_session_maker() as session:
+                image_model = await image_repository.get_with_tags(session, task.image_id)
+                if not image_model:
+                    raise Exception(f"图片 {task.image_id} 不存在")
+                
+                # 转换为 dict 格式（兼容后续代码）
+                image = {
+                    "id": image_model.id,
+                    "image_url": image_model.image_url,
+                    "file_path": image_model.file_path,
+                    "description": image_model.description,
+                    "tags": [t.name for t in image_model.tags] if image_model.tags else [],
+                    "embedding": image_model.embedding,
+                }
+                
+                # 获取配置
+                allowed_extensions = await config_repository.get_value(
+                    session, "vision_allowed_extensions", "jpg,jpeg,png,webp,bmp"
+                )
+                convert_gif = (await config_repository.get_value(
+                    session, "vision_convert_gif", "true"
+                ) or "true").lower() == "true"
             
             image_url = image.get("image_url", "")
             
@@ -264,10 +315,13 @@ class TaskQueueService:
                 )
                 
                 # 更新图片
-                db.update_image(
-                    image_id=task.image_id,
-                    embedding=embedding
-                )
+                async with async_session_maker() as session:
+                    image_model = await image_repository.get_by_id(session, task.image_id)
+                    if image_model:
+                        await image_repository.update_image(
+                            session, image_model, embedding=embedding
+                        )
+                    await session.commit()
                 
             else:
                 # 获取文件扩展名
@@ -275,46 +329,53 @@ class TaskQueueService:
                 if image_url.startswith("/uploads/"):
                     file_ext = os.path.splitext(image_url)[1].lower().lstrip(".")
                 else:
-                    # 从 URL 尝试获取扩展名
                     url_path = image_url.split("?")[0]
                     file_ext = os.path.splitext(url_path)[1].lower().lstrip(".")
                 
-                # 检查是否在允许处理的文件类型中
-                allowed_extensions = config_db.get("vision_allowed_extensions", "jpg,jpeg,png,webp,bmp")
-                allowed_list = [ext.strip().lower() for ext in allowed_extensions.split(",")]
-                convert_gif = config_db.get("vision_convert_gif", "true").lower() == "true"
+                allowed_list = [ext.strip().lower() for ext in (allowed_extensions or "").split(",")]
                 
                 # GIF 特殊处理
                 if file_ext == "gif":
                     if not convert_gif:
                         logger.info(f"图片 {task.image_id} 是 GIF 格式，跳过分析")
-                        # 只生成空向量，不分析
                         embedding = await embedding_service.get_embedding("")
-                        db.update_image(image_id=task.image_id, embedding=embedding)
+                        async with async_session_maker() as session:
+                            image_model = await image_repository.get_by_id(session, task.image_id)
+                            if image_model:
+                                await image_repository.update_image(session, image_model, embedding=embedding)
+                            await session.commit()
+                        
                         task.status = TaskStatus.COMPLETED
                         task.completed_at = datetime.now()
-                        try:
-                            db.update_task_status(task.id, "completed", result={"image_id": task.image_id, "skipped": True, "reason": "GIF not converted"})
-                        except Exception as e:
-                            logger.error(f"更新任务 {task.id} 状态失败: {str(e)}")
+                        async with async_session_maker() as session:
+                            await task_repository.update_status(
+                                session, task.id, "completed",
+                                result={"image_id": task.image_id, "skipped": True, "reason": "GIF not converted"}
+                            )
+                            await session.commit()
                         with self._lock:
                             if task.image_id in self._processing:
                                 del self._processing[task.image_id]
                             self._completed.append(task)
                         return
-                    # GIF 转换为 PNG 后处理，稍后在读取文件时处理
-                    
+                        
                 elif file_ext and file_ext not in allowed_list:
                     logger.info(f"图片 {task.image_id} 格式 {file_ext} 不在允许列表中，跳过分析")
-                    # 生成空向量
                     embedding = await embedding_service.get_embedding("")
-                    db.update_image(image_id=task.image_id, embedding=embedding)
+                    async with async_session_maker() as session:
+                        image_model = await image_repository.get_by_id(session, task.image_id)
+                        if image_model:
+                            await image_repository.update_image(session, image_model, embedding=embedding)
+                        await session.commit()
+                    
                     task.status = TaskStatus.COMPLETED
                     task.completed_at = datetime.now()
-                    try:
-                        db.update_task_status(task.id, "completed", result={"image_id": task.image_id, "skipped": True, "reason": f"Extension {file_ext} not allowed"})
-                    except Exception as e:
-                        logger.error(f"更新任务 {task.id} 状态失败: {str(e)}")
+                    async with async_session_maker() as session:
+                        await task_repository.update_status(
+                            session, task.id, "completed",
+                            result={"image_id": task.image_id, "skipped": True, "reason": f"Extension {file_ext} not allowed"}
+                        )
+                        await session.commit()
                     with self._lock:
                         if task.image_id in self._processing:
                             del self._processing[task.image_id]
@@ -323,7 +384,6 @@ class TaskQueueService:
                 
                 # 分析图片
                 if image_url.startswith("/uploads/"):
-                    # 本地文件，需要读取文件内容
                     from imgtag.core.config import settings
                     
                     file_path = image.get("file_path") or str(
@@ -341,13 +401,10 @@ class TaskQueueService:
                                 from PIL import Image
                                 import io
                                 img = Image.open(io.BytesIO(file_content))
-                                # 取第一帧
                                 if hasattr(img, 'n_frames') and img.n_frames > 1:
                                     img.seek(0)
-                                # 转换为 RGB（去掉透明通道）
                                 if img.mode in ('RGBA', 'LA', 'P'):
                                     img = img.convert('RGB')
-                                # 保存为 PNG
                                 output = io.BytesIO()
                                 img.save(output, format='PNG')
                                 file_content = output.getvalue()
@@ -374,29 +431,37 @@ class TaskQueueService:
                     analysis.tags
                 )
                 
-                # 更新数据库
-                db.update_image(
-                    image_id=task.image_id,
-                    tags=analysis.tags,
-                    description=analysis.description,
-                    embedding=embedding,
-                    tag_source="ai"
-                )
+                # 更新数据库（使用 repository）
+                async with async_session_maker() as session:
+                    image_model = await image_repository.get_with_tags(session, task.image_id)
+                    if image_model:
+                        # 更新 description 和 embedding
+                        await image_repository.update_image(
+                            session, image_model,
+                            description=analysis.description,
+                            embedding=embedding
+                        )
+                        # 更新标签
+                        await image_tag_repository.set_image_tags(
+                            session, task.image_id, analysis.tags, source="ai"
+                        )
+                    await session.commit()
             
             task.status = TaskStatus.COMPLETED
             task.completed_at = datetime.now()
             
             # 更新数据库状态
             try:
-                db.update_task_status(
-                    task.id, 
-                    "completed", 
-                    result={
-                        "image_id": task.image_id,
-                        "tags": analysis.tags if 'analysis' in locals() else image.get("tags"),
-                        "description": analysis.description if 'analysis' in locals() else image.get("description")
-                    }
-                )
+                async with async_session_maker() as session:
+                    await task_repository.update_status(
+                        session, task.id, "completed",
+                        result={
+                            "image_id": task.image_id,
+                            "tags": analysis.tags if 'analysis' in locals() else image.get("tags"),
+                            "description": analysis.description if 'analysis' in locals() else image.get("description")
+                        }
+                    )
+                    await session.commit()
             except Exception as e:
                 logger.error(f"更新任务 {task.id} 状态失败: {str(e)}")
             
@@ -415,7 +480,9 @@ class TaskQueueService:
             
             # 更新数据库状态
             try:
-                db.update_task_status(task.id, "failed", error=str(e))
+                async with async_session_maker() as session:
+                    await task_repository.update_status(session, task.id, "failed", error=str(e))
+                    await session.commit()
             except Exception as db_e:
                 logger.error(f"更新任务 {task.id} 状态失败: {str(db_e)}")
             

@@ -48,8 +48,7 @@ class ImageResponse(BaseModel):
     """图像响应"""
     id: int = Field(..., description="图像 ID")
     image_url: str = Field(..., description="图像 URL")
-    tags: List[str] = Field(default_factory=list, description="标签列表（向后兼容）")
-    tags_with_source: List[TagWithSource] = Field(default_factory=list, description="带来源的标签列表")
+    tags: List[TagWithSource] = Field(default_factory=list, description="标签列表（包含 level, source）")
     description: Optional[str] = Field(default=None, description="图像描述")
     original_url: Optional[str] = Field(default=None, description="原始 URL")
     width: Optional[int] = Field(default=None, description="图片宽度（像素）")

@@ -118,18 +118,41 @@
             <div class="image-card-content">
               <p class="description">{{ image.description || '暂无描述' }}</p>
               <div class="image-card-tags">
+                <!-- 分类标签 (level=0) -->
                 <el-tag 
-                  v-for="tag in image.tags?.slice(0, 3)" 
-                  :key="tag" 
+                  v-for="tag in image.tags?.filter(t => t.level === 0)" 
+                  :key="tag.name" 
+                  size="small"
+                  type="primary"
+                  effect="dark"
+                  round
+                >
+                  {{ tag.name }}
+                </el-tag>
+                <!-- 分辨率标签 (level=1) -->
+                <el-tag 
+                  v-for="tag in image.tags?.filter(t => t.level === 1)" 
+                  :key="tag.name" 
+                  size="small"
+                  type="success"
+                  effect="plain"
+                  round
+                >
+                  {{ tag.name }}
+                </el-tag>
+                <!-- 普通标签 (level=2) -->
+                <el-tag 
+                  v-for="tag in image.tags?.filter(t => t.level === 2)?.slice(0, 2)" 
+                  :key="tag.name" 
                   size="small"
                   type="info"
                   effect="plain"
                   round
                 >
-                  {{ tag }}
+                  {{ tag.name }}
                 </el-tag>
-                <el-tag v-if="image.tags?.length > 3" size="small" type="info" effect="plain" round>
-                  +{{ image.tags.length - 3 }}
+                <el-tag v-if="image.tags?.filter(t => t.level === 2)?.length > 2" size="small" type="info" effect="plain" round>
+                  +{{ image.tags.filter(t => t.level === 2).length - 2 }}
                 </el-tag>
               </div>
             </div>

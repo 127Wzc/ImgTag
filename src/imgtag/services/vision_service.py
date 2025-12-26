@@ -18,8 +18,8 @@ from typing import Optional
 import httpx
 from PIL import Image
 
+from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
-from imgtag.db import config_db
 
 logger = get_logger(__name__)
 
@@ -49,7 +49,7 @@ class VisionService:
         """Initialize the vision service."""
         logger.info("初始化视觉模型服务")
 
-    def _get_api_config(self) -> tuple[str, str, str]:
+    async def _get_api_config(self) -> tuple[str, str, str]:
         """Get API configuration from database.
 
         Returns:
@@ -58,10 +58,9 @@ class VisionService:
         Raises:
             ValueError: If API key is not configured.
         """
-
-        api_base = config_db.get("vision_api_base_url", "https://api.openai.com/v1")
-        api_key = config_db.get("vision_api_key", "")
-        model = config_db.get("vision_model", "gpt-4o-mini")
+        api_base = await config_cache.get("vision_api_base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"
+        api_key = await config_cache.get("vision_api_key", "") or ""
+        model = await config_cache.get("vision_model", "gpt-4o-mini") or "gpt-4o-mini"
 
         if not api_key:
             raise ValueError("视觉模型 API 密钥未配置，请在系统设置中配置")
@@ -171,13 +170,13 @@ class VisionService:
         logger.warning(f"图片压缩后仍超限: {len(buffer.getvalue())/1024:.1f}KB (原始: {original_format} {original_size})")
         return buffer.getvalue(), "image/jpeg"
     
-    def _get_model(self) -> str:
+    async def _get_model(self) -> str:
         """获取视觉模型名称"""
-        return config_db.get("vision_model", "gpt-4o-mini")
+        return await config_cache.get("vision_model", "gpt-4o-mini") or "gpt-4o-mini"
     
-    def _get_prompt(self) -> str:
+    async def _get_prompt(self) -> str:
         """获取分析提示词"""
-        return config_db.get("vision_prompt", """请分析这张图片，并按以下格式返回JSON响应:
+        default_prompt = """请分析这张图片，并按以下格式返回JSON响应:
 {
     "tags": ["标签1", "标签2", "标签3", ...],
     "description": "详细的图片描述文本"
@@ -187,7 +186,8 @@ class VisionService:
 1. tags: 提取5-10个关键标签，使用中文
 2. description: 用中文详细描述图片内容
 
-请只返回JSON格式，不要添加任何其他文字。""")
+请只返回JSON格式，不要添加任何其他文字。"""
+        return await config_cache.get("vision_prompt", default_prompt) or default_prompt
     
     async def analyze_image_url(self, image_url: str) -> ImageAnalysisResult:
         """Analyze a remote image by URL.
@@ -257,7 +257,8 @@ class VisionService:
         logger.info(f"分析 Base64 图像, 类型: {mime_type}, 原始大小: {original_size/1024:.1f} KB")
         
         # 从配置读取压缩阈值（KB），默认 2048KB = 2MB
-        max_image_size_kb = config_db.get_int("vision_max_image_size", 2048)
+        max_size_str = await config_cache.get("vision_max_image_size", "2048")
+        max_image_size_kb = int(max_size_str) if max_size_str else 2048
         max_image_size = max_image_size_kb * 1024  # 转为字节
         
         # 图片过大时自动压缩
@@ -267,11 +268,11 @@ class VisionService:
             logger.info(f"压缩后: {len(image_data)/1024:.1f} KB, 类型: {mime_type}")
         
         try:
-            
-            api_base = config_db.get("vision_api_base_url", "https://api.openai.com/v1")
-            api_key = config_db.get("vision_api_key", "")
-            model = self._get_model()
-            prompt = self._get_prompt()
+            # 使用异步方法确保能从数据库读取配置
+            api_base = await config_cache.get("vision_api_base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"
+            api_key = await config_cache.get("vision_api_key", "") or ""
+            model = await self._get_model()
+            prompt = await self._get_prompt()
             
             if not api_key:
                 raise ValueError("视觉模型 API 密钥未配置")
@@ -279,9 +280,14 @@ class VisionService:
             base64_image = base64.b64encode(image_data).decode("utf-8")
             data_url = f"data:{mime_type};base64,{base64_image}"
             
-            # DEBUG: 打印请求参数
+            # 完整请求 URL
+            request_url = f"{api_base.rstrip('/')}/chat/completions"
+            
+            # DEBUG: 打印请求参数（含 API Key 脱敏）
+            api_key_preview = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "****"
             logger.debug(f"视觉模型 API 请求参数:")
-            logger.debug(f"  - API Base: {api_base}")
+            logger.debug(f"  - Request URL: {request_url}")
+            logger.debug(f"  - API Key: {api_key_preview}")
             logger.debug(f"  - Model: {model}")
             logger.debug(f"  - Image: Base64 ({len(image_data)} bytes, {mime_type})")
             logger.debug(f"  - Prompt: {prompt[:100]}...")
@@ -289,7 +295,7 @@ class VisionService:
             # 使用 httpx 直接请求，支持原生 Gemini 响应
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
-                    f"{api_base.rstrip('/')}/chat/completions",
+                    request_url,
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json"

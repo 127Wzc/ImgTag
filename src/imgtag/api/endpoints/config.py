@@ -7,13 +7,16 @@
 """
 
 from typing import Dict, Any
+
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
-
-from imgtag.db import config_db
+from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
+from imgtag.db.database import get_async_session
+from imgtag.db.repositories import config_repository
 
 logger = get_logger(__name__)
 
@@ -26,21 +29,28 @@ class ConfigUpdate(BaseModel):
 
 
 @router.get("/", response_model=Dict[str, Any])
-async def get_all_config(admin: Dict = Depends(require_admin)):
+async def get_all_config(
+    admin: Dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
     """获取所有配置（密钥会被遮挡，需管理员权限）"""
     logger.info("获取所有配置")
     try:
-        return config_db.get_all(include_secrets=False)
+        return await config_repository.get_all_configs(session, include_secrets=False)
     except Exception as e:
         logger.error(f"获取配置失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"获取配置失败: {str(e)}")
 
 
 @router.get("/{key}")
-async def get_config(key: str, admin: Dict = Depends(require_admin)):
+async def get_config(
+    key: str,
+    admin: Dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
     """获取单个配置项（需管理员权限）"""
     logger.info(f"获取配置: {key}")
-    value = config_db.get(key)
+    value = await config_repository.get_value(session, key)
     if value is None:
         raise HTTPException(status_code=404, detail=f"配置项 {key} 不存在")
     
@@ -52,7 +62,11 @@ async def get_config(key: str, admin: Dict = Depends(require_admin)):
 
 
 @router.put("/", response_model=Dict[str, str])
-async def update_configs(request: ConfigUpdate, admin: Dict = Depends(require_admin)):
+async def update_configs(
+    request: ConfigUpdate,
+    admin: Dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
     """批量更新配置（需管理员权限）"""
     logger.info(f"更新配置: {list(request.configs.keys())}")
     
@@ -66,10 +80,15 @@ async def update_configs(request: ConfigUpdate, admin: Dict = Depends(require_ad
         if not filtered_configs:
             return {"message": "没有需要更新的配置"}
         
-        success = config_db.update_multiple(filtered_configs)
+        success = await config_repository.update_multiple(session, filtered_configs)
         
         if not success:
             raise HTTPException(status_code=500, detail="更新配置失败")
+        
+        # 清除配置缓存并重新加载，确保新配置立即生效
+        config_cache.clear()
+        await config_cache.preload()
+        logger.info("配置缓存已重新加载")
         
         # 如果更新了嵌入模型相关配置，重载模型以应用新设置
         embedding_related_keys = ["embedding_mode", "embedding_local_model", "hf_endpoint"]
@@ -85,13 +104,18 @@ async def update_configs(request: ConfigUpdate, admin: Dict = Depends(require_ad
 
 
 @router.put("/{key}")
-async def update_single_config(key: str, value: str, admin: Dict = Depends(require_admin)):
+async def update_single_config(
+    key: str,
+    value: str,
+    admin: Dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
     """更新单个配置项（需管理员权限）"""
     logger.info(f"更新单个配置: {key}")
     
     try:
-        is_secret = "key" in key.lower()
-        success = config_db.set(key, value, is_secret=is_secret)
+        is_secret = "key" in key.lower() or "secret" in key.lower()
+        success = await config_repository.set_value(session, key, value, is_secret=is_secret)
         
         if not success:
             raise HTTPException(status_code=500, detail="更新配置失败")

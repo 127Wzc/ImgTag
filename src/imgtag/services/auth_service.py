@@ -12,8 +12,11 @@ from typing import Optional
 import hashlib
 import secrets
 
-from imgtag.db import db
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from imgtag.core.logging_config import get_logger
+from imgtag.db.repositories import user_repository
+from imgtag.models.user import User
 
 logger = get_logger(__name__)
 
@@ -82,53 +85,71 @@ def decode_token(token: str) -> Optional[dict]:
         return None
 
 
-def authenticate_user(username: str, password: str) -> Optional[dict]:
+async def authenticate_user(
+    session: AsyncSession,
+    username: str,
+    password: str,
+) -> Optional[User]:
     """验证用户登录"""
-    user = db.get_user_by_username(username)
+    user = await user_repository.get_by_username(session, username)
     
     if not user:
         logger.warning(f"用户不存在: {username}")
         return None
     
-    if not user.get("is_active", True):
+    if not user.is_active:
         logger.warning(f"用户已禁用: {username}")
         return None
     
-    if not verify_password(password, user["password_hash"]):
+    if not verify_password(password, user.password_hash):
         logger.warning(f"密码错误: {username}")
         return None
     
     # 更新最后登录时间
-    db.update_user_last_login(user["id"])
+    await user_repository.update_last_login(session, user)
     
     return user
 
 
-def register_user(username: str, password: str, email: str = None, role: str = "user") -> Optional[int]:
+async def register_user(
+    session: AsyncSession,
+    username: str,
+    password: str,
+    email: str | None = None,
+    role: str = "user",
+) -> Optional[int]:
     """注册新用户"""
     # 检查用户名是否存在
-    existing = db.get_user_by_username(username)
-    if existing:
+    if await user_repository.username_exists(session, username):
         logger.warning(f"用户名已存在: {username}")
         return None
     
     password_hash = hash_password(password)
-    user_id = db.create_user(username, password_hash, email, role)
+    user = await user_repository.create_user(
+        session,
+        username=username,
+        password_hash=password_hash,
+        email=email,
+        role=role,
+    )
     
-    if user_id:
-        logger.info(f"用户注册成功: {username} (ID: {user_id})")
-    
-    return user_id
+    logger.info(f"用户注册成功: {username} (ID: {user.id})")
+    return user.id
 
 
-def init_default_admin():
+async def init_default_admin(session: AsyncSession) -> None:
     """初始化默认管理员账号"""
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
     admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
     
-    existing = db.get_user_by_username(admin_username)
+    existing = await user_repository.get_by_username(session, admin_username)
     if not existing:
-        user_id = register_user(admin_username, admin_password, role="admin")
+        user_id = await register_user(
+            session,
+            admin_username,
+            admin_password,
+            role="admin",
+        )
         if user_id:
             logger.info(f"默认管理员账号已创建: {admin_username}")
     else:

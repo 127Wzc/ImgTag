@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.core.logging_config import get_logger
-from imgtag.db import config_db, get_async_session
+from imgtag.core.config_cache import config_cache
+from imgtag.db import get_async_session
 from imgtag.db.repositories import user_repository
 from imgtag.models.user import User
 from imgtag.schemas.user import Token, UserCreate, UserLogin, UserResponse
@@ -168,8 +169,9 @@ async def get_public_config():
     Returns:
         Public config including registration status.
     """
+    allow_register = await config_cache.get("allow_register", "false")
     return {
-        "allow_register": config_db.get("allow_register", "false").lower() == "true"
+        "allow_register": (allow_register or "false").lower() == "true"
     }
 
 
@@ -188,7 +190,8 @@ async def register(
         Success message with user ID.
     """
     # Check if registration is allowed
-    allow_register = config_db.get("allow_register", "false").lower() == "true"
+    allow_register_value = await config_cache.get("allow_register", "false")
+    allow_register = (allow_register_value or "false").lower() == "true"
     if not allow_register:
         raise HTTPException(status_code=403, detail="注册功能已关闭")
 

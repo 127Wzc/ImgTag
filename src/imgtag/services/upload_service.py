@@ -16,7 +16,6 @@ import httpx
 
 from imgtag.core.config import settings
 from imgtag.core.logging_config import get_logger, get_perf_logger
-from imgtag.db import config_db
 
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
@@ -129,9 +128,8 @@ class UploadService:
         logger.info(f"保存上传文件: {original_filename}, 大小: {len(file_content)} 字节")
         
         try:
-            # 从配置数据库获取最大上传大小 (MB 转换为字节)
-            max_size_mb = config_db.get_int("max_upload_size", 10)
-            max_size_bytes = max_size_mb * 1024 * 1024
+            # 使用配置常量获取最大上传大小 (默认 10MB)
+            max_size_bytes = settings.MAX_UPLOAD_SIZE
             
             # 验证文件大小
             if len(file_content) > max_size_bytes:

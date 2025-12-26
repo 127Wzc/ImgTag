@@ -14,7 +14,7 @@ from pathlib import Path
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
-from imgtag.db.config_db import config_db
+from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -40,15 +40,15 @@ class S3Service:
         self._client = None
         logger.info("S3 服务初始化（懒加载模式）")
     
-    def _get_client(self):
+    async def _get_client(self):
         """获取 boto3 客户端（懒加载）"""
         if self._client is not None:
             return self._client
         
-        endpoint_url = config_db.get("s3_endpoint_url", "")
-        access_key = config_db.get("s3_access_key_id", "")
-        secret_key = config_db.get("s3_secret_access_key", "")
-        region = config_db.get("s3_region", "us-east-1")
+        endpoint_url = await config_cache.get("s3_endpoint_url", "") or ""
+        access_key = await config_cache.get("s3_access_key_id", "") or ""
+        secret_key = await config_cache.get("s3_secret_access_key", "") or ""
+        region = await config_cache.get("s3_region", "us-east-1") or "us-east-1"
         
         if not endpoint_url or not access_key or not secret_key:
             raise ValueError("S3 配置不完整，请检查 endpoint_url, access_key_id, secret_access_key")
@@ -63,37 +63,38 @@ class S3Service:
         logger.info(f"S3 客户端已创建: {endpoint_url}")
         return self._client
     
-    def is_enabled(self) -> bool:
+    async def is_enabled(self) -> bool:
         """检查 S3 是否启用"""
-        return config_db.get("s3_enabled", "false").lower() == "true"
+        enabled = await config_cache.get("s3_enabled", "false") or "false"
+        return enabled.lower() == "true"
     
-    def get_bucket_name(self) -> str:
+    async def get_bucket_name(self) -> str:
         """获取存储桶名称"""
-        return config_db.get("s3_bucket_name", "")
+        return await config_cache.get("s3_bucket_name", "") or ""
     
-    def generate_s3_key(self, filename: str) -> str:
+    async def generate_s3_key(self, filename: str) -> str:
         """
         根据文件名生成 S3 对象键
         
         格式: {prefix}/{year}/{month}/{filename}
         例如: imgtag/2024/12/abc123.jpg
         """
-        prefix = config_db.get("s3_path_prefix", "imgtag/").rstrip("/")
+        prefix = (await config_cache.get("s3_path_prefix", "imgtag/") or "imgtag/").rstrip("/")
         now = datetime.now()
         return f"{prefix}/{now.year}/{now.month:02d}/{filename}"
     
-    def get_public_url(self, s3_key: str) -> str:
+    async def get_public_url(self, s3_key: str) -> str:
         """获取公开访问 URL"""
-        public_prefix = config_db.get("s3_public_url_prefix", "").rstrip("/")
+        public_prefix = (await config_cache.get("s3_public_url_prefix", "") or "").rstrip("/")
         if public_prefix:
             return f"{public_prefix}/{s3_key}"
         
         # 无自定义前缀时，构建默认 S3 URL
-        endpoint = config_db.get("s3_endpoint_url", "").rstrip("/")
-        bucket = self.get_bucket_name()
+        endpoint = (await config_cache.get("s3_endpoint_url", "") or "").rstrip("/")
+        bucket = await self.get_bucket_name()
         return f"{endpoint}/{bucket}/{s3_key}"
     
-    def upload_file(self, local_path: str, s3_key: str) -> str:
+    async def upload_file(self, local_path: str, s3_key: str) -> str:
         """
         上传文件到 S3
         
@@ -107,8 +108,8 @@ class S3Service:
         if not os.path.exists(local_path):
             raise FileNotFoundError(f"本地文件不存在: {local_path}")
         
-        client = self._get_client()
-        bucket = self.get_bucket_name()
+        client = await self._get_client()
+        bucket = await self.get_bucket_name()
         
         if not bucket:
             raise ValueError("S3 存储桶名称未配置")
@@ -119,14 +120,14 @@ class S3Service:
             extra_args = {"ContentType": content_type}
             
             client.upload_file(local_path, bucket, s3_key, ExtraArgs=extra_args)
-            url = self.get_public_url(s3_key)
+            url = await self.get_public_url(s3_key)
             logger.info(f"文件已上传到 S3: {s3_key}")
             return url
         except ClientError as e:
             logger.error(f"S3 上传失败: {str(e)}")
             raise
     
-    def download_file(self, s3_key: str, local_path: str) -> str:
+    async def download_file(self, s3_key: str, local_path: str) -> str:
         """
         从 S3 下载文件到本地
         
@@ -137,8 +138,8 @@ class S3Service:
         Returns:
             str: 本地文件路径
         """
-        client = self._get_client()
-        bucket = self.get_bucket_name()
+        client = await self._get_client()
+        bucket = await self.get_bucket_name()
         
         if not bucket:
             raise ValueError("S3 存储桶名称未配置")
@@ -154,7 +155,7 @@ class S3Service:
             logger.error(f"S3 下载失败: {str(e)}")
             raise
     
-    def delete_file(self, s3_key: str) -> bool:
+    async def delete_file(self, s3_key: str) -> bool:
         """
         删除 S3 对象
         
@@ -164,8 +165,8 @@ class S3Service:
         Returns:
             bool: 是否成功
         """
-        client = self._get_client()
-        bucket = self.get_bucket_name()
+        client = await self._get_client()
+        bucket = await self.get_bucket_name()
         
         try:
             client.delete_object(Bucket=bucket, Key=s3_key)
@@ -175,7 +176,7 @@ class S3Service:
             logger.error(f"S3 删除失败: {str(e)}")
             return False
     
-    def exists(self, s3_key: str) -> bool:
+    async def exists(self, s3_key: str) -> bool:
         """
         检查 S3 对象是否存在
         
@@ -185,8 +186,8 @@ class S3Service:
         Returns:
             bool: 是否存在
         """
-        client = self._get_client()
-        bucket = self.get_bucket_name()
+        client = await self._get_client()
+        bucket = await self.get_bucket_name()
         
         try:
             client.head_object(Bucket=bucket, Key=s3_key)
@@ -194,7 +195,7 @@ class S3Service:
         except ClientError:
             return False
     
-    def test_connection(self) -> Dict[str, Any]:
+    async def test_connection(self) -> Dict[str, Any]:
         """
         测试 S3 连接
         
@@ -202,8 +203,8 @@ class S3Service:
             dict: 测试结果 {success, message, bucket_exists, object_count}
         """
         try:
-            client = self._get_client()
-            bucket = self.get_bucket_name()
+            client = await self._get_client()
+            bucket = await self.get_bucket_name()
             
             if not bucket:
                 return {
