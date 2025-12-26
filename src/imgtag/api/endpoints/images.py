@@ -126,6 +126,7 @@ async def upload_and_analyze(
     skip_analyze: bool = Form(default=False, description="跳过分析，只上传"),
     tags: str = Form(default="", description="手动标签，逗号分隔"),
     description: str = Form(default="", description="手动描述"),
+    category_id: int = Form(default=None, description="主分类ID (level=0)，留空则使用待分类"),
     user: Dict = Depends(get_current_user)
 ):
     """上传图片文件并分析（需登录）"""
@@ -133,7 +134,7 @@ async def upload_and_analyze(
     from imgtag.services.task_queue import task_queue
     
     start_time = time.time()
-    logger.info(f"上传文件: {file.filename}, auto_analyze={auto_analyze}")
+    logger.info(f"上传文件: {file.filename}, auto_analyze={auto_analyze}, category_id={category_id}")
     
     try:
         # 读取文件内容
@@ -166,7 +167,8 @@ async def upload_and_analyze(
             file_type=file_type,
             file_size=file_size,
             width=width,
-            height=height
+            height=height,
+            category_id=category_id  # 用户指定的分类
         )
         
         if not new_id:
@@ -197,6 +199,7 @@ async def upload_and_analyze(
 @router.post("/upload-zip", response_model=Dict[str, Any], status_code=201)
 async def upload_zip(
     file: UploadFile = File(..., description="ZIP 压缩包"),
+    category_id: int = Form(default=None, description="主分类ID (level=0)，留空则使用待分类"),
     user: Dict = Depends(get_current_user)
 ):
     """上传 ZIP 文件，批量解压并保存图片（需登录）"""
@@ -205,7 +208,7 @@ async def upload_zip(
     import os
     
     start_time = time.time()
-    logger.info(f"上传 ZIP 文件: {file.filename}")
+    logger.info(f"上传 ZIP 文件: {file.filename}, category_id={category_id}")
     
     if not file.filename.lower().endswith('.zip'):
         raise HTTPException(status_code=400, detail="只支持 .zip 格式文件")
@@ -258,7 +261,8 @@ async def upload_zip(
                         file_type=file_type,
                         file_size=file_size,
                         width=width,
-                        height=height
+                        height=height,
+                        category_id=category_id  # 用户指定的分类
                     )
                     
                     if new_id:

@@ -15,6 +15,20 @@
         </el-radio-group>
       </div>
       
+      <!-- 分类选择器 -->
+      <div class="category-selector">
+        <span class="selector-label">主分类：</span>
+        <el-select v-model="selectedCategoryId" placeholder="待分类" clearable style="width: 200px;">
+          <el-option
+            v-for="cat in categories"
+            :key="cat.id"
+            :label="cat.name"
+            :value="cat.id"
+          />
+        </el-select>
+        <span class="selector-tip">留空则默认为"待分类"</span>
+      </div>
+      
       <el-upload
         ref="uploadRef"
         class="upload-area"
@@ -67,7 +81,8 @@ import {
   startQueue,
   stopQueue,
   clearQueue,
-  setQueueWorkers
+  setQueueWorkers,
+  getCategories
 } from '@/api'
 
 const uploadRef = ref(null)
@@ -80,9 +95,22 @@ const uploadProgressText = ref('')
 const queueStatus = ref(null)
 const maxWorkers = ref(2)
 
+// 分类选择
+const categories = ref([])
+const selectedCategoryId = ref(null)
+
 let statusTimer = null
 
 const uploadAction = '/api/v1/images/upload'
+
+// 获取主分类列表
+const fetchCategories = async () => {
+  try {
+    categories.value = await getCategories()
+  } catch (e) {
+    console.error('获取分类列表失败:', e)
+  }
+}
 
 const handleFileChange = (file, files) => {
   fileList.value = files
@@ -102,11 +130,13 @@ const handleUpload = async () => {
   uploading.value = true
   uploadProgress.value = 0
   
+  const categoryId = selectedCategoryId.value || null
+  
   // ZIP 模式特殊处理
   if (uploadMode.value === 'zip') {
     try {
       uploadProgressText.value = '正在上传并解压 ZIP 文件...'
-      const result = await uploadZip(fileList.value[0].raw)
+      const result = await uploadZip(fileList.value[0].raw, categoryId)
       uploadProgress.value = 100
       
       ElMessage.success(result.message)
@@ -136,9 +166,9 @@ const handleUpload = async () => {
       
       let result
       if (uploadMode.value === 'batch') {
-        result = await uploadOnly(fileItem.raw)
+        result = await uploadOnly(fileItem.raw, categoryId)
       } else {
-        result = await uploadAndAnalyze(fileItem.raw)
+        result = await uploadAndAnalyze(fileItem.raw, true, categoryId)
       }
       
       newIds.push(result.id)
@@ -248,6 +278,7 @@ const startPolling = () => {
 
 onMounted(() => {
   fetchQueueStatus()
+  fetchCategories()
 })
 
 onUnmounted(() => {
@@ -283,6 +314,27 @@ onUnmounted(() => {
 
 .upload-mode {
   margin-bottom: 20px;
+}
+
+.category-selector {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  background: var(--bg-primary);
+  border-radius: var(--radius-md);
+}
+
+.selector-label {
+  font-size: 14px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.selector-tip {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .upload-area {

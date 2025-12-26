@@ -40,7 +40,8 @@ class ImageCreateManual(BaseModel):
 class TagWithSource(BaseModel):
     """带来源的标签"""
     name: str = Field(..., description="标签名称")
-    source: str = Field(default="ai", description="标签来源: user/ai")
+    source: str = Field(default="ai", description="标签来源: user/ai/system")
+    level: int = Field(default=2, description="标签级别: 0=主分类, 1=分辨率, 2=普通标签")
 
 
 class ImageResponse(BaseModel):

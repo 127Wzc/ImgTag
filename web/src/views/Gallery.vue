@@ -15,7 +15,7 @@
               <el-option
                 v-for="cat in categoryOptions"
                 :key="cat.id"
-                :label="cat.name"
+                :label="`${cat.name} (${cat.usage_count || 0})`"
                 :value="cat.id"
               />
             </el-select>
@@ -32,7 +32,7 @@
               <el-option
                 v-for="res in resolutionOptions"
                 :key="res.id"
-                :label="res.name"
+                :label="`${res.name} (${res.usage_count || 0})`"
                 :value="res.id"
               />
             </el-select>
@@ -329,17 +329,23 @@
               <p class="description-text">{{ selectedImage.description || '暂无描述' }}</p>
             </div>
 
-            <div class="info-section" v-if="selectedImage.width || selectedImage.file_size">
-              <h3>图片信息</h3>
-              <div class="image-meta">
-                <span v-if="selectedImage.width && selectedImage.height" class="meta-item">
+            <!-- 元信息：分辨率、文件大小、分类标签 -->
+            <div class="info-section" v-if="selectedImage.width || selectedImage.file_size || categoryTag || resolutionTag">
+              <div class="image-meta-compact">
+                <span v-if="selectedImage.width && selectedImage.height" class="meta-chip">
                   <el-icon><Picture /></el-icon>
-                  {{ selectedImage.width }} × {{ selectedImage.height }} px
+                  {{ selectedImage.width }} × {{ selectedImage.height }}
                 </span>
-                <span v-if="selectedImage.file_size" class="meta-item">
+                <span v-if="selectedImage.file_size" class="meta-chip">
                   <el-icon><Document /></el-icon>
                   {{ selectedImage.file_size.toFixed(2) }} MB
                 </span>
+                <el-tag v-if="categoryTag" type="primary" size="small" effect="plain">
+                  {{ categoryTag.name }}
+                </el-tag>
+                <el-tag v-if="resolutionTag" type="success" size="small" effect="plain">
+                  {{ resolutionTag.name }}
+                </el-tag>
               </div>
             </div>
             
@@ -380,7 +386,7 @@
             
             <div class="info-section">
               <h3>图片地址</h3>
-              <el-input :model-value="selectedImage.image_url" readonly>
+              <el-input :model-value="displayFullUrl" readonly>
                 <template #append>
                   <el-button @click="copyUrl">复制</el-button>
                 </template>
@@ -707,11 +713,12 @@ const isEditing = ref(false)
 const editForm = ref(null)
 const saving = ref(false)
 const detailLoading = ref(false) // 详情加载状态，避免标签跳动
+const displayFullUrl = ref('') // 显示用的完整 URL
 
 // 用户标签和 AI 标签计算属性
 const userTags = computed(() => {
   const tagsWithSource = selectedImage.value?.tags_with_source || []
-  return tagsWithSource.filter(t => t.source === 'user')
+  return tagsWithSource.filter(t => t.source === 'user' && t.level === 2)
 })
 
 const aiTags = computed(() => {
@@ -720,8 +727,20 @@ const aiTags = computed(() => {
   
   const tagsWithSource = selectedImage.value?.tags_with_source || []
   
-  // 只使用 tags_with_source 中的 AI 标签
-  return tagsWithSource.filter(t => t.source !== 'user')
+  // 只使用 level=2 的 AI 标签
+  return tagsWithSource.filter(t => t.source !== 'user' && t.level === 2)
+})
+
+// 主分类标签 (level=0)
+const categoryTag = computed(() => {
+  const tagsWithSource = selectedImage.value?.tags_with_source || []
+  return tagsWithSource.find(t => t.level === 0)
+})
+
+// 分辨率标签 (level=1)
+const resolutionTag = computed(() => {
+  const tagsWithSource = selectedImage.value?.tags_with_source || []
+  return tagsWithSource.find(t => t.level === 1)
 })
 
 // 批量选择
@@ -1024,11 +1043,14 @@ const openFullscreen = async (image) => {
   editForm.value = null
   fullscreenVisible.value = true
   detailLoading.value = true
+  displayFullUrl.value = '' // 清空
   
   // 获取详细信息（包含 tags_with_source）
   try {
     const detail = await getImage(image.id)
     selectedImage.value = { ...selectedImage.value, ...detail }
+    // 计算完整 URL
+    displayFullUrl.value = await getFullImageUrl(selectedImage.value.image_url)
   } catch (e) {
     console.error('获取图片详情失败:', e)
   } finally {
@@ -1225,10 +1247,9 @@ const handleBatchDelete = async () => {
   }
 }
 
-const copyUrl = async () => {
-  // 使用 getFullImageUrl 获取完整 URL（包含 base_url）
-  const fullUrl = await getFullImageUrl(selectedImage.value.image_url)
-  navigator.clipboard.writeText(fullUrl)
+const copyUrl = () => {
+  // 使用已计算的完整 URL
+  navigator.clipboard.writeText(displayFullUrl.value)
   ElMessage.success('已复制到剪贴板')
 }
 
@@ -1889,22 +1910,27 @@ onUnmounted(() => {
   color: var(--text-primary);
 }
 
-.image-meta {
+.image-meta-compact {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
+  align-items: center;
+  gap: 10px;
 }
 
-.meta-item {
-  display: flex;
+.meta-chip {
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 14px;
+  gap: 4px;
+  padding: 4px 10px;
+  background: var(--bg-primary);
+  border-radius: 12px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
-.meta-item .el-icon {
-  font-size: 16px;
+.meta-chip .el-icon {
+  font-size: 14px;
+  opacity: 0.7;
 }
 
 .tags-display {

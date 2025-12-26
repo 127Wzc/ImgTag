@@ -35,6 +35,9 @@ dependencies = [
     
     # 认证
     "pyjwt>=2.8.0",
+    
+    # S3 存储
+    "boto3>=1.34.0",
 ]
 
 [project.optional-dependencies]

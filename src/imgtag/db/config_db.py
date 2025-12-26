@@ -57,6 +57,17 @@ class ConfigDB:
         
         # 上传配置
         "max_upload_size": "10",  # 最大上传文件大小 (MB)
+        
+        # S3 存储配置（管理员备份用）
+        "s3_enabled": "false",
+        "s3_endpoint_url": "",  # S3 兼容端点 (MinIO/R2 等)
+        "s3_access_key_id": "",
+        "s3_secret_access_key": "",  # is_secret=True
+        "s3_bucket_name": "",
+        "s3_region": "us-east-1",
+        "s3_public_url_prefix": "",  # 公开访问前缀
+        "s3_path_prefix": "imgtag/",  # 对象键前缀
+        "image_url_priority": "auto",  # auto / local / cdn - 图片URL优先级
     }
     
     def __new__(cls):

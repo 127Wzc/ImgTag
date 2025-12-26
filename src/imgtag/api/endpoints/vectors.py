@@ -404,6 +404,13 @@ async def rebuild_vectors_task():
         
         for image_id, description, tags in images:
             try:
+                # 如果没有描述和 level=2 标签，跳过向量生成
+                if not description and not tags:
+                    logger.info(f"跳过图片 {image_id}: 无描述和标签，不生成向量")
+                    rebuild_status["processed"] += 1
+                    rebuild_status["message"] = f"已处理 {rebuild_status['processed']}/{rebuild_status['total']}"
+                    continue
+                
                 # 生成新的向量
                 embedding = await embedding_service.get_embedding_combined(
                     description or "",

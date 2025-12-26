@@ -75,10 +75,13 @@ export const analyzeImageByUrl = (imageUrl, autoAnalyze = true) => {
 }
 
 // 上传并分析图像
-export const uploadAndAnalyze = (file, autoAnalyze = true) => {
+export const uploadAndAnalyze = (file, autoAnalyze = true, categoryId = null) => {
     const formData = new FormData()
     formData.append('file', file)
     formData.append('auto_analyze', autoAnalyze)
+    if (categoryId) {
+        formData.append('category_id', categoryId)
+    }
 
     return api.post('/images/upload', formData, {
         headers: {
@@ -272,10 +275,13 @@ export const setQueueWorkers = (maxWorkers) => {
 }
 
 // 批量上传（跳过分析）
-export const uploadOnly = (file) => {
+export const uploadOnly = (file, categoryId = null) => {
     const formData = new FormData()
     formData.append('file', file)
     formData.append('skip_analyze', true)
+    if (categoryId) {
+        formData.append('category_id', categoryId)
+    }
 
     return api.post('/images/upload', formData, {
         headers: {
@@ -285,9 +291,12 @@ export const uploadOnly = (file) => {
 }
 
 // 上传 ZIP 文件
-export const uploadZip = (file) => {
+export const uploadZip = (file, categoryId = null) => {
     const formData = new FormData()
     formData.append('file', file)
+    if (categoryId) {
+        formData.append('category_id', categoryId)
+    }
 
     return api.post('/images/upload-zip', formData, {
         headers: {
@@ -385,6 +394,33 @@ export const getTasks = (params = {}) => {
 
 export const cleanupTasks = (days = 7) => {
     return api.post('/tasks/cleanup', null, { params: { days } })
+}
+
+// ============ 存储管理 API ============
+
+// 获取存储状态
+export const getStorageStatus = () => {
+    return api.get('/storage/status')
+}
+
+// 获取存储文件列表
+export const getStorageFiles = (params = {}) => {
+    return api.get('/storage/files', { params })
+}
+
+// 测试 S3 连接
+export const testS3Connection = () => {
+    return api.post('/storage/test-connection')
+}
+
+// 同步到 S3
+export const syncToS3 = (imageIds = null) => {
+    return api.post('/storage/sync-to-s3', { image_ids: imageIds })
+}
+
+// 同步到本地
+export const syncToLocal = (imageIds = null) => {
+    return api.post('/storage/sync-to-local', { image_ids: imageIds })
 }
 
 // ============ 认证 API ============

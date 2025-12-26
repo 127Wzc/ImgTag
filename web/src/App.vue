@@ -249,6 +249,7 @@ const menuItems = computed(() => {
       { divider: true, label: '管理功能' },
       { path: '/settings', label: '系统设置', icon: 'Setting' },
       { path: '/tags', label: '标签管理', icon: 'CollectionTag' },
+      { path: '/storage', label: '存储管理', icon: 'Box' },
       { path: '/approvals', label: '审批管理', icon: 'Check' },
     )
   }

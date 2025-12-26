@@ -761,7 +761,8 @@ class PGVectorDB:
         height: int = None,
         storage_type: str = "local",
         s3_path: str = None,
-        local_exists: bool = True
+        local_exists: bool = True,
+        category_id: int = None
     ) -> Optional[int]:
         """插入一条图像记录
         
@@ -772,6 +773,7 @@ class PGVectorDB:
             storage_type: 存储类型 local/s3
             s3_path: S3 完整存储路径
             local_exists: 本地文件是否存在
+            category_id: 用户指定的 level=0 分类标签 ID
         """
         start_time = time.time()
         logger.debug(f"插入图像记录: {image_url}")
@@ -812,8 +814,8 @@ class PGVectorDB:
             if tags and len(tags) > 0:
                 self.set_image_tags(new_id, tags, source=tag_source)
             
-            # 自动分配系统标签（level 0 待分类 + level 1 分辨率）
-            self.auto_assign_system_tags(new_id, width, height)
+            # 自动分配系统标签（level 0 分类 + level 1 分辨率）
+            self.auto_assign_system_tags(new_id, width, height, category_id=category_id)
             
             process_time = time.time() - start_time
             logger.info(f"插入成功，ID: {new_id}, 耗时: {process_time:.4f}秒")
@@ -1089,7 +1091,8 @@ class PGVectorDB:
             )
             SELECT i.id, i.image_url, i.description, i.original_url,
                    (1 - (i.embedding <=> %s)) as vector_score,
-                   (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) as tag_score
+                   (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) as tag_score,
+                   i.s3_path, i.local_exists
             FROM images i
             LEFT JOIN tag_match tm ON i.id = tm.image_id
             WHERE i.embedding IS NOT NULL
@@ -1118,7 +1121,7 @@ class PGVectorDB:
                     cursor.execute(query, params)
                     results = cursor.fetchall()
                     
-                    # 批量获取标签
+                    # 批量获取标签（只取 level=2 的普通标签）
                     image_ids = [row[0] for row in results]
                     tags_map = {}
                     if image_ids:
@@ -1126,7 +1129,7 @@ class PGVectorDB:
                         SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.sort_order ASC, it.added_at)
                         FROM image_tags it
                         JOIN tags t ON it.tag_id = t.id
-                        WHERE it.image_id = ANY(%s)
+                        WHERE it.image_id = ANY(%s) AND t.level = 2
                         GROUP BY it.image_id;
                         """, (image_ids,))
                         for row in cursor.fetchall():
@@ -1134,13 +1137,15 @@ class PGVectorDB:
             
             images = []
             for row in results:
+                # row: id, image_url, description, original_url, vector_score, tag_score, s3_path, local_exists
                 vector_score = float(row[4])
                 tag_score = float(row[5])
                 final_score = vector_score * vector_weight + tag_score * tag_weight
+                display_url = self.get_display_url(row[1], row[6], row[7] if row[7] is not None else True)
                 
                 images.append({
                     "id": row[0],
-                    "image_url": row[1],
+                    "image_url": display_url,
                     "tags": tags_map.get(row[0], []),
                     "description": row[2],
                     "original_url": row[3],
@@ -1308,7 +1313,7 @@ class PGVectorDB:
             
             # 获取图片列表
             query = f"""
-            SELECT i.id, i.image_url, i.description, i.original_url
+            SELECT i.id, i.image_url, i.description, i.original_url, i.s3_path, i.local_exists
             FROM images i
             WHERE {where_clause}
             ORDER BY {sort_field} {sort_order}
@@ -1322,7 +1327,7 @@ class PGVectorDB:
                     cursor.execute(query, query_params)
                     results = cursor.fetchall()
                     
-                    # 批量获取标签
+                    # 批量获取标签（只取 level=2 的普通标签）
                     image_ids = [row[0] for row in results]
                     tags_map = {}
                     if image_ids:
@@ -1330,7 +1335,7 @@ class PGVectorDB:
                         SELECT it.image_id, ARRAY_AGG(t.name ORDER BY it.sort_order ASC, it.added_at)
                         FROM image_tags it
                         JOIN tags t ON it.tag_id = t.id
-                        WHERE it.image_id = ANY(%s)
+                        WHERE it.image_id = ANY(%s) AND t.level = 2
                         GROUP BY it.image_id;
                         """, (image_ids,))
                         for row in cursor.fetchall():
@@ -1338,9 +1343,11 @@ class PGVectorDB:
             
             images = []
             for row in results:
+                # row: id, image_url, description, original_url, s3_path, local_exists
+                display_url = self.get_display_url(row[1], row[4], row[5] if row[5] is not None else True)
                 images.append({
                     "id": row[0],
-                    "image_url": row[1],
+                    "image_url": display_url,
                     "tags": tags_map.get(row[0], []),
                     "description": row[2],
                     "original_url": row[3]
@@ -1647,19 +1654,19 @@ class PGVectorDB:
             logger.error(f"同步用户标签失败: {str(e)}")
     
     def get_image_tags_with_source(self, image_id: int) -> List[Dict]:
-        """获取图片标签及来源信息"""
+        """获取图片标签及来源信息（含 level）"""
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                    SELECT t.name, it.source
+                    SELECT t.name, it.source, t.level
                     FROM image_tags it
                     JOIN tags t ON it.tag_id = t.id
                     WHERE it.image_id = %s
-                    ORDER BY CASE WHEN it.source = 'user' THEN 0 ELSE 1 END, t.name;
+                    ORDER BY t.level ASC, CASE WHEN it.source = 'user' THEN 0 ELSE 1 END, t.name;
                     """, (image_id,))
                     results = cursor.fetchall()
-            return [{"name": r[0], "source": r[1]} for r in results]
+            return [{"name": r[0], "source": r[1], "level": r[2]} for r in results]
         except Exception as e:
             logger.error(f"获取图片标签来源失败: {str(e)}")
             return []
@@ -1705,9 +1712,9 @@ class PGVectorDB:
         logger.info(f"获取图像 ID:{image_id}")
         
         try:
-            # 获取图片基本信息
+            # 获取图片基本信息（含 s3_path 和 local_exists）
             query = """
-            SELECT id, image_url, description, file_path, original_url, width, height, file_size
+            SELECT id, image_url, description, file_path, original_url, width, height, file_size, s3_path, local_exists
             FROM images
             WHERE id = %s;
             """
@@ -1730,9 +1737,13 @@ class PGVectorDB:
                     """, (image_id,))
                     tags = [row[0] for row in cursor.fetchall()]
             
+            # 应用 URL 优先级
+            # result: id, image_url, description, file_path, original_url, width, height, file_size, s3_path, local_exists
+            display_url = self.get_display_url(result[1], result[8], result[9] if result[9] is not None else True)
+            
             image = {
                 "id": result[0],
-                "image_url": result[1],
+                "image_url": display_url,
                 "tags": tags,  # 从关联表获取
                 "description": result[2],
                 "file_path": result[3],
@@ -3111,21 +3122,32 @@ class PGVectorDB:
         else:
             return "SD"
     
-    def auto_assign_system_tags(self, image_id: int, width: int = None, height: int = None):
-        """自动为图片分配系统标签（level 0 待分类 + level 1 分辨率）
+    def auto_assign_system_tags(self, image_id: int, width: int = None, height: int = None, category_id: int = None):
+        """自动为图片分配系统标签（level 0 分类 + level 1 分辨率）
         
-        - Level 0: 默认分配 "待分类" (ID=10)
+        - Level 0: 用户指定 category_id，否则默认 "待分类" (ID=10)
         - Level 1: 根据分辨率自动计算
         """
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
-                    # 1. 分配 level 0 "待分类" 标签 (ID=10)
+                    # 1. 分配 level 0 分类标签
+                    # 使用用户指定的 category_id，否则用默认 ID=10 (待分类)
+                    final_category_id = category_id if category_id else 10
+                    
+                    # 验证 category_id 是否为有效的 level=0 标签
+                    if category_id:
+                        cursor.execute("SELECT level FROM tags WHERE id = %s", (category_id,))
+                        result = cursor.fetchone()
+                        if not result or result[0] != 0:
+                            logger.warning(f"无效的分类 ID {category_id}，使用默认值 10")
+                            final_category_id = 10
+                    
                     cursor.execute("""
                     INSERT INTO image_tags (image_id, tag_id, source)
-                    VALUES (%s, 10, 'system')
+                    VALUES (%s, %s, 'system')
                     ON CONFLICT (image_id, tag_id) DO NOTHING;
-                    """, (image_id,))
+                    """, (image_id, final_category_id))
                     
                     # 2. 根据分辨率分配 level 1 标签
                     if width and height:
@@ -3144,7 +3166,7 @@ class PGVectorDB:
                             logger.debug(f"图片 {image_id} 自动分配分辨率标签: {resolution_level}")
                 
                 conn.commit()
-                logger.debug(f"图片 {image_id} 自动分配系统标签完成")
+                logger.debug(f"图片 {image_id} 自动分配系统标签完成 (category_id={final_category_id})")
         except Exception as e:
             logger.error(f"自动分配系统标签失败: {str(e)}")
     
@@ -3207,6 +3229,245 @@ class PGVectorDB:
         except Exception as e:
             logger.error(f"设置图片分类失败: {str(e)}")
             return False
+    
+    # ==================== URL 优先级方法 ====================
+    
+    def get_display_url(self, image_url: str, s3_path: str, local_exists: bool) -> str:
+        """
+        获取显示 URL（优先级可配置：auto / local / cdn）
+        
+        Args:
+            image_url: 本地 URL
+            s3_path: S3 对象键
+            local_exists: 本地文件是否存在
+            
+        Returns:
+            str: 最终显示 URL
+        """
+        from imgtag.db.config_db import config_db
+        
+        priority = config_db.get("image_url_priority", "auto")
+        s3_enabled = config_db.get("s3_enabled", "false").lower() == "true"
+        
+        # 自动模式：根据 S3 启用状态决定
+        if priority == "auto":
+            priority = "cdn" if (s3_enabled and s3_path) else "local"
+        
+        # 构建 CDN/S3 URL
+        def build_cdn_url():
+            if not s3_path:
+                return None
+            public_prefix = config_db.get("s3_public_url_prefix", "").rstrip("/")
+            if public_prefix:
+                return f"{public_prefix}/{s3_path}"
+            # 无自定义前缀时，构建默认 S3 URL
+            endpoint = config_db.get("s3_endpoint_url", "").rstrip("/")
+            bucket = config_db.get("s3_bucket_name", "")
+            if endpoint and bucket:
+                return f"{endpoint}/{bucket}/{s3_path}"
+            return None
+        
+        if priority == "cdn":
+            # CDN 优先：有 S3 路径就用 CDN URL
+            cdn_url = build_cdn_url()
+            if cdn_url:
+                return cdn_url
+            # 降级到本地
+            return image_url or ""
+        else:
+            # 本地优先
+            if local_exists and image_url:
+                return image_url
+            # 本地不存在，尝试 CDN
+            cdn_url = build_cdn_url()
+            if cdn_url:
+                return cdn_url
+            return image_url or ""
+    
+    # ==================== 存储管理方法 ====================
+    
+    def get_storage_status(self) -> Dict[str, Any]:
+        """
+        获取存储状态统计
+        
+        Returns:
+            dict: {total, local_only, s3_only, both, pending_sync}
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                    SELECT 
+                        COUNT(*) as total,
+                        COUNT(*) FILTER (WHERE local_exists = true AND (s3_path IS NULL OR s3_path = '')) as local_only,
+                        COUNT(*) FILTER (WHERE local_exists = false AND s3_path IS NOT NULL AND s3_path != '') as s3_only,
+                        COUNT(*) FILTER (WHERE local_exists = true AND s3_path IS NOT NULL AND s3_path != '') as both
+                    FROM images;
+                    """)
+                    row = cursor.fetchone()
+                    return {
+                        "total": row[0],
+                        "local_only": row[1],
+                        "s3_only": row[2],
+                        "both": row[3],
+                        "pending_sync": row[1]  # 待同步 = 仅本地
+                    }
+        except Exception as e:
+            logger.error(f"获取存储状态失败: {str(e)}")
+            return {"total": 0, "local_only": 0, "s3_only": 0, "both": 0, "pending_sync": 0}
+    
+    def get_storage_files(
+        self,
+        filter_type: str = "all",
+        limit: int = 20,
+        offset: int = 0
+    ) -> Dict[str, Any]:
+        """
+        获取文件存储状态列表
+        
+        Args:
+            filter_type: all/local_only/s3_only/both
+            limit: 每页数量
+            offset: 偏移量
+            
+        Returns:
+            dict: {files, total, limit, offset}
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 构建过滤条件
+                    filter_conditions = {
+                        "all": "1=1",
+                        "local_only": "local_exists = true AND (s3_path IS NULL OR s3_path = '')",
+                        "s3_only": "local_exists = false AND s3_path IS NOT NULL AND s3_path != ''",
+                        "both": "local_exists = true AND s3_path IS NOT NULL AND s3_path != ''"
+                    }
+                    condition = filter_conditions.get(filter_type, "1=1")
+                    
+                    # 获取总数
+                    cursor.execute(f"SELECT COUNT(*) FROM images WHERE {condition}")
+                    total = cursor.fetchone()[0]
+                    
+                    # 获取文件列表
+                    cursor.execute(f"""
+                    SELECT id, image_url, s3_path, local_exists, storage_type, created_at
+                    FROM images
+                    WHERE {condition}
+                    ORDER BY id DESC
+                    LIMIT %s OFFSET %s;
+                    """, (limit, offset))
+                    
+                    files = []
+                    for row in cursor.fetchall():
+                        # 从 image_url 提取文件名
+                        image_url = row[1] or ""
+                        filename = image_url.split("/")[-1] if image_url else ""
+                        
+                        files.append({
+                            "id": row[0],
+                            "filename": filename,
+                            "image_url": row[1],
+                            "s3_path": row[2],
+                            "local_exists": row[3],
+                            "storage_type": row[4],
+                            "created_at": row[5].isoformat() if row[5] else None
+                        })
+                    
+                    return {
+                        "files": files,
+                        "total": total,
+                        "limit": limit,
+                        "offset": offset
+                    }
+        except Exception as e:
+            logger.error(f"获取存储文件列表失败: {str(e)}")
+            return {"files": [], "total": 0, "limit": limit, "offset": offset}
+    
+    def update_storage_info(
+        self,
+        image_id: int,
+        s3_path: str = None,
+        local_exists: bool = None,
+        storage_type: str = None
+    ) -> bool:
+        """
+        更新图片存储信息
+        
+        Args:
+            image_id: 图片 ID
+            s3_path: S3 对象键
+            local_exists: 本地文件是否存在
+            storage_type: 存储类型 (local/s3/both)
+            
+        Returns:
+            bool: 是否成功
+        """
+        try:
+            updates = []
+            params = []
+            
+            if s3_path is not None:
+                updates.append("s3_path = %s")
+                params.append(s3_path)
+            if local_exists is not None:
+                updates.append("local_exists = %s")
+                params.append(local_exists)
+            if storage_type is not None:
+                updates.append("storage_type = %s")
+                params.append(storage_type)
+            
+            if not updates:
+                return True
+            
+            params.append(image_id)
+            
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(f"""
+                    UPDATE images
+                    SET {", ".join(updates)}
+                    WHERE id = %s;
+                    """, params)
+                conn.commit()
+                logger.debug(f"图片 {image_id} 存储信息已更新")
+                return True
+        except Exception as e:
+            logger.error(f"更新存储信息失败: {str(e)}")
+            return False
+    
+    def get_local_file_path(self, image_id: int) -> Optional[str]:
+        """
+        获取图片的本地文件路径
+        
+        Args:
+            image_id: 图片 ID
+            
+        Returns:
+            str: 本地文件完整路径，不存在返回 None
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                    SELECT image_url, local_exists
+                    FROM images WHERE id = %s;
+                    """, (image_id,))
+                    row = cursor.fetchone()
+                    
+                    if not row or not row[1]:  # local_exists is False
+                        return None
+                    
+                    image_url = row[0]
+                    # 从 URL 提取相对路径并拼接本地 uploads 目录
+                    if "/uploads/" in image_url:
+                        relative_path = image_url.split("/uploads/")[-1]
+                        from imgtag.core.config import settings
+                        return str(settings.get_upload_path() / relative_path)
+                    return None
+        except Exception as e:
+            logger.error(f"获取本地文件路径失败: {str(e)}")
+            return None
 
     @classmethod
     def close_pool(cls):

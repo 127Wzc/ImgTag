@@ -62,6 +62,12 @@ const routes = [
         name: 'UserCenter',
         component: () => import('@/views/UserCenter.vue'),
         meta: { requiresAuth: true }  // 需要登录
+    },
+    {
+        path: '/storage',
+        name: 'Storage',
+        component: () => import('@/views/StorageManagement.vue'),
+        meta: { requiresAdmin: true }  // 需要管理员
     }
 ]
 
