@@ -317,7 +317,7 @@ async function fetchS3Stats() {
   }
 }
 
-async function syncToS3(limit: number = 10) {
+async function syncToS3() {
   s3Syncing.value = true
   try {
     const { data } = await apiClient.post('/storage/sync-to-s3', {})
@@ -553,7 +553,7 @@ onMounted(() => fetchConfigs())
                     </div>
                     <Button 
                       size="sm"
-                      @click="syncToS3(10)"
+                      @click="syncToS3()"
                       :disabled="s3Syncing"
                     >
                       <Loader2 v-if="s3Syncing" class="w-4 h-4 mr-1 animate-spin" />

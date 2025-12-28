@@ -1,12 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { 
-  CheckSquare, 
   Check, 
   X, 
-  Image,
   Loader2,
   RefreshCw,
   Inbox

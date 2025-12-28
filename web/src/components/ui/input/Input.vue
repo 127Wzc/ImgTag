@@ -21,10 +21,10 @@ const emits = defineEmits<{
 
 const modelValue = computed({
   get() {
-    return props.modelValue
+    return props.modelValue ?? props.defaultValue ?? ''
   },
   set(value) {
-    emits('update:modelValue', value)
+    emits('update:modelValue', value ?? '')
   },
 })
 </script>

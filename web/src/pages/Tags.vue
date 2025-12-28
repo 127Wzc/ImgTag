@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useTagStats, useCreateTag, useRenameTag, useDeleteTag, useUpdateTagCounts } from '@/api/queries'
-import { useQuery, useQueryClient } from '@tanstack/vue-query'
+import { useQuery } from '@tanstack/vue-query'
 import apiClient from '@/api/client'
 import type { Tag } from '@/types'
 import { Button } from '@/components/ui/button'
