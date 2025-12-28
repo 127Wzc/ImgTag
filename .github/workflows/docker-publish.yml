@@ -23,6 +23,7 @@ jobs:
     strategy:
       matrix:
         include:
+          # ========== 全栈版（前端+后端）==========
           # 精简版：仅支持在线 API 模式（推荐大部分用户使用）
           - target: slim
             suffix: ""
@@ -30,6 +31,16 @@ jobs:
           # 完整版：支持本地 ONNX 嵌入模型
           - target: full
             suffix: "-local"
+            platforms: linux/amd64,linux/arm64
+          
+          # ========== 纯后端版（无前端，用于 CDN 部署场景）==========
+          # 纯后端精简版
+          - target: slim-backend
+            suffix: "-backend"
+            platforms: linux/amd64,linux/arm64
+          # 纯后端完整版
+          - target: full-backend
+            suffix: "-backend-local"
             platforms: linux/amd64,linux/arm64
     
     steps:
@@ -63,7 +74,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
+          file: ./docker/Dockerfile
           target: ${{ matrix.target }}
           push: true
           platforms: ${{ matrix.platforms }}

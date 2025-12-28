@@ -6,9 +6,13 @@ import type { AxiosInstance, InternalAxiosRequestConfig, AxiosResponse } from 'a
  * - 自动注入 JWT Token
  * - 处理 401 跳转登录
  * - 统一错误处理
+ * 
+ * VITE_API_BASE_URL: 只需配置域名，如 https://api.example.com
  */
+const API_PREFIX = '/api/v1'
+const baseUrl = import.meta.env.VITE_API_BASE_URL
 const apiClient: AxiosInstance = axios.create({
-    baseURL: '/api/v1',
+    baseURL: baseUrl ? `${baseUrl.replace(/\/$/, '')}${API_PREFIX}` : API_PREFIX,
     timeout: 30000,
     headers: {
         'Content-Type': 'application/json',

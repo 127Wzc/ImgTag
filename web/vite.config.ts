@@ -18,11 +18,11 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'https://imag-tag.559558.xyz',
         changeOrigin: true,
       },
       '/uploads': {
-        target: 'http://localhost:8000',
+        target: 'https://imag-tag.559558.xyz',
         changeOrigin: true,
       }
     }

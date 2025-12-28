@@ -1,0 +1,23 @@
+# Docker Compose 配置示例
+# 需要已有 PostgreSQL 数据库（启用 pgvector 扩展）
+#
+# 使用方式：
+# curl -O https://raw.githubusercontent.com/127Wzc/ImgTag/main/docker/docker-compose.yml
+# 然后编辑 environment 中的数据库连接，执行 docker-compose up -d
+
+services:
+  imgtag:
+    image: 127wzc/imgtag:latest
+    container_name: imgtag
+    ports:
+      # 全栈版统一端口（前端 + 后端 API）
+      - "5173:8000"
+    environment:
+      # 必填：PostgreSQL 连接字符串
+      - PG_CONNECTION_STRING=postgresql://user:password@host:5432/imgtag
+      # 可选：服务基础地址（用于生成图片链接等）
+      - BASE_URL=http://localhost:5173
+    volumes:
+      # 图片存储目录
+      - ./uploads:/app/uploads
+    restart: unless-stopped
