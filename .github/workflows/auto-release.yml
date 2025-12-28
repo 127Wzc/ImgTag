@@ -120,3 +120,12 @@ jobs:
           prerelease: ${{ contains(needs.check-version.outputs.version, 'alpha') || contains(needs.check-version.outputs.version, 'beta') || contains(needs.check-version.outputs.version, 'rc') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 触发 Docker 构建
+  trigger-docker-build:
+    needs: [check-version, create-release]
+    if: needs.check-version.outputs.version_changed == 'true'
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      version: ${{ needs.check-version.outputs.version }}
+    secrets: inherit
