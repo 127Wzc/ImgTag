@@ -9,8 +9,16 @@
 import os
 from pathlib import Path
 from typing import Optional
+from importlib.metadata import version, PackageNotFoundError
+
 from pydantic_settings import BaseSettings
 from pydantic import Field
+
+# 从 pyproject.toml 读取版本号
+try:
+    _version = version("imgtag")
+except PackageNotFoundError:
+    _version = "0.0.5"
 
 
 class Settings(BaseSettings):
@@ -20,7 +28,7 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "ImgTag API"
     PROJECT_DESCRIPTION: str = "图像标签与向量搜索系统 - 支持OpenAI标准视觉模型"
-    PROJECT_VERSION: str = "2.0.0"
+    PROJECT_VERSION: str = _version
     
     # 数据库配置
     PG_CONNECTION_STRING: str = Field(
