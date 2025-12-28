@@ -24,6 +24,7 @@ from imgtag.core.logging_config import get_logger
 from imgtag.db.database import close_db, async_session_maker
 from imgtag.db.repositories import task_repository, config_repository
 from imgtag.services.task_queue import task_queue, AnalysisTask
+from imgtag.services.auth_service import init_default_admin
 
 logger = get_logger(__name__)
 
@@ -31,10 +32,62 @@ logger = get_logger(__name__)
 STATIC_DIR = os.getenv("STATIC_DIR", None)
 
 
+def run_migrations_sync():
+    """同步运行数据库迁移（使用子进程避免事件循环冲突）"""
+    import subprocess
+    import sys
+    
+    # 获取项目根目录
+    current_file = Path(__file__)
+    project_root = current_file.parent.parent.parent
+    alembic_ini = project_root / "alembic.ini"
+    
+    if not alembic_ini.exists():
+        logger.warning(f"未找到 alembic.ini: {alembic_ini}，跳过自动迁移")
+        return False
+    
+    try:
+        logger.info("检查并运行数据库迁移...")
+        
+        # 使用子进程调用 alembic，避免在同一进程中产生事件循环冲突
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=120  # 2分钟超时
+        )
+        
+        if result.returncode == 0:
+            logger.info("数据库迁移完成")
+            if result.stdout:
+                for line in result.stdout.strip().split('\n'):
+                    if line.strip():
+                        logger.info(f"  {line}")
+            return True
+        else:
+            logger.error(f"数据库迁移失败: {result.stderr}")
+            return False
+    except subprocess.TimeoutExpired:
+        logger.error("数据库迁移超时")
+        return False
+    except Exception as e:
+        logger.error(f"数据库迁移失败: {e}")
+        return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     logger.info("应用启动，初始化资源")
+    
+    # 自动运行数据库迁移（在线程池中同步执行）
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, run_migrations_sync)
+    except Exception as e:
+        logger.error(f"数据库迁移执行失败: {e}")
+    
     
     # 确保上传目录存在
     upload_path = settings.get_upload_path()
@@ -54,6 +107,14 @@ async def lifespan(app: FastAPI):
         await config_cache.preload()
     except Exception as e:
         logger.warning(f"初始化默认配置失败: {e}")
+    
+    # 确保默认管理员用户存在
+    try:
+        async with async_session_maker() as session:
+            await init_default_admin(session)
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"初始化默认管理员失败: {e}")
     
     # 恢复未完成的任务
     try:
