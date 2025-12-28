@@ -26,6 +26,7 @@ class ImageCreateByUrl(BaseModel):
     auto_analyze: bool = Field(default=True, description="是否自动分析图像")
     tags: Optional[List[str]] = Field(default=None, description="手动指定的标签")
     description: Optional[str] = Field(default=None, description="手动指定的描述")
+    category_id: Optional[int] = Field(default=None, description="主分类ID (level=0)")
 
 
 class ImageCreateManual(BaseModel):

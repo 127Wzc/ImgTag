@@ -4,11 +4,12 @@
  * 全屏查看图片，支持编辑标签和描述（统一保存）
  */
 import { computed, onMounted, onUnmounted, ref, watch, nextTick } from 'vue'
-import { X, ChevronLeft, ChevronRight, Info, Ruler, HardDrive, Hash, Plus, Pencil, Loader2, Save } from 'lucide-vue-next'
+import { X, ChevronLeft, ChevronRight, Info, Ruler, HardDrive, Hash, Plus, Pencil, Loader2, Save, Link } from 'lucide-vue-next'
 import { useUpdateImage, useTags, useCategories, useResolveTag } from '@/api/queries'
 import { useUserStore } from '@/stores'
 import { toast } from 'vue-sonner'
 import { getErrorMessage } from '@/utils/api-error'
+import CopyToast from '@/components/ui/CopyToast.vue'
 
 // 图片信息接口
 export interface ImageInfo {
@@ -48,11 +49,26 @@ const showUnsavedConfirm = ref(false)
 
 // 用户权限
 const userStore = useUserStore()
+const isLoggedIn = computed(() => !!userStore.user)
 const canEdit = computed(() => {
   if (!props.image) return false
   if (userStore.isAdmin) return true
   return props.image.uploaded_by === userStore.user?.id
 })
+
+// 复制成功提示
+const showCopied = ref(false)
+
+// 复制图片地址
+async function copyImageUrl() {
+  if (!props.image?.image_url) return
+  try {
+    await navigator.clipboard.writeText(props.image.image_url)
+    showCopied.value = true
+  } catch {
+    toast.error('复制失败')
+  }
+}
 
 // API
 const updateMutation = useUpdateImage()
@@ -469,6 +485,15 @@ onUnmounted(() => {
                   <HardDrive class="w-3.5 h-3.5 text-white/50" />
                   {{ formatFileSize(image.file_size) }}
                 </span>
+                <!-- 复制地址按钮 -->
+                <button 
+                  @click="copyImageUrl"
+                  class="flex items-center gap-1.5 px-2 py-1 bg-white/10 hover:bg-white/20 rounded-lg transition-colors cursor-pointer"
+                  title="复制图片地址"
+                >
+                  <Link class="w-3.5 h-3.5 text-white/50" />
+                  复制地址
+                </button>
               </div>
 
               <!-- 主分类（下拉选择） -->
@@ -508,7 +533,7 @@ onUnmounted(() => {
                 <div class="flex items-center gap-2 text-xs text-white/60">
                   <span>标签</span>
                   <span v-if="canEdit" class="text-white/40">(可增删)</span>
-                  <span v-else class="text-amber-400/80">只读</span>
+                  <span v-else-if="isLoggedIn" class="text-amber-400/80">只读</span>
                 </div>
                 <div class="flex flex-wrap gap-2">
                   <button 
@@ -561,7 +586,7 @@ onUnmounted(() => {
                   <Pencil class="w-3 h-3" />
                   <span>描述</span>
                   <span v-if="canEdit" class="text-white/40">(可编辑)</span>
-                  <span v-else class="text-amber-400/80">只读</span>
+                  <span v-else-if="isLoggedIn" class="text-amber-400/80">只读</span>
                 </div>
 
                 <div v-if="isEditingDescription" class="space-y-2">
@@ -619,6 +644,9 @@ onUnmounted(() => {
         </Transition>
       </div>
     </Transition>
+
+    <!-- 复制成功提示 -->
+    <CopyToast v-model:show="showCopied" />
   </Teleport>
 </template>
 

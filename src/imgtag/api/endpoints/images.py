@@ -48,6 +48,8 @@ from imgtag.schemas import (
 )
 from imgtag.services import embedding_service, upload_service
 from imgtag.services.task_queue import task_queue
+from imgtag.core.config_cache import config_cache
+from imgtag.services.s3_service import s3_service
 
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
@@ -72,15 +74,15 @@ router = APIRouter()
 async def _get_display_url(image: Image) -> str:
     """根据 image_url_priority 配置返回正确的显示 URL。
     
+    对于本地相对路径，会自动拼接系统基础 URL（base_url）。
+    对于完整 URL（http/https 开头），保持不变。
+    
     Args:
         image: Image model instance.
         
     Returns:
         str: 应该显示的图片 URL。
     """
-    from imgtag.core.config_cache import config_cache
-    from imgtag.services.s3_service import s3_service
-    
     priority = await config_cache.get("image_url_priority", "auto")
     
     # 如果配置为 S3 优先 且有 S3 路径
@@ -91,8 +93,22 @@ async def _get_display_url(image: Image) -> str:
     if priority == "auto" and image.s3_path and await s3_service.is_enabled():
         return await s3_service.get_public_url(image.s3_path)
     
-    # 默认返回本地 URL
-    return image.image_url or ""
+    # 返回本地 URL，如果是相对路径则拼接 base_url
+    local_url = image.image_url or ""
+    
+    # 如果已经是完整 URL，直接返回
+    if local_url.startswith("http://") or local_url.startswith("https://"):
+        return local_url
+    
+    # 如果是相对路径，拼接 base_url
+    if local_url.startswith("/"):
+        base_url = await config_cache.get("base_url", "")
+        if base_url:
+            # 确保 base_url 末尾没有斜杠
+            base_url = base_url.rstrip("/")
+            return f"{base_url}{local_url}"
+    
+    return local_url
 
 
 async def _image_to_response(
@@ -251,6 +267,17 @@ async def analyze_and_create_from_url(
                 new_image.id,
                 tags,
                 source="user",
+                added_by=user.get("id"),
+            )
+
+        # Set category if provided (与手动上传保持一致)
+        if request.category_id:
+            await image_tag_repository.add_tag_to_image(
+                session,
+                new_image.id,
+                request.category_id,
+                source="user",
+                sort_order=0,
                 added_by=user.get("id"),
             )
 

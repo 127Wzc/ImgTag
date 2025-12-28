@@ -134,6 +134,7 @@ export function useUploadZip() {
 export interface UrlUploadOptions {
     imageUrl: string
     autoAnalyze?: boolean
+    categoryId?: number
     tags?: string[]
     description?: string
 }
@@ -149,6 +150,7 @@ export function useUploadFromUrl() {
             const { data } = await apiClient.post<UploadAnalyzeResponse>('/images/analyze-url', {
                 image_url: options.imageUrl,
                 auto_analyze: options.autoAnalyze ?? true,
+                category_id: options.categoryId ?? null,
                 tags: options.tags ?? [],
                 description: options.description ?? '',
             })

@@ -192,6 +192,7 @@ async function uploadFromUrl() {
       await urlMutation.mutateAsync({
         imageUrl: urls[i],
         autoAnalyze: shouldAnalyze.value,
+        categoryId: selectedCategoryId.value ?? undefined,
       })
       urlResults.value[i].status = 'success'
     } catch (e: any) {

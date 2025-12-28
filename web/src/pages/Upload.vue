@@ -167,6 +167,7 @@ async function uploadFromUrl() {
     await urlMutation.mutateAsync({
       imageUrl: urlInput.value.trim(),
       autoAnalyze: shouldAnalyze.value,
+      categoryId: selectedCategoryId.value ?? undefined,
     })
     urlInput.value = ''
     alert('添加成功')

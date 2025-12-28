@@ -85,6 +85,9 @@ async def update_configs(
         if not success:
             raise HTTPException(status_code=500, detail="更新配置失败")
         
+        # 必须先 commit，确保数据真正写入数据库后再刷新缓存
+        await session.commit()
+        
         # 清除配置缓存并重新加载，确保新配置立即生效
         config_cache.clear()
         await config_cache.preload()

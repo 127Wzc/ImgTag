@@ -1,5 +1,8 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import type { ImageResponse, ImageWithSimilarity } from '@/types'
+import { Copy } from 'lucide-vue-next'
+import CopyToast from '@/components/ui/CopyToast.vue'
 
 type ImageItem = ImageResponse | ImageWithSimilarity
 
@@ -23,6 +26,9 @@ const emit = defineEmits<{
   toggleSelect: [id: number]
 }>()
 
+// 复制成功提示
+const showCopied = ref(false)
+
 function handleClick(image: ImageItem, index: number) {
   if (props.selectMode) {
     emit('toggleSelect', image.id)
@@ -34,6 +40,17 @@ function handleClick(image: ImageItem, index: number) {
 function getImageUrl(url: string): string {
   if (url.startsWith('http')) return url
   return url
+}
+
+// 复制图片地址
+async function copyImageUrl(event: Event, url: string) {
+  event.stopPropagation()
+  try {
+    await navigator.clipboard.writeText(url)
+    showCopied.value = true
+  } catch {
+    // 静默失败
+  }
 }
 
 // 根据图片分辨率计算合适的显示样式
@@ -130,9 +147,18 @@ function getSimilarityColor(sim: number): string {
       <!-- Hover 遮罩 -->
       <div 
         v-if="!selectMode"
-        class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl flex items-end p-3"
+        class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl"
       >
-        <div class="w-full">
+        <!-- 复制按钮（右下角）- 悬浮时放大变色 -->
+        <button
+          class="absolute bottom-3 right-3 p-1.5 bg-black/60 hover:bg-primary hover:scale-110 rounded-lg transition-all z-10"
+          title="复制图片地址"
+          @click="copyImageUrl($event, image.image_url)"
+        >
+          <Copy class="w-4 h-4 text-white" />
+        </button>
+        <!-- 底部信息（右侧留出复制按钮空间） -->
+        <div class="absolute inset-x-0 bottom-0 p-3 pr-12">
           <p v-if="image.description" class="text-white text-sm font-medium truncate">
             {{ image.description }}
           </p>
@@ -148,5 +174,8 @@ function getSimilarityColor(sim: number): string {
         </div>
       </div>
     </div>
+
+    <!-- 复制成功提示 -->
+    <CopyToast v-model:show="showCopied" />
   </div>
 </template>

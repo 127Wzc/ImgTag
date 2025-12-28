@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
@@ -193,7 +194,7 @@ async def get_config():
 
 @router.get("/models")
 async def get_available_models():
-    """Get available model list.
+    """Get available model list from saved config.
 
     Returns:
         Available models from API.
@@ -207,9 +208,64 @@ async def get_available_models():
         if not api_base_url or not api_key:
             return {"models": [], "error": "未配置 API 地址或密钥"}
 
+        return await _fetch_models(api_base_url, api_key)
+
+    except httpx.TimeoutException:
+        return {"models": [], "error": "请求超时"}
+    except Exception as e:
+        logger.error(f"获取模型列表失败: {e}")
+        return {"models": [], "error": str(e)}
+
+class ModelsRequest(BaseModel):
+    """Request body for models endpoint."""
+    api_base_url: str | None = None
+    api_key: str | None = None
+
+
+@router.post("/models")
+async def get_models_with_config(request: ModelsRequest):
+    """Get available model list with custom config (for validation before save).
+    
+    Allows frontend to test API config without saving.
+    Proxies through backend to avoid CORS issues.
+
+    Args:
+        request: Request body with API config.
+
+    Returns:
+        Available models from API.
+    """
+    logger.info("获取可用模型列表 (临时配置)")
+
+    api_base_url = request.api_base_url
+    api_key = request.api_key
+
+    # Use provided values or fall back to saved config
+    if not api_base_url:
+        api_base_url = await config_cache.get("vision_api_base_url", settings.VISION_API_BASE_URL)
+    if not api_key or api_key == "******":
+        api_key = await config_cache.get("vision_api_key", "")
+
+    if not api_base_url or not api_key:
+        return {"models": [], "error": "未配置 API 地址或密钥"}
+
+    return await _fetch_models(api_base_url, api_key)
+
+
+async def _fetch_models(api_base_url: str, api_key: str) -> dict:
+    """Internal helper to fetch models from API.
+    
+    Args:
+        api_base_url: API base URL.
+        api_key: API key.
+        
+    Returns:
+        Dict with models list or error.
+    """
+    try:
         models_url = f"{api_base_url.rstrip('/')}/models"
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
             response = await client.get(
                 models_url, headers={"Authorization": f"Bearer {api_key}"}
             )

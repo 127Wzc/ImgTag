@@ -116,11 +116,26 @@ const modelsError = ref('')
 async function fetchModels() {
   modelsLoading.value = true
   modelsError.value = ''
+  
+  // 使用表单中的值验证，通过后端代理请求避免 CORS 问题
+  const apiBaseUrl = configs.value['vision_api_base_url']
+  const apiKey = configs.value['vision_api_key']
+  
+  if (!apiBaseUrl || !apiKey || apiKey === '******') {
+    modelsError.value = '未配置 API 地址或密钥'
+    modelsLoading.value = false
+    return
+  }
+  
   try {
-    const { data } = await apiClient.get('/system/models')
+    // 通过后端代理请求，传入临时配置 (JSON body)
+    const { data } = await apiClient.post('/system/models', {
+      api_base_url: apiBaseUrl,
+      api_key: apiKey
+    })
     availableModels.value = data.models || []
     if (data.error) modelsError.value = data.error
-  } catch {
+  } catch (e: any) {
     modelsError.value = '获取模型列表失败'
   } finally {
     modelsLoading.value = false
