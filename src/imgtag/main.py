@@ -6,6 +6,7 @@ ImgTag 主程序入口点
 启动 FastAPI 应用，同时托管前端静态文件
 """
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -81,7 +82,6 @@ async def lifespan(app: FastAPI):
             logger.info(f"成功恢复 {restored} 个任务到队列")
             
             # 启动处理
-            import asyncio
             asyncio.create_task(task_queue.start_processing())
         else:
             logger.info("没有未完成的任务需要恢复")
@@ -114,6 +114,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ============= 全局异常处理器 =============
+from fastapi import HTTPException
+from fastapi.responses import JSONResponse
+from imgtag.core.exceptions import APIError
+
+@app.exception_handler(APIError)
+async def api_error_handler(request: Request, exc: APIError):
+    """Handle custom APIError with structured response."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.to_dict(),
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle FastAPI HTTPException with unified format (backward compatibility)."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "success": False,
+            "error": {
+                "code": f"HTTP_{exc.status_code}",
+                "message": exc.detail,
+            }
+        },
+    )
 
 # 注册 API 路由
 app.include_router(api_router, prefix=settings.API_V1_STR)

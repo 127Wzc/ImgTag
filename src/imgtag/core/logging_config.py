@@ -35,21 +35,17 @@ LOG_FILE = os.path.join(LOG_DIR, "api.log")
 # 性能日志文件
 PERF_LOG_FILE = os.path.join(LOG_DIR, "performance.log")
 
-# 缓存配置以避免循环导入
-_log_level = None
+# 不再缓存 log_level，每次都从 settings 读取
 _perf_enabled = True
 
 
 def _get_log_level():
-    """延迟获取日志级别"""
-    global _log_level
-    if _log_level is None:
-        try:
-            from imgtag.core.config import settings
-            _log_level = settings.LOG_LEVEL
-        except Exception:
-            _log_level = "INFO"
-    return _log_level
+    """获取日志级别（不缓存，始终从 settings 读取）"""
+    try:
+        from imgtag.core.config import settings
+        return settings.LOG_LEVEL
+    except Exception:
+        return "INFO"
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -63,12 +59,17 @@ def get_logger(name: str) -> logging.Logger:
     """
     logger = logging.getLogger(name)
     
-    # 设置日志级别
+    # 获取日志级别
     log_level = _get_log_level()
-    logger.setLevel(getattr(logging, log_level))
+    level = getattr(logging, log_level, logging.INFO)
     
-    # 如果已经有处理器，不再添加
+    # 始终更新日志级别
+    logger.setLevel(level)
+    
+    # 如果已经有处理器，更新它们的级别后返回
     if logger.handlers:
+        for handler in logger.handlers:
+            handler.setLevel(level)
         return logger
     
     # 控制台处理器

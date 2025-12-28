@@ -3,44 +3,267 @@
 
 """Tag API endpoints.
 
-Handles tag CRUD, categories, and resolutions.
+Unified tag CRUD with level-based permissions:
+- Level 0/1 (categories/resolutions): Admin only
+- Level 2 (normal tags): Authenticated users
 """
 
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from imgtag.api.endpoints.auth import require_admin
+from imgtag.api.endpoints.auth import require_admin, get_current_user
 from imgtag.core.logging_config import get_logger
 from imgtag.db import get_async_session
 from imgtag.db.repositories import tag_repository
-from imgtag.schemas import Tag, TagList, TagUpdate
+from imgtag.schemas import Tag, TagUpdate
 
 logger = get_logger(__name__)
 
 router = APIRouter()
 
 
+# ============= Read Operations (Public) =============
+
+
 @router.get("/", response_model=list[Tag])
 async def get_tags(
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int = Query(50, ge=1, le=200, description="每页数量，最大200"),
+    offset: int = Query(0, ge=0, description="偏移量"),
     sort_by: str = Query("usage_count", pattern="^(usage_count|name)$"),
-    level: int = Query(2, ge=0, le=2, description="标签级别: 0=分类, 1=分辨率, 2=普通标签"),
+    level: int | None = Query(None, ge=0, le=2, description="标签级别: 0=分类, 1=分辨率, 2=普通标签"),
+    keyword: str | None = Query(None, description="标签名模糊搜索"),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Get tag list for autocomplete.
+    """Get tag list with optional level filter and keyword search."""
+    return await tag_repository.get_all_sorted(
+        session, limit=limit, offset=offset, sort_by=sort_by, level=level, keyword=keyword
+    )
 
-    Args:
-        limit: Maximum tags to return.
-        sort_by: Sort field (usage_count or name).
-        level: Tag level filter (default: 2 for normal tags).
-        session: Database session.
 
-    Returns:
-        List of tags.
+@router.get("/stats", response_model=dict[str, Any])
+async def get_tag_stats(
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Get tag count statistics by level."""
+    return await tag_repository.get_stats(session)
+
+
+# ============= Create (Level-based permissions) =============
+
+
+@router.post("/", response_model=dict[str, Any])
+async def create_tag(
+    name: str,
+    level: int = Query(2, ge=0, le=2),
+    source: str = "user",
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Create a new tag.
+    
+    - Level 0/1: Admin only
+    - Level 2: Any authenticated user
     """
-    return await tag_repository.get_all_sorted(session, limit=limit, sort_by=sort_by, level=level)
+    # 权限检查
+    if level in (0, 1) and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可创建主分类和分辨率标签")
+
+    if not name or not name.strip():
+        raise HTTPException(status_code=400, detail="标签名不能为空")
+
+    name = name.strip()
+
+    if await tag_repository.exists(session, name):
+        raise HTTPException(status_code=409, detail=f"标签 '{name}' 已存在")
+
+    tag = await tag_repository.create(
+        session,
+        name=name,
+        level=level,
+        source=source,
+    )
+
+    return {
+        "message": f"标签 '{name}' 创建成功",
+        "id": tag.id,
+        "name": tag.name,
+        "level": tag.level,
+    }
+
+
+@router.post("/resolve", response_model=dict[str, Any])
+async def resolve_tag(
+    name: str = Query(..., min_length=1, max_length=50, description="标签名"),
+    level: int = Query(2, ge=0, le=2, description="标签级别"),
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Resolve tag: get existing or create new.
+    
+    Used by frontend when adding tags to images.
+    Returns tag info for caching, without modifying image associations.
+    
+    - Level 0/1: Must exist (only admin can create)
+    - Level 2: Auto-create if not exists
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="标签名不能为空")
+
+    # 先查询是否存在
+    existing = await tag_repository.get_by_name(session, name)
+    if existing:
+        return {
+            "id": existing.id,
+            "name": existing.name,
+            "level": existing.level,
+            "source": existing.source,
+            "is_new": False,
+        }
+
+    # 不存在时的处理
+    if level in (0, 1):
+        # Level 0/1 不能自动创建
+        raise HTTPException(
+            status_code=404, 
+            detail=f"{'主分类' if level == 0 else '分辨率'}标签 '{name}' 不存在"
+        )
+
+    # Level 2: 自动创建（处理并发情况）
+    try:
+        new_tag = await tag_repository.create(
+            session,
+            name=name,
+            level=2,
+            source="user",
+        )
+
+        return {
+            "id": new_tag.id,
+            "name": new_tag.name,
+            "level": new_tag.level,
+            "source": new_tag.source,
+            "is_new": True,
+        }
+    except IntegrityError:
+        # 并发情况下可能已被其他请求创建，重新查询
+        await session.rollback()
+        existing = await tag_repository.get_by_name(session, name)
+        if existing:
+            return {
+                "id": existing.id,
+                "name": existing.name,
+                "level": existing.level,
+                "source": existing.source,
+                "is_new": False,
+            }
+        raise HTTPException(status_code=500, detail="创建标签失败")
+
+
+# ============= Update (Level-based permissions) =============
+
+
+@router.put("/id/{tag_id}", response_model=dict[str, Any])
+async def rename_tag_by_id(
+    tag_id: int,
+    tag_update: TagUpdate,
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Rename tag by ID.
+    
+    - Level 0/1: Admin only
+    - Level 2: Any authenticated user
+    """
+    if not tag_update.name or not tag_update.name.strip():
+        raise HTTPException(status_code=400, detail="新标签名不能为空")
+
+    new_name = tag_update.name.strip()
+
+    tag = await tag_repository.get_by_id(session, tag_id)
+    if not tag:
+        raise HTTPException(status_code=404, detail="标签不存在")
+
+    # 权限检查
+    if tag.level in (0, 1) and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可修改主分类和分辨率标签")
+
+    if tag.name == new_name:
+        raise HTTPException(status_code=400, detail="新标签名与原标签名相同")
+
+    if await tag_repository.exists(session, new_name):
+        raise HTTPException(status_code=409, detail=f"标签 '{new_name}' 已存在")
+
+    old_name = tag.name
+    tag.name = new_name
+    await session.flush()
+
+    return {
+        "message": f"标签 '{old_name}' 已重命名为 '{new_name}'",
+        "id": tag_id,
+        "old_name": old_name,
+        "new_name": new_name,
+    }
+
+
+# ============= Delete (Level-based permissions) =============
+
+
+@router.delete("/id/{tag_id}", response_model=dict[str, Any])
+async def delete_tag_by_id(
+    tag_id: int,
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Delete tag by ID.
+    
+    - Level 0/1: Admin only (and checks for usage)
+    - Level 2: Any authenticated user
+    """
+    tag = await tag_repository.get_by_id(session, tag_id)
+    if not tag:
+        raise HTTPException(status_code=404, detail="标签不存在")
+
+    # 权限检查
+    if tag.level in (0, 1) and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可删除主分类和分辨率标签")
+
+    # Level 0/1 检查是否在使用中
+    if tag.level in (0, 1):
+        success, message = await tag_repository.delete_category(session, tag_id)
+        if not success:
+            raise HTTPException(status_code=400, detail=message)
+        return {"message": message, "id": tag_id, "name": tag.name}
+
+    # Level 2 直接删除
+    await tag_repository.delete(session, tag)
+    return {
+        "message": f"标签 '{tag.name}' 已删除",
+        "id": tag_id,
+        "name": tag.name,
+    }
+
+
+# ============= Legacy endpoints (for compatibility) =============
+
+
+@router.delete("/{tag_name}", response_model=dict[str, Any])
+async def delete_tag_by_name(
+    tag_name: str,
+    admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Delete tag by name (admin only, deprecated)."""
+    tag = await tag_repository.get_by_name(session, tag_name)
+    if not tag:
+        raise HTTPException(status_code=404, detail=f"标签 '{tag_name}' 不存在")
+
+    await tag_repository.delete(session, tag)
+    return {"message": f"标签 '{tag_name}' 已删除", "deleted_name": tag_name}
 
 
 @router.post("/sync", response_model=dict[str, Any])
@@ -48,189 +271,5 @@ async def sync_tags(
     admin: dict = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Sync tag usage counts (admin only).
-
-    Note: With ORM, usage counts are calculated on-the-fly via joins.
-    This endpoint is kept for API compatibility.
-
-    Args:
-        admin: Admin user.
-        session: Database session.
-
-    Returns:
-        Sync result message.
-    """
-    # Usage counts are now calculated dynamically via joins
-    # No need for sync with ORM approach
-    return {
-        "message": "标签同步完成（ORM 模式下实时计算）",
-        "count": 0,
-    }
-
-
-@router.put("/{tag_name}", response_model=dict[str, Any])
-async def rename_tag(
-    tag_name: str,
-    tag_update: TagUpdate,
-    admin: dict = Depends(require_admin),
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Rename tag (admin only).
-
-    Args:
-        tag_name: Current tag name.
-        tag_update: New tag data.
-        admin: Admin user.
-        session: Database session.
-
-    Returns:
-        Rename result.
-    """
-    if not tag_update.name:
-        raise HTTPException(status_code=400, detail="新标签名不能为空")
-
-    if tag_name == tag_update.name:
-        raise HTTPException(status_code=400, detail="新标签名与原标签名相同")
-
-    if await tag_repository.exists(session, tag_update.name):
-        raise HTTPException(
-            status_code=409,
-            detail=f"标签 '{tag_update.name}' 已存在，无法重命名",
-        )
-
-    success = await tag_repository.rename(session, tag_name, tag_update.name)
-    if not success:
-        raise HTTPException(status_code=404, detail=f"标签 '{tag_name}' 不存在")
-
-    return {
-        "message": f"标签 '{tag_name}' 已重命名为 '{tag_update.name}'",
-        "old_name": tag_name,
-        "new_name": tag_update.name,
-    }
-
-
-@router.delete("/{tag_name}", response_model=dict[str, Any])
-async def delete_tag(
-    tag_name: str,
-    admin: dict = Depends(require_admin),
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Delete tag (admin only).
-
-    Args:
-        tag_name: Tag name to delete.
-        admin: Admin user.
-        session: Database session.
-
-    Returns:
-        Delete result.
-    """
-    tag = await tag_repository.get_by_name(session, tag_name)
-    if not tag:
-        raise HTTPException(status_code=404, detail=f"标签 '{tag_name}' 不存在")
-
-    await tag_repository.delete(session, tag)
-
-    return {
-        "message": f"标签 '{tag_name}' 已删除",
-        "deleted_name": tag_name,
-    }
-
-
-# ============= Category Management =============
-
-
-@router.get("/categories", response_model=list[dict[str, Any]])
-async def get_categories(
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Get main categories (level=0).
-
-    Args:
-        session: Database session.
-
-    Returns:
-        List of categories with image counts.
-    """
-    return await tag_repository.get_categories(session)
-
-
-@router.post("/categories", response_model=dict[str, Any])
-async def create_category(
-    name: str,
-    description: str = None,
-    sort_order: int = 0,
-    admin: dict = Depends(require_admin),
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Create main category (admin only).
-
-    Args:
-        name: Category name.
-        description: Optional description.
-        sort_order: Display order.
-        admin: Admin user.
-        session: Database session.
-
-    Returns:
-        Created category info.
-    """
-    if await tag_repository.exists(session, name):
-        raise HTTPException(status_code=409, detail=f"标签 '{name}' 已存在")
-
-    try:
-        tag = await tag_repository.create_category(
-            session,
-            name,
-            description=description,
-            sort_order=sort_order,
-        )
-        return {
-            "message": f"主分类 '{name}' 创建成功",
-            "id": tag.id,
-            "name": name,
-        }
-    except Exception as e:
-        logger.error(f"创建分类失败: {e}")
-        raise HTTPException(status_code=500, detail="创建主分类失败")
-
-
-@router.delete("/categories/{tag_id}", response_model=dict[str, Any])
-async def delete_category(
-    tag_id: int,
-    admin: dict = Depends(require_admin),
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Delete category (admin only, fails if in use).
-
-    Args:
-        tag_id: Category tag ID.
-        admin: Admin user.
-        session: Database session.
-
-    Returns:
-        Delete result.
-    """
-    success, message = await tag_repository.delete_category(session, tag_id)
-    if not success:
-        raise HTTPException(status_code=400, detail=message)
-
-    return {"message": message}
-
-
-# ============= Resolution Tags =============
-
-
-@router.get("/resolutions", response_model=list[dict[str, Any]])
-async def get_resolutions(
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Get resolution tags (level=1).
-
-    Args:
-        session: Database session.
-
-    Returns:
-        List of resolution tags with image counts.
-    """
-    return await tag_repository.get_resolutions(session)
+    """Sync tag usage counts (admin only, for compatibility)."""
+    return {"message": "标签同步完成（ORM 模式下实时计算）", "count": 0}

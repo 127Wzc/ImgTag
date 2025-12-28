@@ -11,6 +11,7 @@ import io
 import json
 import re
 import time
+import traceback
 import datetime
 from dataclasses import dataclass
 from typing import Optional
@@ -191,6 +192,9 @@ class VisionService:
     
     async def analyze_image_url(self, image_url: str) -> ImageAnalysisResult:
         """Analyze a remote image by URL.
+        
+        Downloads the image first, then analyzes using base64 method.
+        This ensures compatibility with all vision APIs.
 
         Args:
             image_url: URL of the image to analyze.
@@ -199,56 +203,50 @@ class VisionService:
             ImageAnalysisResult with tags and description.
 
         Raises:
-            ValueError: If API is not configured or request fails.
+            ValueError: If download fails or API is not configured.
         """
         logger.info(f"分析远程图像: {image_url[:50]}...")
 
         try:
-            api_base, api_key, model = self._get_api_config()
-            prompt = self._get_prompt()
-
-            logger.debug(f"视觉模型 API 请求: base={api_base}, model={model}")
-
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    f"{api_base.rstrip('/')}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": prompt},
-                                    {"type": "image_url", "image_url": {"url": image_url}},
-                                ],
-                            }
-                        ],
-                        "stream": False,
-                    },
-                )
-
+            # 下载远程图片
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                response = await client.get(image_url)
+                
                 if response.status_code != 200:
-                    error_text = response.text[:500] if response.text else "无响应内容"
-                    logger.error(f"API 请求失败: HTTP {response.status_code}, {error_text}")
-                    raise ValueError(f"API 请求失败: HTTP {response.status_code}")
-
-                response_data = response.json()
-
-            content = self._extract_content_from_response(response_data)
-            return self._parse_response(content)
+                    raise ValueError(f"下载图片失败: HTTP {response.status_code}")
+                
+                image_data = response.content
+                
+                # 检测 MIME 类型
+                content_type = response.headers.get("content-type", "image/jpeg")
+                if ";" in content_type:
+                    content_type = content_type.split(";")[0].strip()
+                
+                # 如果无法确定类型，尝试从 URL 推断
+                if content_type == "application/octet-stream" or not content_type.startswith("image/"):
+                    url_lower = image_url.lower()
+                    if ".png" in url_lower:
+                        content_type = "image/png"
+                    elif ".gif" in url_lower:
+                        content_type = "image/gif"
+                    elif ".webp" in url_lower:
+                        content_type = "image/webp"
+                    else:
+                        content_type = "image/jpeg"
+                
+                logger.debug(f"下载图片成功: {len(image_data)} bytes, {content_type}")
+            
+            # 使用 base64 方法分析
+            return await self.analyze_image_base64(image_data, content_type)
 
         except httpx.ConnectError as e:
-            logger.error(f"视觉模型 API 连接失败: {e}")
-            raise ValueError(f"无法连接到 API") from e
+            logger.error(f"下载图片连接失败: {e}")
+            raise ValueError(f"无法连接到图片服务器") from e
         except httpx.TimeoutException as e:
-            logger.error(f"视觉模型 API 请求超时: {e}")
-            raise ValueError("API 请求超时") from e
+            logger.error(f"下载图片超时: {e}")
+            raise ValueError("下载图片超时") from e
         except Exception as e:
-            logger.error(f"视觉模型分析失败: {e}")
+            logger.error(f"远程图片分析失败: {e}")
             raise
     
     async def analyze_image_base64(self, image_data: bytes, mime_type: str = "image/jpeg") -> ImageAnalysisResult:
@@ -342,7 +340,6 @@ class VisionService:
             logger.error(f"视觉模型 API 请求超时: {str(e)}")
             raise ValueError("API 请求超时")
         except Exception as e:
-            import traceback
             logger.error(f"视觉模型分析失败: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
             raise
 

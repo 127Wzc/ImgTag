@@ -1,30 +1,42 @@
-"""Configuration helper for services.
+"""Configuration cache with TTL-based caching.
 
-Provides a cached async config reader for service layer usage.
-Cache avoids repeated database queries for frequently accessed config values.
+This is a CORE infrastructure module that directly uses SQLAlchemy queries.
+It does NOT depend on any repositories or services to avoid circular imports.
+
+Dependency hierarchy:
+    config_defaults ← config_cache ← config_service ← API endpoints
+                    ↑
+                (repositories can also use config_cache)
 """
 
 import time
 from typing import Any
 
+from sqlalchemy import select
+
+from imgtag.core.config_defaults import DEFAULT_CONFIG
 from imgtag.core.logging_config import get_logger
 from imgtag.db.database import async_session_maker
-from imgtag.db.repositories import config_repository
+from imgtag.models.config import Config
 
 logger = get_logger(__name__)
 
 
 class ConfigCache:
-    """Cached configuration reader for services.
+    """Cached configuration reader.
     
     Configuration values are cached for a configurable TTL to avoid
     repeated database queries. Cache is automatically refreshed when stale.
+    
+    This class directly queries the Config model instead of using
+    ConfigRepository to avoid circular imports.
     """
     
     _cache: dict[str, str] = {}
     _cache_time: float = 0
     _ttl: float = 30.0  # Cache TTL in seconds
-    _loading: bool = False  # 防止重复加载
+    
+    # ==================== Async Read Operations ====================
     
     @classmethod
     async def get(cls, key: str, default: str | None = None) -> str | None:
@@ -39,14 +51,23 @@ class ConfigCache:
         """
         now = time.time()
         
-        # Check cache
+        # Check cache first
         if now - cls._cache_time < cls._ttl and key in cls._cache:
             return cls._cache.get(key, default)
         
-        # Refresh cache
+        # Query database directly (no repository dependency)
         try:
             async with async_session_maker() as session:
-                value = await config_repository.get_value(session, key, default)
+                stmt = select(Config.value).where(Config.key == key)
+                result = await session.execute(stmt)
+                row = result.scalar_one_or_none()
+                
+                # Use default from DEFAULT_CONFIG if not in database
+                if row is None:
+                    value = default if default is not None else DEFAULT_CONFIG.get(key)
+                else:
+                    value = row
+                    
                 cls._cache[key] = value
                 cls._cache_time = now
                 return value
@@ -55,71 +76,8 @@ class ConfigCache:
             return cls._cache.get(key, default)
     
     @classmethod
-    async def preload(cls) -> None:
-        """Preload all configuration values into cache.
-        
-        Call this at application startup to ensure get_sync() works correctly.
-        """
-        try:
-            async with async_session_maker() as session:
-                # 必须 include_secrets=True 才能加载 API Key 等敏感配置
-                all_configs = await config_repository.get_all_configs(session, include_secrets=True)
-                for key, value in all_configs.items():
-                    cls._cache[key] = value
-                cls._cache_time = time.time()
-                logger.info(f"配置缓存已预加载 ({len(all_configs)} 项)")
-        except Exception as e:
-            logger.warning(f"预加载配置缓存失败: {e}")
-    
-    @classmethod
-    def get_sync(cls, key: str, default: str | None = None) -> str | None:
-        """Get configuration value synchronously (cache-only, non-blocking).
-        
-        First tries cache. If cache is empty, logs a warning and returns default.
-        Does NOT block to fetch from database - use preload() at startup instead.
-        
-        Args:
-            key: Configuration key.
-            default: Default value if not found.
-            
-        Returns:
-            Configuration value or default.
-        """
-        # 从缓存读取
-        if key in cls._cache:
-            return cls._cache.get(key, default)
-        
-        # 缓存中没有，输出警告并返回默认值
-        # 不阻塞！调用者应确保 preload() 已在启动时执行
-        if not cls._loading:
-            logger.warning(
-                f"配置缓存未命中 [{key}]，返回默认值 '{default}'。"
-                f"请确保应用启动时已调用 preload()。"
-            )
-        return default
-    
-    @classmethod
-    def clear(cls) -> None:
-        """Clear the configuration cache.
-        
-        Call this after updating configuration in database to ensure
-        fresh values are loaded on next access.
-        """
-        cls._cache.clear()
-        cls._cache_time = 0
-        logger.debug("配置缓存已清除")
-    
-    @classmethod
     async def get_int(cls, key: str, default: int = 0) -> int:
-        """Get configuration value as integer.
-        
-        Args:
-            key: Configuration key.
-            default: Default value if not found or invalid.
-            
-        Returns:
-            Integer value.
-        """
+        """Get configuration value as integer."""
         value = await cls.get(key, str(default))
         if value is None:
             return default
@@ -130,15 +88,7 @@ class ConfigCache:
     
     @classmethod
     async def get_float(cls, key: str, default: float = 0.0) -> float:
-        """Get configuration value as float.
-        
-        Args:
-            key: Configuration key.
-            default: Default value if not found or invalid.
-            
-        Returns:
-            Float value.
-        """
+        """Get configuration value as float."""
         value = await cls.get(key, str(default))
         if value is None:
             return default
@@ -149,19 +99,48 @@ class ConfigCache:
     
     @classmethod
     async def get_bool(cls, key: str, default: bool = False) -> bool:
-        """Get configuration value as boolean.
-        
-        Args:
-            key: Configuration key.
-            default: Default value if not found or invalid.
-            
-        Returns:
-            Boolean value.
-        """
+        """Get configuration value as boolean."""
         value = await cls.get(key)
         if value is None:
             return default
         return value.lower() in ("true", "1", "yes", "on")
+    
+    # ==================== Sync Read Operations ====================
+    
+    @classmethod
+    def get_sync(cls, key: str, default: str | None = None) -> str | None:
+        """Get configuration value synchronously (cache-only).
+        
+        Does NOT block to query database. Use preload() at startup.
+        """
+        if key in cls._cache:
+            return cls._cache.get(key, default)
+        
+        logger.warning(
+            f"配置缓存未命中 [{key}]，返回默认值 '{default}'。"
+            f"请确保应用启动时已调用 preload()。"
+        )
+        return default
+    
+    # ==================== Cache Management ====================
+    
+    @classmethod
+    async def preload(cls) -> None:
+        """Preload all configuration values into cache.
+        
+        Call this at application startup to ensure get_sync() works.
+        """
+        try:
+            async with async_session_maker() as session:
+                stmt = select(Config.key, Config.value)
+                result = await session.execute(stmt)
+                rows = result.fetchall()
+                for key, value in rows:
+                    cls._cache[key] = value
+                cls._cache_time = time.time()
+                logger.info(f"配置缓存已预加载 ({len(rows)} 项)")
+        except Exception as e:
+            logger.warning(f"预加载配置缓存失败: {e}")
     
     @classmethod
     def clear(cls) -> None:
@@ -172,8 +151,8 @@ class ConfigCache:
     
     @classmethod
     async def refresh(cls) -> None:
-        """Force refresh all cached values."""
-        cls._cache_time = 0  # Mark cache as stale
+        """Force refresh - mark cache as stale."""
+        cls._cache_time = 0
         logger.info("配置缓存已标记为过期")
 
 

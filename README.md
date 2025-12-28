@@ -40,16 +40,19 @@
 
 **权限矩阵：**
 
-| 操作 | 游客 | 登录用户 | 管理员 |
-|-----|:----:|:-------:|:-----:|
-| 仪表盘/图片查询/搜索 | ✅ | ✅ | ✅ |
-| 上传/删除/更新图片 | ❌ | ✅ | ✅ |
-| 收藏夹操作 | ❌ | ✅ | ✅ |
-| 任务队列操作 | ❌ | ✅ | ✅ |
-| 系统配置 | ❌ | ❌ | ✅ |
-| 标签管理（重命名/删除） | ❌ | ❌ | ✅ |
-| 向量管理 | ❌ | ❌ | ✅ |
-| 用户管理/审批 | ❌ | ❌ | ✅ |
+| 功能页面 | 游客 | 登录用户 | 管理员 |
+|---------|:----:|:-------:|:-----:|
+| 仪表盘 | ✅ | ✅ | ✅ |
+| 图片探索（图库浏览 + 智能搜索） | ✅ | ✅ | ✅ |
+| 我的图库（编辑/删除/批量操作） | ❌ | ✅ | ✅ |
+| 上传图片 | ❌ | ✅ | ✅ |
+| 任务队列 | ❌ | ✅ | ✅ |
+| 收藏夹 | ❌ | ✅ | ✅ |
+| 个人中心（修改密码/API Key） | ❌ | ✅ | ✅ |
+| 标签管理 | ❌ | ❌ | ✅ |
+| 审批管理 | ❌ | ❌ | ✅ |
+| 存储管理（S3 同步） | ❌ | ❌ | ✅ |
+| 系统设置 | ❌ | ❌ | ✅ |
 
 ### ⚡ 批量操作
 - 批量图片选择
@@ -74,46 +77,69 @@
 
 ```
 ImgTag/
-├── src/imgtag/          # Python 后端
-│   ├── api/             # API 端点
-│   ├── core/            # 核心配置
-│   ├── db/              # 数据库操作
-│   ├── schemas/         # Pydantic 模型
-│   └── services/        # 业务服务 (视觉/嵌入/任务)
-├── web/                  # Vue 3 前端
-│   ├── src/views/       # 页面组件
-│   └── src/components/  # 公共组件
-├── uploads/             # 图片存储目录
-├── Dockerfile           # Docker 镜像
-├── docker-compose.yml   # Docker Compose
-└── pyproject.toml       # Python 项目配置
+├── src/imgtag/              # Python 后端
+│   ├── api/                 # API 端点
+│   │   └── endpoints/       # 路由处理器
+│   ├── core/                # 核心配置
+│   ├── db/                  # 数据库
+│   │   └── repositories/    # 数据访问层
+│   ├── schemas/             # Pydantic 模型
+│   └── services/            # 业务服务
+├── web/                     # Vue 3 前端
+│   ├── src/
+│   │   ├── api/             # API 调用 (TanStack Query)
+│   │   ├── components/      # 公共组件
+│   │   │   ├── ui/          # Shadcn-Vue 基础组件
+│   │   │   └── layout/      # 布局组件
+│   │   ├── pages/           # 页面组件
+│   │   ├── stores/          # Pinia 状态管理
+│   │   └── types/           # TypeScript 类型
+│   └── package.json
+├── docs/                    # 文档
+├── uploads/                 # 图片存储目录
+├── Dockerfile               # Docker 镜像
+├── docker-compose.yml       # Docker Compose
+└── pyproject.toml           # Python 项目配置
 ```
 
 ## 🗄️ 数据库结构
 
 ```
 images              # 图片表
-├── id, image_url, description, embedding, file_hash, ...
+├── id, image_url, file_path, s3_path
+├── description, embedding (vector)
+├── file_hash, file_size, original_url
+└── uploaded_by, analyzed_at, created_at
 
 tags                # 标签表
-├── id, name, source, usage_count, parent_id
+├── id, name, level (0=分类, 1=分辨率, 2=普通标签)
+└── usage_count, parent_id
 
-image_tags          # 图片-标签关联表（核心）
-├── image_id, tag_id, source(ai/user), added_by, added_at
+image_tags          # 图片-标签关联表
+├── image_id, tag_id
+├── source (ai/user)
+└── added_by, added_at
 
 users               # 用户表
-├── id, username, password_hash, role, status, api_key
+├── id, username, password_hash
+├── role (admin/user), status (pending/approved)
+└── api_key, created_at
 
 collections         # 收藏夹表
 ├── id, name, user_id, parent_id
+└── auto_tags
 
 tasks               # 任务表
-├── id, task_type, status, payload, result
+├── id, task_type, status
+└── payload, result, error
+
+configs             # 配置表
+└── key, value
 ```
 
 **关键设计：**
 - 标签使用关联表 `image_tags` 存储，支持追踪来源和操作人
-- `image_tags.source` 区分 AI 生成 (`ai`) 和用户添加 (`user`)
+- `tags.level` 区分标签类型：主分类(0)、分辨率(1)、普通标签(2)
 - 用户注册需管理员审批（`users.status`）
 
 ---
@@ -124,7 +150,7 @@ tasks               # 任务表
 
 ```bash
 # 克隆项目
-git clone https://github.com/your-repo/ImgTag.git
+git clone https://github.com/127Wzc/ImgTag.git
 cd ImgTag
 
 # 启动服务
@@ -269,12 +295,14 @@ curl "http://localhost:8000/api/v1/search?api_key=YOUR_KEY&keyword=%E5%88%9D%E9%
 **后端**：
 - FastAPI - Web 框架
 - PostgreSQL + pgvector - 向量数据库
-- OpenAI SDK - 模型调用
 - Sentence Transformers - 本地嵌入
 
 **前端**：
-- Vue 3 + Composition API
-- Element Plus - UI 组件
+- Vue 3 + Composition API + TypeScript
+- Shadcn-Vue + Radix Vue - UI 组件
+- Tailwind CSS 4 - 样式系统
+- TanStack Query - 数据获取
+- Pinia - 状态管理
 - Vite - 构建工具
 
 ---

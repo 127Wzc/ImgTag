@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
 from imgtag.core.config import settings
+from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
 from imgtag.db import get_async_session
 from imgtag.db.repositories import image_repository
@@ -221,6 +222,9 @@ async def sync_to_s3(
     if not await s3_service.is_enabled():
         raise HTTPException(status_code=400, detail="S3 未启用")
 
+    # 读取强制重新上传配置
+    force_reupload = await config_cache.get("s3_force_reupload", "false") == "true"
+    
     try:
         success_count = 0
         failed_count = 0
@@ -228,36 +232,73 @@ async def sync_to_s3(
 
         if request.image_ids:
             # Get specified images
+            logger.info(f"同步指定图片到 S3: {request.image_ids}")
             images = await image_repository.get_by_ids(session, request.image_ids)
         else:
-            # Get local-only images
-            stmt = (
-                select(Image)
-                .where(
-                    and_(
-                        Image.local_exists == True,  # noqa: E712
-                        or_(Image.s3_path.is_(None), Image.s3_path == ""),
-                        Image.file_path.isnot(None),
+            # Get local-only images (or all with local file if force_reupload)
+            if force_reupload:
+                # 强制模式：获取所有有本地文件的图片
+                stmt = (
+                    select(Image)
+                    .where(
+                        and_(
+                            Image.local_exists == True,  # noqa: E712
+                            Image.file_path.isnot(None),
+                        )
                     )
+                    .limit(1000)
                 )
-                .limit(1000)
-            )
+            else:
+                # 普通模式：只获取没有 S3 路径的图片
+                stmt = (
+                    select(Image)
+                    .where(
+                        and_(
+                            Image.local_exists == True,  # noqa: E712
+                            or_(Image.s3_path.is_(None), Image.s3_path == ""),
+                            Image.file_path.isnot(None),
+                        )
+                    )
+                    .limit(1000)
+                )
             result = await session.execute(stmt)
             images = result.scalars().all()
+
+        logger.info(f"找到 {len(images)} 张待同步图片 (force_reupload={force_reupload})")
 
         # Process each image (I/O bound - loop is necessary)
         for image in images:
             try:
-                if not image.file_path or not os.path.exists(image.file_path):
+                logger.info(f"处理图片 {image.id}: file_path={image.file_path}, s3_path={image.s3_path}, local_exists={image.local_exists}")
+                
+                # 如果已经有 s3_path 且不是强制模式，跳过
+                if image.s3_path and not force_reupload:
+                    logger.info(f"图片 {image.id} 已有 S3 路径，跳过")
+                    continue
+                
+                if not image.file_path:
                     failed_count += 1
                     if len(errors) < 10:
-                        errors.append(f"ID {image.id}: 本地文件不存在")
+                        errors.append(f"ID {image.id}: file_path 为空")
+                    continue
+
+                # 构建完整的本地文件路径
+                if os.path.isabs(image.file_path):
+                    local_path = image.file_path
+                else:
+                    local_path = str(settings.UPLOADS_DIR / image.file_path.lstrip("/"))
+
+                if not os.path.exists(local_path):
+                    failed_count += 1
+                    if len(errors) < 10:
+                        errors.append(f"ID {image.id}: 本地文件不存在 ({local_path})")
                     continue
 
                 # Generate S3 key and upload
-                filename = os.path.basename(image.file_path)
+                filename = os.path.basename(local_path)
                 s3_key = await s3_service.generate_s3_key(filename)
-                await s3_service.upload_file(image.file_path, s3_key)
+                logger.info(f"上传图片 {image.id}: {local_path} -> {s3_key}")
+                await s3_service.upload_file(local_path, s3_key)
 
                 # Update database
                 stmt = update(Image).where(Image.id == image.id).values(
@@ -267,11 +308,13 @@ async def sync_to_s3(
                 success_count += 1
 
             except Exception as e:
+                logger.error(f"同步图片 {image.id} 失败: {e}")
                 failed_count += 1
                 if len(errors) < 10:
                     errors.append(f"ID {image.id}: {e}")
 
         await session.flush()
+        logger.info(f"S3 同步完成: 成功 {success_count}, 失败 {failed_count}")
         return SyncResult(success=success_count, failed=failed_count, errors=errors)
     except Exception as e:
         logger.error(f"批量同步到 S3 失败: {e}")

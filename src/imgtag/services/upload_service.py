@@ -6,6 +6,7 @@
 处理本地文件上传和远程图片获取
 """
 
+import io
 import time
 import uuid
 import mimetypes
@@ -66,7 +67,6 @@ class UploadService:
         """
         try:
             from PIL import Image
-            import io
             # 设置解压缩炸弹保护（默认约 178M 像素，约 16K x 16K）
             Image.MAX_IMAGE_PIXELS = 178956970
             with Image.open(io.BytesIO(file_content)) as img:
@@ -145,7 +145,6 @@ class UploadService:
             width, height = None, None
             try:
                 from PIL import Image
-                import io
                 img = Image.open(io.BytesIO(file_content))
                 # 提取分辨率
                 width, height = img.size

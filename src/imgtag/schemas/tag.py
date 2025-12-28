@@ -13,6 +13,7 @@ class TagUpdate(BaseModel):
 
 class Tag(TagBase):
     id: int
+    level: int = 2  # 0=分类, 1=分辨率, 2=普通标签
     usage_count: int
     created_at: datetime
 
@@ -22,3 +23,4 @@ class Tag(TagBase):
 class TagList(BaseModel):
     items: List[Tag]
     total: int
+

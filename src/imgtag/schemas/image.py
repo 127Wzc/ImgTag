@@ -39,6 +39,7 @@ class ImageCreateManual(BaseModel):
 
 class TagWithSource(BaseModel):
     """带来源的标签"""
+    id: int = Field(..., description="标签 ID")
     name: str = Field(..., description="标签名称")
     source: str = Field(default="ai", description="标签来源: user/ai/system")
     level: int = Field(default=2, description="标签级别: 0=主分类, 1=分辨率, 2=普通标签")
@@ -54,6 +55,7 @@ class ImageResponse(BaseModel):
     width: Optional[int] = Field(default=None, description="图片宽度（像素）")
     height: Optional[int] = Field(default=None, description="图片高度（像素）")
     file_size: Optional[float] = Field(default=None, description="文件大小（MB）")
+    uploaded_by: Optional[int] = Field(default=None, description="上传者用户ID")
 
 
 class ImageWithSimilarity(ImageResponse):
@@ -66,7 +68,8 @@ class ImageWithSimilarity(ImageResponse):
 class ImageUpdate(BaseModel):
     """图像更新请求"""
     image_url: Optional[str] = Field(default=None, description="新的图像 URL")
-    tags: Optional[List[str]] = Field(default=None, description="新的标签列表")
+    tags: Optional[List[str]] = Field(default=None, description="新的标签列表（按名称，废弃）")
+    tag_ids: Optional[List[int]] = Field(default=None, description="新的标签ID列表（推荐）")
     description: Optional[str] = Field(default=None, description="新的描述")
     original_url: Optional[str] = Field(default=None, description="原始来源地址")
 

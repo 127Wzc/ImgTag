@@ -15,7 +15,6 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import JSONResponse
-from PIL import Image as PILImage
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
@@ -285,14 +284,14 @@ async def get_duplicate_images(
     admin: dict = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Get duplicate images (admin).
+    """Get duplicate images with full details (admin).
 
     Args:
         admin: Admin user.
         session: Database session.
 
     Returns:
-        Duplicate groups.
+        Duplicate groups with image details.
     """
     logger.info("扫描重复图片")
 
@@ -303,7 +302,7 @@ async def get_duplicate_images(
         return {
             "duplicate_groups": duplicates,
             "total_groups": len(duplicates),
-            "total_duplicates": sum(d["count"] - 1 for d in duplicates),
+            "total_duplicates": sum(g["count"] - 1 for g in duplicates),
             "images_without_hash": no_hash_count,
         }
     except Exception as e:
@@ -454,6 +453,8 @@ async def backfill_resolution(
                     skipped += 1
                     continue
 
+                # 局部引入 PIL（重型库，延迟加载）
+                from PIL import Image as PILImage
                 with PILImage.open(file_path) as pil_img:
                     width, height = pil_img.size
 
@@ -482,3 +483,5 @@ async def backfill_resolution(
     except Exception as e:
         logger.error(f"补全分辨率失败: {e}")
         return {"error": str(e)}
+
+

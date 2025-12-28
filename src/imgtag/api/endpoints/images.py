@@ -6,6 +6,7 @@
 Handles image CRUD, upload, search, and batch operations.
 """
 
+import asyncio
 import hashlib
 import io
 import os
@@ -40,6 +41,9 @@ from imgtag.schemas import (
     ImageSearchRequest,
     ImageSearchResponse,
     ImageUpdate,
+    ImageWithSimilarity,
+    SimilarSearchRequest,
+    SimilarSearchResponse,
     UploadAnalyzeResponse,
 )
 from imgtag.services import embedding_service, upload_service
@@ -48,10 +52,50 @@ from imgtag.services.task_queue import task_queue
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
 
+
+def get_owner_filter(user: dict) -> Optional[int]:
+    """获取权限过滤的 owner_id。
+    
+    管理员返回 None (不过滤)，普通用户返回自己的 ID。
+    """
+    return None if user.get("role") == "admin" else user.get("id")
+
+
+def check_image_permission(image: Image, user: dict, action: str = "操作") -> None:
+    """检查用户是否有权限操作指定图片。"""
+    if user.get("role") != "admin" and image.uploaded_by != user.get("id"):
+        raise HTTPException(status_code=403, detail=f"无权{action}此图片")
+
 router = APIRouter()
 
 
-def _image_to_response(
+async def _get_display_url(image: Image) -> str:
+    """根据 image_url_priority 配置返回正确的显示 URL。
+    
+    Args:
+        image: Image model instance.
+        
+    Returns:
+        str: 应该显示的图片 URL。
+    """
+    from imgtag.core.config_cache import config_cache
+    from imgtag.services.s3_service import s3_service
+    
+    priority = await config_cache.get("image_url_priority", "auto")
+    
+    # 如果配置为 S3 优先 且有 S3 路径
+    if priority == "s3" and image.s3_path and await s3_service.is_enabled():
+        return await s3_service.get_public_url(image.s3_path)
+    
+    # 如果配置为 auto（S3 启用时优先 S3）
+    if priority == "auto" and image.s3_path and await s3_service.is_enabled():
+        return await s3_service.get_public_url(image.s3_path)
+    
+    # 默认返回本地 URL
+    return image.image_url or ""
+
+
+async def _image_to_response(
     image: Image,
     tags_with_source: list[dict] | None = None,
 ) -> ImageResponse:
@@ -64,9 +108,11 @@ def _image_to_response(
     Returns:
         ImageResponse schema.
     """
+    display_url = await _get_display_url(image)
+    
     return ImageResponse(
         id=image.id,
-        image_url=image.image_url,
+        image_url=display_url,
         file_path=image.file_path,
         file_hash=image.file_hash,
         file_type=image.file_type,
@@ -81,6 +127,7 @@ def _image_to_response(
         tags=tags_with_source or [],
         created_at=image.created_at,
         updated_at=image.updated_at,
+        uploaded_by=image.uploaded_by,
     )
 
 
@@ -168,12 +215,31 @@ async def analyze_and_create_from_url(
         tags = request.tags or []
         description = request.description or ""
 
-        # Create initial record (pending analysis)
+        # 下载远程图片到本地
+        file_path, access_url, file_content = await upload_service.save_remote_image(request.image_url)
+        
+        # 提取图片尺寸
+        width, height = upload_service.extract_image_dimensions(file_content)
+        
+        # 计算文件哈希和大小
+        file_hash = hashlib.md5(file_content).hexdigest()
+        file_size = round(len(file_content) / (1024 * 1024), 2)
+        
+        # 获取文件类型
+        file_type = file_path.split(".")[-1] if "." in file_path else "jpg"
+
+        # Create initial record with local path
         new_image = await image_repository.create_image(
             session,
-            image_url=request.image_url,
+            image_url=access_url,  # 本地访问路径
+            file_path=file_path,    # 本地文件路径
+            original_url=request.image_url,  # 原始 URL
+            file_hash=file_hash,
+            file_type=file_type,
+            file_size=file_size,
+            width=width,
+            height=height,
             description=description,
-            original_url=request.image_url,
             embedding=None,  # Pending analysis
             uploaded_by=user.get("id"),
         )
@@ -190,7 +256,7 @@ async def analyze_and_create_from_url(
 
         # Queue for analysis
         if request.auto_analyze:
-            task_queue.add_tasks([new_image.id])
+            await task_queue.add_tasks([new_image.id])
             if not task_queue._running:
                 background_tasks.add_task(task_queue.start_processing)
 
@@ -199,7 +265,7 @@ async def analyze_and_create_from_url(
 
         return UploadAnalyzeResponse(
             id=new_image.id,
-            image_url=request.image_url,
+            image_url=access_url,  # 返回本地路径
             tags=tags,
             description=description,
             process_time=f"{total_time:.4f}秒",
@@ -481,7 +547,7 @@ async def get_image(
         process_time = time.time() - start_time
         perf_logger.info(f"获取图像耗时: {process_time:.4f}秒")
 
-        return _image_to_response(image, tags_with_source)
+        return await _image_to_response(image, tags_with_source)
     except HTTPException:
         raise
     except Exception as e:
@@ -528,10 +594,10 @@ async def search_images(
         )
 
         # Convert to response with tags_with_source
-        images = [
+        images = await asyncio.gather(*[
             _image_to_response(img, tags_with_source=tags_map.get(img.id, []))
             for img in results["images"]
-        ]
+        ])
 
         response = ImageSearchResponse(
             images=images,
@@ -547,6 +613,135 @@ async def search_images(
     except Exception as e:
         logger.error(f"高级搜索失败: {e}")
         raise HTTPException(status_code=500, detail=f"搜索失败: {e}")
+
+
+@router.post("/smart-search", response_model=SimilarSearchResponse)
+async def smart_search(
+    request: SimilarSearchRequest,
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Smart vector search with similarity scores.
+
+    Uses hybrid search combining vector similarity and tag matching.
+
+    Args:
+        request: Search parameters with text query.
+        session: Database session.
+
+    Returns:
+        SimilarSearchResponse with similarity scores.
+    """
+    start_time = time.time()
+    logger.info(f"智能向量搜索: '{request.text[:50] if request.text else ''}...'")
+
+    try:
+        # Generate query vector
+        if request.tags:
+            query_vector = await embedding_service.get_embedding_combined(
+                request.text,
+                request.tags,
+            )
+        else:
+            query_vector = await embedding_service.get_embedding(request.text)
+
+        # Execute hybrid search
+        results = await image_repository.hybrid_search(
+            session,
+            query_vector=query_vector,
+            query_text=request.text,
+            limit=request.limit,
+            threshold=request.threshold,
+            vector_weight=request.vector_weight,
+            tag_weight=request.tag_weight,
+            category_id=request.category_id,
+            resolution_id=request.resolution_id,
+        )
+
+        # Convert to response model
+        images = [ImageWithSimilarity(**img) for img in results]
+
+        response = SimilarSearchResponse(
+            images=images,
+            total=len(images),
+        )
+
+        process_time = time.time() - start_time
+        perf_logger.info(f"智能向量搜索耗时: {process_time:.4f}秒")
+
+        return response
+    except Exception as e:
+        logger.error(f"智能向量搜索失败: {e}")
+        raise HTTPException(status_code=500, detail=f"搜索失败: {e}")
+
+
+@router.post("/my", response_model=ImageSearchResponse)
+async def get_my_images(
+    request: ImageSearchRequest,
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Get current user's uploaded images (requires login).
+
+    Automatically filters by the current user's ID.
+    Admin users can optionally use the all_users query param to see all images.
+
+    Args:
+        request: Search filters.
+        user: Current user (injected from token).
+        session: Database session.
+
+    Returns:
+        ImageSearchResponse with user's images.
+    """
+    start_time = time.time()
+    current_user_id = user.get("id")
+    is_admin = user.get("role") == "admin"
+    
+    logger.info(f"获取用户图片: user_id={current_user_id}, is_admin={is_admin}")
+
+    try:
+        # For non-admin users, always filter by their own user_id
+        # For admin users, also filter by their own user_id (admin can use /search for all)
+        results = await image_repository.search_images(
+            session,
+            tags=request.tags,
+            keyword=request.keyword,
+            category_id=request.category_id,
+            resolution_id=request.resolution_id,
+            user_id=current_user_id,  # Always filter by current user
+            pending_only=request.pending_only,
+            duplicates_only=request.duplicates_only,
+            limit=request.limit,
+            offset=request.offset,
+            sort_by=request.sort_by,
+            sort_desc=request.sort_desc,
+        )
+
+        # 批量获取标签信息
+        image_ids = [img.id for img in results["images"]]
+        tags_map = await image_repository.get_batch_image_tags_with_source(
+            session, image_ids
+        )
+
+        images = await asyncio.gather(*[
+            _image_to_response(img, tags_with_source=tags_map.get(img.id, []))
+            for img in results["images"]
+        ])
+
+        response = ImageSearchResponse(
+            images=images,
+            total=results["total"],
+            limit=results["limit"],
+            offset=results["offset"],
+        )
+
+        process_time = time.time() - start_time
+        perf_logger.info(f"获取用户图片耗时: {process_time:.4f}秒")
+
+        return response
+    except Exception as e:
+        logger.error(f"获取用户图片失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取用户图片失败: {e}")
 
 
 @router.put("/{image_id}", response_model=dict[str, Any])
@@ -575,26 +770,49 @@ async def update_image(
         if not image:
             raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
 
+        check_image_permission(image, current_user, "编辑")
+
+        # 判断是否有标签更新
+        has_tag_update = image_update.tag_ids is not None or image_update.tags is not None
+        has_desc_update = image_update.description is not None
+        
+        # 获取标签名列表用于计算 embedding
+        tag_names_for_embedding: list[str] = []
+        tag_ids_to_set: list[int] | None = None
+        
+        if image_update.tag_ids is not None:
+            # 优先使用 tag_ids（新流程）
+            tag_ids_to_set = image_update.tag_ids
+            # 查询标签名用于 embedding
+            if tag_ids_to_set:
+                from sqlalchemy import select
+                from imgtag.models.tag import Tag
+                stmt = select(Tag.name).where(Tag.id.in_(tag_ids_to_set))
+                result = await session.execute(stmt)
+                tag_names_for_embedding = [row.name for row in result]
+        elif image_update.tags is not None:
+            # 兼容旧流程（按标签名）
+            tag_names_for_embedding = image_update.tags
+
         # Recalculate embedding if tags or description changed
         embedding_vector = None
-        if image_update.tags is not None or image_update.description is not None:
+        if has_tag_update or has_desc_update:
             description = (
                 image_update.description
                 if image_update.description is not None
                 else (image.description or "")
             )
-            current_tags = [t.name for t in (image.tags or [])]
-            tags = (
-                image_update.tags
-                if image_update.tags is not None
-                else current_tags
-            )
+            
+            # 如果没有标签更新，查询当前标签
+            if not has_tag_update:
+                current_tag_objs = await image_tag_repository.get_image_tags(session, image_id)
+                tag_names_for_embedding = [t.name for t in current_tag_objs]
 
             embedding_vector = await embedding_service.get_embedding_combined(
-                description, tags
+                description, tag_names_for_embedding
             )
 
-        # Update image
+        # Update image basic info
         await image_repository.update_image(
             session,
             image,
@@ -605,7 +823,19 @@ async def update_image(
         )
 
         # Update tags
-        if image_update.tags is not None:
+        if tag_ids_to_set is not None:
+            # 新流程：按 ID 更新标签关联
+            logger.info(f"更新标签关联: image_id={image_id}, tag_ids={tag_ids_to_set}")
+            changes = await image_tag_repository.set_image_tags_by_ids(
+                session,
+                image_id,
+                tag_ids_to_set,
+                source="user",
+                added_by=current_user.get("id"),
+            )
+            logger.info(f"标签关联更新完成: changes={changes}")
+        elif image_update.tags is not None:
+            # 旧流程：按名称更新（兼容）
             await image_tag_repository.set_image_tags(
                 session,
                 image_id,
@@ -652,6 +882,8 @@ async def delete_image(
 
         if not image:
             raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
+
+        check_image_permission(image, user, "删除")
 
         # Delete local file
         file_path = image.file_path
@@ -717,9 +949,9 @@ async def batch_delete_images(
         }
 
     try:
-        # Bulk delete: O(2) queries instead of O(N)
+        # Bulk delete with permission filter (SQL 层过滤)
         deleted_count, file_paths = await image_repository.delete_by_ids(
-            session, image_ids
+            session, image_ids, owner_id=get_owner_filter(user)
         )
 
         # Delete local files (after DB transaction commits)
@@ -791,7 +1023,9 @@ async def batch_update_tags(
         }
 
     try:
-        # Bulk tag operation: O(2) queries instead of O(N)
+        # Bulk tag operation with permission filter (SQL 层过滤)
+        owner_id = get_owner_filter(current_user)
+        
         if request.mode == "add":
             updated = await image_tag_repository.batch_add_tags_to_images(
                 session,
@@ -799,6 +1033,7 @@ async def batch_update_tags(
                 request.tags,
                 source="user",
                 added_by=user_id,
+                owner_id=owner_id,
             )
         else:
             updated = await image_tag_repository.batch_replace_tags_for_images(
@@ -807,14 +1042,18 @@ async def batch_update_tags(
                 request.tags,
                 source="user",
                 added_by=user_id,
+                owner_id=owner_id,
             )
 
         process_time = time.time() - start_time
         perf_logger.info(f"批量更新标签耗时: {process_time:.4f}秒")
 
+        # 计算实际更新的数量
+        success_count = len(request.image_ids) if owner_id is None else updated
+
         return {
-            "message": f"批量更新完成: {len(request.image_ids)} 张图片",
-            "success_count": len(request.image_ids),
+            "message": f"批量更新完成: {success_count} 张图片",
+            "success_count": success_count,
             "fail_count": 0,
             "tags_updated": updated,
             "process_time": f"{process_time:.4f}秒",

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from imgtag.core.config import settings
+from imgtag.core.config_cache import config_cache
 from imgtag.db.repositories.base import BaseRepository
 from imgtag.models.image import Image
 from imgtag.models.tag import ImageTag, Tag
@@ -290,6 +291,7 @@ class ImageRepository(BaseRepository[Image]):
         keyword: Optional[str] = None,
         category_id: Optional[int] = None,
         resolution_id: Optional[int] = None,
+        user_id: Optional[int] = None,
         pending_only: bool = False,
         duplicates_only: bool = False,
         limit: int = 20,
@@ -305,6 +307,7 @@ class ImageRepository(BaseRepository[Image]):
             keyword: Search in description and tags.
             category_id: Filter by category (level=0 tag).
             resolution_id: Filter by resolution (level=1 tag).
+            user_id: Filter by uploader user ID.
             pending_only: Only images without embeddings.
             duplicates_only: Only duplicated images (by hash).
             limit: Maximum results.
@@ -320,6 +323,10 @@ class ImageRepository(BaseRepository[Image]):
         count_stmt = select(func.count()).select_from(Image)
 
         conditions = []
+
+        # User filter
+        if user_id is not None:
+            conditions.append(Image.uploaded_by == user_id)
 
         # Tag filter (AND - must have all tags)
         if tags:
@@ -363,9 +370,11 @@ class ImageRepository(BaseRepository[Image]):
                 )
             )
 
-        # Pending only (no embedding)
+        # Pending only: description 为空
         if pending_only:
-            conditions.append(Image.embedding.is_(None))
+            conditions.append(
+                or_(Image.description.is_(None), Image.description == "")
+            )
 
         # Duplicates only
         if duplicates_only:
@@ -438,20 +447,53 @@ class ImageRepository(BaseRepository[Image]):
     async def find_duplicates(
         self,
         session: AsyncSession,
-    ) -> Sequence[tuple[str, int]]:
-        """Find duplicate images by file hash.
+    ) -> list[dict[str, Any]]:
+        """Find duplicate images by file hash with full details.
 
         Returns:
-            List of (file_hash, count) tuples where count > 1.
+            List of duplicate groups with image details.
         """
-        stmt = (
+        # Step 1: Find duplicate hashes
+        hash_stmt = (
             select(Image.file_hash, func.count().label("cnt"))
             .where(Image.file_hash.isnot(None))
             .group_by(Image.file_hash)
             .having(func.count() > 1)
         )
-        result = await session.execute(stmt)
-        return [(row.file_hash, row.cnt) for row in result]
+        hash_result = await session.execute(hash_stmt)
+        dup_hashes = [row.file_hash for row in hash_result]
+
+        if not dup_hashes:
+            return []
+
+        # Step 2: Get all images for duplicate hashes
+        images_stmt = (
+            select(Image)
+            .where(Image.file_hash.in_(dup_hashes))
+            .order_by(Image.file_hash, Image.created_at)
+        )
+        images_result = await session.execute(images_stmt)
+        images = images_result.scalars().all()
+
+        # Step 3: Group by hash
+        groups: dict[str, list[dict]] = {}
+        for img in images:
+            if img.file_hash not in groups:
+                groups[img.file_hash] = []
+            groups[img.file_hash].append({
+                "id": img.id,
+                "image_url": img.image_url,
+                "file_path": img.file_path,
+                "file_size": float(img.file_size) if img.file_size else 0,
+                "width": img.width,
+                "height": img.height,
+                "created_at": img.created_at.isoformat() if img.created_at else None,
+            })
+
+        return [
+            {"hash": h, "count": len(imgs), "images": imgs}
+            for h, imgs in groups.items()
+        ]
 
     async def get_paginated(
         self,
@@ -610,10 +652,18 @@ class ImageRepository(BaseRepository[Image]):
             tag_score = float(row[5])
             final_score = vector_score * vector_weight + tag_score * tag_weight
 
-            # Determine display URL
+            # Determine display URL based on S3 config
             display_url = row[1]  # Default to image_url
             if row[6]:  # Has s3_path
-                display_url = f"{settings.BASE_URL.rstrip('/')}/uploads/s3/{row[6]}"
+                # 使用 S3 公开 URL 前缀，而不是 BASE_URL
+                s3_public_prefix = await config_cache.get("s3_public_url_prefix", "") or ""
+                if s3_public_prefix:
+                    display_url = f"{s3_public_prefix.rstrip('/')}/{row[6]}"
+                else:
+                    # 无自定义前缀，使用端点 URL + bucket
+                    s3_endpoint = await config_cache.get("s3_endpoint_url", "") or ""
+                    s3_bucket = await config_cache.get("s3_bucket_name", "") or ""
+                    display_url = f"{s3_endpoint.rstrip('/')}/{s3_bucket}/{row[6]}"
             elif row[7] is False:  # local_exists is False
                 pass  # Keep image_url
 
@@ -682,6 +732,7 @@ class ImageRepository(BaseRepository[Image]):
         self,
         session: AsyncSession,
         image_ids: list[int],
+        owner_id: Optional[int] = None,
     ) -> tuple[int, list[str]]:
         """Bulk delete images by IDs.
 
@@ -690,6 +741,7 @@ class ImageRepository(BaseRepository[Image]):
         Args:
             session: Database session.
             image_ids: List of image IDs to delete.
+            owner_id: If provided, only delete images uploaded by this user (for permission check).
 
         Returns:
             Tuple of (deleted_count, file_paths_to_delete).
@@ -697,8 +749,13 @@ class ImageRepository(BaseRepository[Image]):
         if not image_ids:
             return 0, []
 
-        # First get file paths for cleanup
-        stmt = select(Image.id, Image.file_path).where(Image.id.in_(image_ids))
+        # Build base condition
+        conditions = [Image.id.in_(image_ids)]
+        if owner_id is not None:
+            conditions.append(Image.uploaded_by == owner_id)
+
+        # First get file paths for cleanup (with permission filter)
+        stmt = select(Image.id, Image.file_path).where(and_(*conditions))
         result = await session.execute(stmt)
         rows = result.fetchall()
         file_paths = [row.file_path for row in rows if row.file_path]
@@ -874,29 +931,6 @@ class ImageRepository(BaseRepository[Image]):
             {"dt": target_date},
         )
         return result.scalar() or 0
-
-    async def find_duplicates(
-        self,
-        session: AsyncSession,
-    ) -> list[dict[str, Any]]:
-        """Find duplicate images by file hash.
-
-        Groups images with same hash.
-
-        Args:
-            session: Database session.
-
-        Returns:
-            List of duplicate groups.
-        """
-        stmt = (
-            select(Image.file_hash, func.count().label("count"))
-            .where(Image.file_hash.isnot(None))
-            .group_by(Image.file_hash)
-            .having(func.count() > 1)
-        )
-        result = await session.execute(stmt)
-        return [{"file_hash": row.file_hash, "count": row.count} for row in result]
 
     async def count_without_hash(
         self,

@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from imgtag.api.dependencies import require_api_key, verify_api_key
+from imgtag.api.dependencies import require_api_key
 from imgtag.core.config import settings
 from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger, get_perf_logger
@@ -62,7 +62,7 @@ async def random_images(
     tags: list[str] = Query([], description="标签列表（AND 关系）"),
     count: int = Query(1, ge=1, le=50, description="返回数量"),
     include_full_url: bool = Query(True, description="是否返回完整 URL"),
-    api_user: dict = Depends(verify_api_key),
+    api_user: dict = Depends(require_api_key),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Get random images by tags.
@@ -80,7 +80,7 @@ async def random_images(
         Random images list.
     """
     start_time = time.time()
-    username = api_user.get("username") if api_user else "anonymous"
+    username = api_user.get("username")
     logger.info(f"[外部API] 随机图片请求: tags={tags}, count={count}, user={username}")
 
     try:
@@ -190,7 +190,7 @@ async def analyze_image_from_url(
 @router.get("/image/{image_id}")
 async def get_image_info(
     image_id: int,
-    api_user: dict = Depends(verify_api_key),
+    api_user: dict = Depends(require_api_key),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Get image details.
@@ -203,7 +203,7 @@ async def get_image_info(
     Returns:
         Image details.
     """
-    username = api_user.get("username") if api_user else "anonymous"
+    username = api_user.get("username")
     logger.info(f"[外部API] 获取图片: id={image_id}, user={username}")
 
     image = await image_repository.get_with_tags(session, image_id)
@@ -225,7 +225,7 @@ async def search_images(
     tags: list[str] = Query([], description="标签筛选"),
     limit: int = Query(20, ge=1, le=100, description="返回数量"),
     offset: int = Query(0, ge=0, description="偏移量"),
-    api_user: dict = Depends(verify_api_key),
+    api_user: dict = Depends(require_api_key),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Search images.
@@ -243,7 +243,7 @@ async def search_images(
     Returns:
         Search results.
     """
-    username = api_user.get("username") if api_user else "anonymous"
+    username = api_user.get("username")
     logger.info(f"[外部API] 搜索图片: keyword={keyword}, tags={tags}, user={username}")
 
     try:

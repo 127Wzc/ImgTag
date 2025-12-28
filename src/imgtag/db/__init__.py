@@ -4,7 +4,9 @@
 """Database module.
 
 Provides SQLAlchemy-based async database access.
-All legacy synchronous code has been removed.
+
+NOTE: Repositories are NOT auto-imported here to avoid circular dependencies.
+Import repositories explicitly from `imgtag.db.repositories` when needed.
 """
 
 # SQLAlchemy async database access
@@ -17,20 +19,6 @@ from imgtag.db.database import (
     close_db,
 )
 
-# Repository exports for convenience
-from imgtag.db.repositories import (
-    config_repository,
-    image_repository,
-    tag_repository,
-    image_tag_repository,
-    user_repository,
-    collection_repository,
-    image_collection_repository,
-    task_repository,
-    approval_repository,
-    audit_log_repository,
-)
-
 __all__ = [
     # Database engine and session
     "engine",
@@ -39,15 +27,5 @@ __all__ = [
     "get_session_context",
     "init_db",
     "close_db",
-    # Repositories
-    "config_repository",
-    "image_repository",
-    "tag_repository",
-    "image_tag_repository",
-    "user_repository",
-    "collection_repository",
-    "image_collection_repository",
-    "task_repository",
-    "approval_repository",
-    "audit_log_repository",
 ]
+

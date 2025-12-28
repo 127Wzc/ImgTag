@@ -7,13 +7,17 @@
 """
 
 import os
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 from pathlib import Path
 
-import numpy as np
+import httpx
+import requests
 
 from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
+
+if TYPE_CHECKING:
+    import numpy as np
 
 logger = get_logger(__name__)
 
@@ -46,8 +50,6 @@ def _download_file(url: str, dest_path: Path, timeout: int = 300, stream: bool =
     Returns:
         是否下载成功
     """
-    import requests
-    
     try:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -261,8 +263,10 @@ class ONNXEmbeddingModel:
         
         logger.info(f"✓ ONNX 模型加载成功，维度: {self.dimensions}")
     
-    def encode(self, text: str, normalize_embeddings: bool = True) -> np.ndarray:
+    def encode(self, text: str, normalize_embeddings: bool = True):
         """编码文本为向量"""
+        import numpy as np
+        
         # 分词
         inputs = self.tokenizer(
             text,
@@ -405,8 +409,6 @@ class EmbeddingService:
         Raises:
             ValueError: If API is not configured or request fails.
         """
-        import httpx
-
         api_base = await config_cache.get("embedding_api_base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"
         api_key = await config_cache.get("embedding_api_key", "") or ""
         model = await config_cache.get("embedding_model", "text-embedding-3-small") or "text-embedding-3-small"

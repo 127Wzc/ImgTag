@@ -249,21 +249,53 @@ class TagRepository(BaseRepository[Tag]):
             for row in result
         ]
 
+    async def get_stats(
+        self,
+        session: AsyncSession,
+    ) -> dict[str, Any]:
+        """Get tag count statistics by level.
+
+        Args:
+            session: Database session.
+
+        Returns:
+            Dict with count for each level and total.
+        """
+        stmt = (
+            select(Tag.level, func.count(Tag.id).label("count"))
+            .group_by(Tag.level)
+        )
+        result = await session.execute(stmt)
+        
+        counts = {row.level: row.count for row in result}
+        
+        return {
+            "categories": counts.get(0, 0),
+            "resolutions": counts.get(1, 0),
+            "normal_tags": counts.get(2, 0),
+            "total": sum(counts.values()),
+        }
+
+
     async def get_all_sorted(
         self,
         session: AsyncSession,
         *,
-        limit: int = 100,
+        limit: int = 50,
+        offset: int = 0,
         sort_by: str = "usage_count",
-        level: int | None = 2,
+        level: int | None = None,
+        keyword: str | None = None,
     ) -> Sequence[dict[str, Any]]:
         """Get all tags sorted by usage or name.
 
         Args:
             session: Database session.
             limit: Maximum tags to return.
+            offset: Number of tags to skip.
             sort_by: Sort field (usage_count, name).
             level: Tag level filter (None for all, 0=category, 1=resolution, 2=normal).
+            keyword: Keyword to filter tag names (fuzzy search).
 
         Returns:
             List of tag dicts with usage count.
@@ -286,12 +318,18 @@ class TagRepository(BaseRepository[Tag]):
         if level is not None:
             stmt = stmt.where(Tag.level == level)
         
-        stmt = stmt.group_by(Tag.id).limit(limit)
+        # 添加关键字模糊搜索
+        if keyword:
+            stmt = stmt.where(Tag.name.ilike(f"%{keyword}%"))
+        
+        stmt = stmt.group_by(Tag.id)
 
         if sort_by == "name":
-            stmt = stmt.order_by(Tag.name)
+            stmt = stmt.order_by(Tag.level, Tag.name)
         else:
-            stmt = stmt.order_by(func.count(ImageTag.image_id).desc())
+            stmt = stmt.order_by(Tag.level, func.count(ImageTag.image_id).desc())
+
+        stmt = stmt.offset(offset).limit(limit)
 
         result = await session.execute(stmt)
         return [
@@ -553,6 +591,102 @@ class ImageTagRepository(BaseRepository[ImageTag]):
         await session.flush()
         return final_tags
 
+    async def set_image_tags_by_ids(
+        self,
+        session: AsyncSession,
+        image_id: int,
+        tag_ids: list[int],
+        *,
+        source: str = "user",
+        added_by: Optional[int] = None,
+    ) -> int:
+        """Set tags for an image by tag IDs (efficient, no tag lookup).
+        
+        Compares current associations with new IDs and performs minimal updates.
+        Preserves level 0/1 tags that are not in the new list.
+
+        Args:
+            session: Database session.
+            image_id: Image ID.
+            tag_ids: List of tag IDs to set.
+            source: Source for new associations (user/ai).
+            added_by: User ID if user-added.
+
+        Returns:
+            Number of associations changed.
+        """
+        from datetime import datetime, timezone
+        from sqlalchemy import delete as sa_delete
+
+        # Filter out invalid tag IDs (id=0 or non-existent)
+        if not tag_ids:
+            tag_ids = []
+        tag_ids = [tid for tid in tag_ids if tid and tid > 0]
+
+        # Validate tag IDs exist
+        if tag_ids:
+            valid_ids_stmt = select(Tag.id).where(Tag.id.in_(tag_ids))
+            valid_result = await session.execute(valid_ids_stmt)
+            valid_ids = {row.id for row in valid_result}
+            tag_ids = [tid for tid in tag_ids if tid in valid_ids]
+
+        # Get current tag associations
+        current_stmt = (
+            select(ImageTag.tag_id)
+            .where(ImageTag.image_id == image_id)
+        )
+        current_result = await session.execute(current_stmt)
+        current_tag_ids = {row.tag_id for row in current_result}
+
+        new_tag_id_set = set(tag_ids)
+        
+        # Calculate additions and deletions
+        to_add = new_tag_id_set - current_tag_ids
+        to_remove = current_tag_ids - new_tag_id_set
+        
+        changes = 0
+        
+        # Add new associations
+        if to_add:
+            now = datetime.now(timezone.utc)
+            for idx, tag_id in enumerate(tag_ids):
+                if tag_id in to_add:
+                    new_assoc = ImageTag(
+                        image_id=image_id,
+                        tag_id=tag_id,
+                        source=source,
+                        added_by=added_by,
+                        sort_order=idx,
+                        added_at=now,
+                    )
+                    session.add(new_assoc)
+                    changes += 1
+        
+        # Remove old associations (but preserve level 0/1 tags)
+        if to_remove:
+            # Check which tags to remove are level 2
+            level_check_stmt = select(Tag.id).where(
+                and_(
+                    Tag.id.in_(to_remove),
+                    Tag.level == 2,  # Only remove normal tags
+                )
+            )
+            level_result = await session.execute(level_check_stmt)
+            level2_to_remove = {row.id for row in level_result}
+            
+            if level2_to_remove:
+                delete_stmt = sa_delete(ImageTag).where(
+                    and_(
+                        ImageTag.image_id == image_id,
+                        ImageTag.tag_id.in_(level2_to_remove),
+                    )
+                )
+                result = await session.execute(delete_stmt)
+                changes += result.rowcount
+        
+        await session.flush()
+        return changes
+
     async def clear_image_tags(
         self,
         session: AsyncSession,
@@ -584,6 +718,7 @@ class ImageTagRepository(BaseRepository[ImageTag]):
         *,
         source: str = "user",
         added_by: Optional[int] = None,
+        owner_id: Optional[int] = None,
     ) -> int:
         """Add tags to multiple images (append mode).
 
@@ -595,12 +730,24 @@ class ImageTagRepository(BaseRepository[ImageTag]):
             tag_names: Tag names to add.
             source: Tag source.
             added_by: User ID.
+            owner_id: If provided, only update images uploaded by this user.
 
         Returns:
             Number of new associations created.
         """
         if not image_ids or not tag_names:
             return 0
+
+        # 如果指定了 owner_id，先过滤出属于该用户的图片
+        if owner_id is not None:
+            from imgtag.models.image import Image
+            stmt = select(Image.id).where(
+                and_(Image.id.in_(image_ids), Image.uploaded_by == owner_id)
+            )
+            result = await session.execute(stmt)
+            image_ids = [row.id for row in result]
+            if not image_ids:
+                return 0
 
         from datetime import datetime, timezone
         from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -659,6 +806,7 @@ class ImageTagRepository(BaseRepository[ImageTag]):
         *,
         source: str = "user",
         added_by: Optional[int] = None,
+        owner_id: Optional[int] = None,
     ) -> int:
         """Replace all tags for multiple images.
 
@@ -670,12 +818,24 @@ class ImageTagRepository(BaseRepository[ImageTag]):
             tag_names: New tag names.
             source: Tag source.
             added_by: User ID.
+            owner_id: If provided, only update images uploaded by this user.
 
         Returns:
             Number of new associations created.
         """
         if not image_ids:
             return 0
+
+        # 如果指定了 owner_id，先过滤出属于该用户的图片
+        if owner_id is not None:
+            from imgtag.models.image import Image
+            stmt = select(Image.id).where(
+                and_(Image.id.in_(image_ids), Image.uploaded_by == owner_id)
+            )
+            result = await session.execute(stmt)
+            image_ids = [row.id for row in result]
+            if not image_ids:
+                return 0
 
         from datetime import datetime, timezone
         from sqlalchemy import delete as sa_delete
