@@ -6,6 +6,7 @@
 System status, health checks, and maintenance operations.
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -344,8 +345,10 @@ async def calculate_missing_hashes(
                 # Local file
                 file_path = img.get("file_path")
                 if file_path and os.path.exists(file_path):
-                    with open(file_path, "rb") as f:
-                        file_hash = hashlib.md5(f.read()).hexdigest()
+                    def _calc_hash(path):
+                        with open(path, "rb") as f:
+                            return hashlib.md5(f.read()).hexdigest()
+                    file_hash = await asyncio.to_thread(_calc_hash, file_path)
 
                 # URL image - download and hash
                 elif img.get("image_url"):
@@ -453,10 +456,13 @@ async def backfill_resolution(
                     skipped += 1
                     continue
 
-                # 局部引入 PIL（重型库，延迟加载）
-                from PIL import Image as PILImage
-                with PILImage.open(file_path) as pil_img:
-                    width, height = pil_img.size
+                # PIL 操作移至线程池，避免阻塞
+                def _get_dimensions(path):
+                    from PIL import Image as PILImage
+                    with PILImage.open(path) as pil_img:
+                        return pil_img.size
+                
+                width, height = await asyncio.to_thread(_get_dimensions, file_path)
 
                 resolution_updates.append({
                     "id": img["id"],

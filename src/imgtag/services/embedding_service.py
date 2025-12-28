@@ -12,6 +12,8 @@ from pathlib import Path
 
 import httpx
 import requests
+import asyncio
+
 
 from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
@@ -388,7 +390,12 @@ class EmbeddingService:
         
         try:
             model = await self._get_local_model()
-            embedding = model.encode(text.strip(), normalize_embeddings=True)
+            
+            # 由于 model.encode 是 CPU 密集型且同步的操作，必须在单独的线程中运行
+            # 否则会阻塞主事件循环，导致其他 API 请求无响应
+            embedding = await asyncio.to_thread(
+                model.encode, text.strip(), normalize_embeddings=True
+            )
             
             logger.info(f"本地向量生成成功，维度: {len(embedding)}")
             return embedding.tolist()

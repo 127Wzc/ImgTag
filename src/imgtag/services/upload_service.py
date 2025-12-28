@@ -6,6 +6,7 @@
 处理本地文件上传和远程图片获取
 """
 
+import asyncio
 import io
 import time
 import uuid
@@ -140,18 +141,23 @@ class UploadService:
             if not self._validate_extension(extension):
                 raise ValueError(f"不支持的文件类型: {extension}")
             
-            # 使用 PIL 检测真实的图片格式和分辨率
+            # 使用 PIL 检测真实的图片格式和分辨率（线程池执行，避免阻塞）
             real_format = extension  # 默认使用扩展名
             width, height = None, None
             try:
-                from PIL import Image
-                img = Image.open(io.BytesIO(file_content))
-                # 提取分辨率
-                width, height = img.size
+                def _detect_format_and_dimensions(content: bytes):
+                    from PIL import Image
+                    img = Image.open(io.BytesIO(content))
+                    w, h = img.size
+                    detected_format = img.format.lower() if img.format else None
+                    return w, h, detected_format
+                
+                width, height, detected_format = await asyncio.to_thread(
+                    _detect_format_and_dimensions, file_content
+                )
                 logger.debug(f"图片分辨率: {width}x{height}")
                 
                 # 检测格式
-                detected_format = img.format.lower() if img.format else None
                 if detected_format:
                     # 标准化格式名称（PIL 内部格式 -> 常用扩展名）
                     format_map = {

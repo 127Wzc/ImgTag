@@ -439,15 +439,18 @@ class TaskQueueService:
                     # GIF 转换为 PNG
                     if file_ext == "gif" and convert_gif:
                         try:
-                            from PIL import Image
-                            img = Image.open(io.BytesIO(file_content))
-                            if hasattr(img, 'n_frames') and img.n_frames > 1:
-                                img.seek(0)
-                            if img.mode in ('RGBA', 'LA', 'P'):
-                                img = img.convert('RGB')
-                            output = io.BytesIO()
-                            img.save(output, format='PNG')
-                            file_content = output.getvalue()
+                            def _convert_gif_to_png(content: bytes) -> bytes:
+                                from PIL import Image
+                                img = Image.open(io.BytesIO(content))
+                                if hasattr(img, 'n_frames') and img.n_frames > 1:
+                                    img.seek(0)
+                                if img.mode in ('RGBA', 'LA', 'P'):
+                                    img = img.convert('RGB')
+                                output = io.BytesIO()
+                                img.save(output, format='PNG')
+                                return output.getvalue()
+                            
+                            file_content = await asyncio.to_thread(_convert_gif_to_png, file_content)
                             mime_type = "image/png"
                             logger.info(f"图片 {task.image_id} GIF 已转换为 PNG")
                         except Exception as e:

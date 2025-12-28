@@ -221,8 +221,8 @@ async def analyze_and_create_from_url(
         # 提取图片尺寸
         width, height = upload_service.extract_image_dimensions(file_content)
         
-        # 计算文件哈希和大小
-        file_hash = hashlib.md5(file_content).hexdigest()
+        # 计算文件哈希和大小 (线程池执行避免阻塞)
+        file_hash = await asyncio.to_thread(lambda: hashlib.md5(file_content).hexdigest())
         file_size = round(len(file_content) / (1024 * 1024), 2)
         
         # 获取文件类型
@@ -320,8 +320,8 @@ async def upload_and_analyze(
         final_tags = [t.strip() for t in tags.split(",") if t.strip()]
         final_description = description
 
-        # Calculate hash and size
-        file_hash = hashlib.md5(file_content).hexdigest()
+        # Calculate hash and size (线程池执行避免阻塞)
+        file_hash = await asyncio.to_thread(lambda: hashlib.md5(file_content).hexdigest())
         file_size = round(len(file_content) / (1024 * 1024), 2)
 
         # Create image record
@@ -465,7 +465,7 @@ async def upload_zip(
                     )
 
                     file_size = round(len(file_content) / (1024 * 1024), 2)
-                    file_hash = hashlib.md5(file_content).hexdigest()
+                    file_hash = await asyncio.to_thread(lambda c=file_content: hashlib.md5(c).hexdigest())
 
                     new_image = await image_repository.create_image(
                         session,

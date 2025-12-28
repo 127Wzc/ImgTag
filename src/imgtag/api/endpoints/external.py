@@ -6,6 +6,7 @@
 Third-party integration using API key authentication.
 """
 
+import asyncio
 import hashlib
 import time
 from typing import Any
@@ -139,8 +140,8 @@ async def analyze_image_from_url(
             request.image_url
         )
 
-        # Calculate hash
-        file_hash = hashlib.md5(content).hexdigest()
+        # Calculate hash (线程池执行避免阻塞)
+        file_hash = await asyncio.to_thread(lambda: hashlib.md5(content).hexdigest())
         file_size = round(len(content) / (1024 * 1024), 2)
 
         # Create image record

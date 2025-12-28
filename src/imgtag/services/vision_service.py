@@ -6,6 +6,7 @@
 Analyzes images using OpenAI-compatible vision APIs via httpx.
 """
 
+import asyncio
 import base64
 import io
 import json
@@ -262,7 +263,10 @@ class VisionService:
         # 图片过大时自动压缩
         if original_size > max_image_size:
             logger.info(f"图片过大 ({original_size/1024:.1f} KB > {max_image_size_kb} KB)，正在压缩...")
-            image_data, mime_type = self._compress_image(image_data, max_size=max_image_size)
+            # 图片压缩是 CPU 密集型操作，使用线程池避免阻塞
+            image_data, mime_type = await asyncio.to_thread(
+                self._compress_image, image_data, max_image_size
+            )
             logger.info(f"压缩后: {len(image_data)/1024:.1f} KB, 类型: {mime_type}")
         
         try:
