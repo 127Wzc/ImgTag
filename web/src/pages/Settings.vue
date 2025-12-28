@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, onUnmounted } from 'vue'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
 import ImageDetailModal from '@/components/ImageDetailModal.vue'
@@ -10,6 +10,7 @@ import {
   Loader2,
   Eye,
   Brain,
+  Cloud,
   ListTodo,
   HardDrive,
   Settings2,
@@ -20,8 +21,16 @@ import {
   Database,
   FolderSync,
   AlertTriangle,
-  CheckCircle
+  CheckCircle,
+  RotateCw,
+  ChevronDown
 } from 'lucide-vue-next'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+} from '@/components/ui/select'
 
 const categories = [
   { key: 'vision', label: '视觉模型', icon: Eye, description: 'AI 图片分析和标签提取', color: 'text-violet-500 bg-violet-500/10' },
@@ -161,7 +170,8 @@ async function saveConfigs() {
     const changedConfigs: Record<string, string> = {}
     for (const key of Object.keys(configs.value)) {
       if (configs.value[key] !== originalConfigs.value[key]) {
-        changedConfigs[key] = configs.value[key]
+        // Enforce string type for backend compatibility
+        changedConfigs[key] = String(configs.value[key])
       }
     }
     if (Object.keys(changedConfigs).length === 0) {
@@ -171,7 +181,14 @@ async function saveConfigs() {
 
     await apiClient.put('/config/', { configs: changedConfigs })
     originalConfigs.value = { ...configs.value }
-    activeCategory.value = null
+    // 如果不是 embedding 页面，或者是 embedding 但没有维度变更需要处理，则关闭
+    // 实际上为了流畅体验，embedding 页面保存后最好不要关闭，方便用户点击“重建”
+    if (activeCategory.value !== 'embedding') {
+      activeCategory.value = null
+    } else {
+      toast.success('保存成功，请根据提示检查是否需要重建向量')
+      fetchVectorStatus() // 刷新状态以更新 dimensions_match
+    }
   } catch (e: any) {
     alert(e.response?.data?.detail || '保存失败')
   } finally {
@@ -292,6 +309,135 @@ function formatDate(iso: string): string {
     day: '2-digit',
   })
 }
+
+// ========== 向量管理 ==========
+interface VectorStatus {
+  image_count: number
+  embedding_mode: string
+  embedding_model: string
+  embedding_dimensions: number
+  db_dimensions: number
+  dimensions_match: boolean
+  rebuild_status: {
+    is_running: boolean
+    total: number
+    processed: number
+    failed: number
+    message: string
+  }
+}
+
+const vectorStatus = ref<VectorStatus | null>(null)
+const vectorLoading = ref(false)
+const rebuilding = ref(false)
+const resizing = ref(false)
+
+const localModelOptions = [
+  { value: 'BAAI/bge-small-zh-v1.5', label: 'BAAI BGE Small (推荐, 512维)', dim: 512 },
+  { value: 'BAAI/bge-base-zh-v1.5', label: 'BAAI BGE Base (高精度, 768维)', dim: 768 },
+  { value: 'shibing624/text2vec-base-chinese', label: 'Text2Vec Base (旧版兼容, 768维)', dim: 768 },
+]
+
+// 计算当前表单选择对应的维度
+const targetDimensions = computed(() => {
+  if (configs.value['embedding_mode'] === 'api') {
+    return parseInt(configs.value['embedding_dimensions'] || '1536')
+  } else {
+    const model = configs.value['embedding_local_model']
+    const opt = localModelOptions.find(o => o.value === model)
+    if (opt) return opt.dim
+    // Fallback detection
+    if (model?.includes('bge-base') || model?.includes('text2vec')) return 768
+    if (model?.includes('large')) return 1024
+    return 512
+  }
+})
+
+// 是否需要重置维度 (当前 DB 维度 != 目标维度)
+const dimensionsMismatch = computed(() => {
+  if (!vectorStatus.value) return false
+  return vectorStatus.value.db_dimensions !== targetDimensions.value
+})
+
+async function fetchVectorStatus() {
+  vectorLoading.value = true
+  try {
+    const { data } = await apiClient.get<VectorStatus>('/vectors/status')
+    vectorStatus.value = data
+    if (data.rebuild_status?.is_running) {
+       rebuilding.value = true
+       pollRebuildStatus()
+    }
+  } catch (e) {
+    console.error(e)
+  } finally {
+    vectorLoading.value = false
+  }
+}
+
+async function rebuildVectors() {
+  if (!confirm('确定要重建所有向量吗？这可能需要很长时间，期间搜索功能将受限。')) return
+  rebuilding.value = true
+  try {
+    await apiClient.post('/vectors/rebuild')
+    toast.success('重建任务已启动')
+    pollRebuildStatus()
+  } catch(e: any) {
+    alert(e.response?.data?.detail || '启动失败')
+    rebuilding.value = false
+  }
+}
+
+async function resizeVectorTable() {
+  if (!confirm('确定要修改数据库向量维度吗？这将清空现有索引，建议随后立即重建向量。')) return
+  resizing.value = true
+  try {
+    const { data } = await apiClient.post('/vectors/resize-table')
+    toast.success(data.message)
+    await fetchVectorStatus()
+  } catch(e: any) {
+    alert(e.response?.data?.detail || '修改失败')
+  } finally {
+    resizing.value = false
+  }
+}
+
+let pollTimer: any = null
+function pollRebuildStatus() {
+  if (pollTimer) clearInterval(pollTimer)
+  pollTimer = setInterval(async () => {
+    try {
+      const { data } = await apiClient.get('/vectors/rebuild/status')
+      if (vectorStatus.value) {
+        vectorStatus.value.rebuild_status = data
+      }
+      if (!data.is_running) {
+        clearInterval(pollTimer)
+        pollTimer = null
+        rebuilding.value = false
+        if (data.processed > 0) toast.success('向量重建完成')
+        fetchVectorStatus()
+      } else {
+        rebuilding.value = true
+      }
+    } catch {
+      clearInterval(pollTimer)
+      pollTimer = null
+    }
+  }, 2000)
+}
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+})
+
+// 监听分类切换
+import { watch } from 'vue'
+watch(activeCategory, (newVal) => {
+  if (newVal === 'embedding') {
+    fetchVectorStatus()
+  }
+})
 
 // ========== S3 存储管理 ==========
 interface S3Stats {
@@ -572,6 +718,187 @@ onMounted(() => fetchConfigs())
                 </div>
               </template>
 
+              <!-- 向量配置：特殊面板 -->
+              <template v-else-if="activeCategory === 'embedding'">
+                <!-- 模式选择 -->
+                <div class="space-y-4">
+                  <div class="space-y-1.5">
+                    <label class="block text-sm font-medium text-foreground">嵌入模式</label>
+                    <div class="grid grid-cols-2 gap-3">
+                      <button
+                        @click="configs['embedding_mode'] = 'local'"
+                        class="p-3 rounded-xl border flex items-center gap-3 transition-all"
+                        :class="configs['embedding_mode'] === 'local' ? 'bg-primary/5 border-primary ring-1 ring-primary' : 'bg-muted/30 border-border hover:bg-muted/50'"
+                      >
+                        <div class="w-8 h-8 rounded-lg bg-blue-500/10 text-blue-500 flex items-center justify-center">
+                          <HardDrive class="w-4 h-4" />
+                        </div>
+                        <div class="text-left">
+                          <div class="text-sm font-medium">本地模型 (ONNX)</div>
+                          <div class="text-xs text-muted-foreground">速度快，隐私安全</div>
+                        </div>
+                      </button>
+
+                      <button
+                        @click="configs['embedding_mode'] = 'api'"
+                        class="p-3 rounded-xl border flex items-center gap-3 transition-all"
+                        :class="configs['embedding_mode'] === 'api' ? 'bg-primary/5 border-primary ring-1 ring-primary' : 'bg-muted/30 border-border hover:bg-muted/50'"
+                      >
+                        <div class="w-8 h-8 rounded-lg bg-violet-500/10 text-violet-500 flex items-center justify-center">
+                          <Cloud class="w-4 h-4" />
+                        </div>
+                        <div class="text-left">
+                          <div class="text-sm font-medium">在线 API</div>
+                          <div class="text-xs text-muted-foreground">精度高，无需显存</div>
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+
+                  <!-- 本地模型配置 -->
+                  <div v-if="configs['embedding_mode'] === 'local'" class="space-y-4 animate-in fade-in slide-in-from-right-2">
+                    <div class="space-y-1.5">
+                      <label class="block text-sm font-medium text-foreground">模型选择</label>
+                      <select
+                        v-model="configs['embedding_local_model']"
+                        class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                      >
+                        <option v-for="opt in localModelOptions" :key="opt.value" :value="opt.value">
+                          {{ opt.label }}
+                        </option>
+                      </select>
+                      <p class="text-xs text-muted-foreground">初次使用会自动下载模型（约 200MB）</p>
+                    </div>
+
+                    <div class="space-y-1.5">
+                      <label class="block text-sm font-medium text-foreground">HF 镜像地址</label>
+                      <input
+                        v-model="configs['hf_endpoint']"
+                        type="text"
+                        class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                        placeholder="https://hf-mirror.com"
+                      />
+                    </div>
+                  </div>
+
+                  <!-- API 模式配置 -->
+                  <div v-else class="space-y-4 animate-in fade-in slide-in-from-right-2">
+                    <div class="space-y-1.5">
+                      <label class="block text-sm font-medium text-foreground">API 地址</label>
+                      <input
+                        v-model="configs['embedding_api_base_url']"
+                        type="text"
+                        class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                        placeholder="https://api.openai.com/v1"
+                      />
+                    </div>
+                    <div class="space-y-1.5">
+                      <label class="block text-sm font-medium text-foreground">API 密钥</label>
+                      <input
+                        v-model="configs['embedding_api_key']"
+                        type="password"
+                        class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                        placeholder="sk-..."
+                      />
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                       <div class="space-y-1.5">
+                        <label class="block text-sm font-medium text-foreground">模型名称</label>
+                        <input
+                          v-model="configs['embedding_model']"
+                          type="text"
+                          class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                          placeholder="text-embedding-3-small"
+                        />
+                      </div>
+                      <div class="space-y-1.5">
+                        <label class="block text-sm font-medium text-foreground">维度</label>
+                        <input
+                          v-model="configs['embedding_dimensions']"
+                          type="number"
+                          class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 向量状态卡片 -->
+                  <div v-if="vectorStatus" class="mt-4 p-4 bg-muted/50 rounded-xl space-y-3">
+                    <div class="flex items-center justify-between">
+                       <h3 class="font-medium text-sm text-foreground flex items-center gap-2">
+                         <Database class="w-4 h-4 text-muted-foreground" />
+                         向量库状态
+                       </h3>
+                       <div class="flex items-center gap-2">
+                          <span 
+                            class="px-2 py-0.5 rounded text-xs font-medium"
+                            :class="!dimensionsMismatch ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'"
+                          >
+                            {{ !dimensionsMismatch ? '维度匹配' : '维度不匹配' }}
+                          </span>
+                       </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-2 text-xs">
+                      <div class="p-2 bg-background rounded-lg border border-border/50">
+                        <div class="text-muted-foreground mb-0.5">数据库维度</div>
+                        <div class="font-mono">{{ vectorStatus.db_dimensions }}</div>
+                      </div>
+                      <div class="p-2 bg-background rounded-lg border border-border/50">
+                        <div class="text-muted-foreground mb-0.5">模型输出维度</div>
+                        <div class="font-mono transition-colors" :class="{'text-amber-500 font-bold': dimensionsMismatch}">
+                          {{ targetDimensions }}
+                          <span v-if="hasChanges" class="text-[10px] font-normal opacity-70">(未保存)</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- 状态操作栏 -->
+                    <div class="flex gap-2 pt-1">
+                      <Button 
+                        v-if="dimensionsMismatch"
+                        size="sm" 
+                        variant="destructive" 
+                        class="w-full h-8 text-xs"
+                        @click="resizeVectorTable"
+                        :disabled="resizing || hasChanges"
+                        :title="hasChanges ? '请先保存配置' : '重置数据库维度'"
+                      >
+                         <RotateCw v-if="resizing" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                         <span v-else>{{ hasChanges ? '请先保存配置' : '重置数据库维度' }}</span>
+                      </Button>
+                      
+                      <Button 
+                        size="sm" 
+                        variant="secondary" 
+                        class="w-full h-8 text-xs bg-background hover:bg-muted border border-border/50"
+                        @click="rebuildVectors"
+                        :disabled="rebuilding || dimensionsMismatch || hasChanges"
+                      >
+                         <Loader2 v-if="rebuilding" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                         <span v-else>
+                           {{ rebuilding ? '重建中...' : '重建所有向量' }}
+                         </span>
+                      </Button>
+                    </div>
+
+                    <!-- 重建进度条 -->
+                    <div v-if="vectorStatus.rebuild_status.is_running || rebuilding" class="space-y-1.5 pt-2 border-t border-border/50">
+                       <div class="flex justify-between text-xs text-muted-foreground">
+                         <span>重建进度</span>
+                         <span>{{ vectorStatus.rebuild_status.processed }} / {{ vectorStatus.rebuild_status.total }}</span>
+                       </div>
+                       <div class="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                         <div 
+                           class="h-full bg-primary transition-all duration-500"
+                           :style="{ width: `${(vectorStatus.rebuild_status.processed / (vectorStatus.rebuild_status.total || 1)) * 100}%` }"
+                         />
+                       </div>
+                    </div>
+                  </div>
+                </div>
+              </template>
+
               <!-- 其他分类：配置表单 -->
               <template v-else>
                 <div 
@@ -635,28 +962,48 @@ onMounted(() => fetchConfigs())
                           </select>
                         </template>
 
-                        <!-- Combobox -->
+                        <!-- Combobox (Text + Quick Select) -->
                         <template v-else-if="def.type === 'combobox'">
-                          <div class="relative">
-                            <input
-                              :id="def.key"
-                              v-model="configs[def.key]"
-                              type="text"
-                              list="model-options"
-                              class="w-full px-3 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring pr-8"
-                              placeholder="选择或输入"
-                            />
-                            <button 
-                              type="button"
-                              @click="fetchModels"
-                              :disabled="modelsLoading"
-                              class="absolute right-1 top-1/2 -translate-y-1/2 p-1 hover:bg-muted rounded"
-                            >
-                              <RefreshCw :class="['w-3.5 h-3.5 text-muted-foreground', modelsLoading && 'animate-spin']" />
-                            </button>
-                            <datalist id="model-options">
-                              <option v-for="model in availableModels" :key="model" :value="model" />
-                            </datalist>
+                          <div class="relative flex gap-2">
+                             <div class="relative flex-1">
+                                <input
+                                  :id="def.key"
+                                  v-model="configs[def.key]"
+                                  type="text"
+                                  class="w-full px-3 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring pr-8"
+                                  placeholder="选择推荐模型或手动输入"
+                                />
+                                <button 
+                                  type="button"
+                                  @click="fetchModels"
+                                  :disabled="modelsLoading"
+                                  class="absolute right-1 top-1/2 -translate-y-1/2 p-1 hover:bg-muted rounded"
+                                  title="刷新模型列表"
+                                >
+                                  <RefreshCw :class="['w-3.5 h-3.5 text-muted-foreground', modelsLoading && 'animate-spin']" />
+                                </button>
+                             </div>
+                             
+                             <!-- Quick Select Dropdown -->
+                             <Select 
+                               @update:model-value="(v) => configs[def.key] = String(v)"
+                             >
+                                <SelectTrigger class="w-[40px] px-2 bg-muted/50 border-border">
+                                   <ChevronDown class="w-4 h-4 text-muted-foreground" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                   <SelectItem 
+                                     v-for="model in availableModels" 
+                                     :key="model" 
+                                     :value="model"
+                                   >
+                                     {{ model }}
+                                   </SelectItem>
+                                   <div v-if="availableModels.length === 0" class="p-2 text-xs text-muted-foreground text-center">
+                                      {{ modelsLoading ? '加载中...' : '无可用模型' }}
+                                   </div>
+                                </SelectContent>
+                             </Select>
                           </div>
                           <p v-if="modelsError" class="text-xs text-destructive mt-1">{{ modelsError }}</p>
                         </template>

@@ -20,7 +20,9 @@ from imgtag.models import Base
 config = context.config
 
 # Set database URL from application settings
-config.set_main_option("sqlalchemy.url", get_async_database_url(settings.PG_CONNECTION_STRING))
+db_url = get_async_database_url(settings.PG_CONNECTION_STRING)
+# Escape '%' to '%%' for ConfigParser interpolation
+config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
 # Setup logging from alembic.ini
 if config.config_file_name is not None:

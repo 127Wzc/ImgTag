@@ -37,7 +37,9 @@ RUN uv sync --no-dev && \
     rm -rf /root/.cache
 
 # 复制后端代码
+# 复制后端代码
 COPY src/ ./src/
+COPY alembic.ini ./
 
 # 复制前端构建产物到 static 目录
 COPY --from=web-builder /app/web/dist ./static
@@ -68,7 +70,9 @@ RUN uv sync --extra local --no-dev && \
     rm -rf /root/.cache
 
 # 复制后端代码
+# 复制后端代码
 COPY src/ ./src/
+COPY alembic.ini ./
 
 # 复制前端构建产物到 static 目录
 COPY --from=web-builder /app/web/dist ./static

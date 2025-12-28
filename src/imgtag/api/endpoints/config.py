@@ -119,6 +119,15 @@ async def update_single_config(
         
         if not success:
             raise HTTPException(status_code=500, detail="更新配置失败")
+            
+        await session.commit()
+        config_cache.clear()
+        await config_cache.preload()
+        
+        # Check if model reload needed
+        if key in ["embedding_mode", "embedding_local_model", "hf_endpoint"]:
+            from imgtag.services.embedding_service import EmbeddingService
+            EmbeddingService.reload_model()
         
         return {"message": f"配置项 {key} 更新成功"}
     except Exception as e:

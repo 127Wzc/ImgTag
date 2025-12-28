@@ -320,6 +320,8 @@ async def resize_vector_table(
         """))
 
         await config_repository.set_value(session, "embedding_dimensions", str(new_dim))
+        await session.commit()
+        await config_cache.refresh()
 
         logger.info(f"向量维度修改成功: {new_dim}")
         return {"message": f"数据库向量维度已修改为 {new_dim}，请重建向量数据"}
@@ -382,10 +384,16 @@ async def start_rebuild(
                 USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)
             """))
             await config_repository.set_value(session, "embedding_dimensions", str(expected_dim))
+            await session.commit()
+            await config_cache.refresh()
             logger.info(f"向量维度调整完成: {expected_dim}")
         except Exception as e:
+            await session.rollback()
             logger.error(f"调整维度失败: {e}")
             raise HTTPException(status_code=500, detail=f"调整维度失败: {e}")
+
+    # Force reload model to ensure we use the correct one matches config
+    embedding_service.reload_model()
 
     background_tasks.add_task(rebuild_vectors_task)
 
@@ -478,15 +486,13 @@ async def rebuild_vectors_task():
                 )
 
                 # Update database
+                # Update database
                 async with async_session_maker() as session:
-                    await session.execute(
-                        text("""
-                            UPDATE images 
-                            SET embedding = :embedding::vector, updated_at = NOW()
-                            WHERE id = :id
-                        """),
-                        {"embedding": str(embedding), "id": image_id},
-                    )
+                    image_model = await image_repository.get_by_id(session, image_id)
+                    if image_model:
+                        await image_repository.update_image(
+                            session, image_model, embedding=embedding
+                        )
                     await session.commit()
 
                 rebuild_status["processed"] += 1

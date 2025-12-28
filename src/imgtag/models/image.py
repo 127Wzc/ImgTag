@@ -81,7 +81,7 @@ class Image(Base, TimestampMixin):
     # Content
     description: Mapped[Optional[str]] = mapped_column(Text, comment="图片描述")
     embedding: Mapped[Optional[list[float]]] = mapped_column(
-        Vector(512), comment="向量嵌入(512维)"
+        Vector(None), comment="向量嵌入"
     )
 
     # Relations

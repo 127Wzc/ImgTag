@@ -74,7 +74,7 @@ def upgrade() -> None:
         sa.Column("parent_id", sa.Integer(), sa.ForeignKey("tags.id", ondelete="SET NULL"), nullable=True, comment="父标签ID"),
         sa.Column("source", sa.String(20), server_default="system", nullable=False, comment="来源"),
         sa.Column("description", sa.Text(), nullable=True, comment="描述"),
-        sa.Column("level", sa.Integer(), server_default="1", nullable=False, comment="层级"),
+        sa.Column("level", sa.Integer(), server_default="2", nullable=False, comment="层级"),
         sa.Column("usage_count", sa.Integer(), server_default="0", nullable=False, comment="使用次数"),
         sa.Column("sort_order", sa.Integer(), server_default="0", nullable=False, comment="排序"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False, comment="创建时间"),
@@ -191,6 +191,45 @@ def upgrade() -> None:
         CREATE INDEX ix_images_embedding ON images 
         USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)
     """)
+
+    # === Seed Initial Data ===
+    conn = op.get_bind()
+    
+    # 1. Seed Category Tags (Level 0)
+    categories = [
+        ('风景', '自然风光、城市景观', 1),
+        ('人像', '真人照片、人物特写', 2),
+        ('动漫', '动画、漫画、二次元', 3),
+        ('表情包', '表情、梗图、搞笑图', 4),
+        ('产品', '商品、摄影棚照片', 5),
+        ('艺术', '绘画、设计作品', 6),
+        ('截图', '屏幕截图、界面', 7),
+        ('文档', '文字、表格、证件', 8),
+        ('其他', '无法分类', 99),
+    ]
+
+    for name, desc, order in categories:
+        conn.execute(sa.text("""
+            INSERT INTO tags (name, level, source, description, sort_order) 
+            VALUES (:name, 0, 'system', :desc, :order)
+        """), {"name": name, "desc": desc, "order": order})
+
+    # 2. Seed Resolution Tags (Level 1)
+    # Using raw SQL to insert default data
+    resolutions = [
+        ('8K', '超高清 8K 分辨率 (≥7680px)', 100),
+        ('4K', '超高清 4K 分辨率 (≥3840px)', 101),
+        ('2K', '高清 2K 分辨率 (≥2560px)', 102),
+        ('1080p', '全高清 1080p (≥1920px)', 103),
+        ('720p', '高清 720p (≥1280px)', 104),
+        ('SD', '标清 (<1280px)', 105),
+    ]
+
+    for name, desc, order in resolutions:
+         conn.execute(sa.text("""
+            INSERT INTO tags (name, level, source, description, sort_order) 
+            VALUES (:name, 1, 'system', :desc, :order)
+        """), {"name": name, "desc": desc, "order": order})
 
 
 def downgrade() -> None:
