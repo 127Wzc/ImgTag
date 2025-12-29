@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { Button } from '@/components/ui/button'
 import { useUploadImage, useUploadZip, useUploadFromUrl, useCategories } from '@/api/queries'
 import { useUserStore } from '@/stores/user'
+import apiClient from '@/api/client'
 import type { UploadAnalyzeResponse } from '@/types'
 import { 
   Upload as UploadIcon, 
@@ -15,6 +16,7 @@ import {
   Link,
   Folder,
   Sparkles,
+  HardDrive,
 } from 'lucide-vue-next'
 
 const userStore = useUserStore()
@@ -27,9 +29,39 @@ const uploadMode = ref<UploadMode>('file')
 // 上传选项
 const autoAnalyze = ref(true)  // 管理员可选
 const selectedCategoryId = ref<number | null>(null)
+const selectedEndpointId = ref<number | null>(null)  // 目标存储端点
 
 // 获取主分类列表
 const { data: categories } = useCategories()
+
+// 获取启用的存储端点列表
+interface StorageEndpoint {
+  id: number
+  name: string
+  provider: string
+  is_default_upload: boolean
+}
+const endpoints = ref<StorageEndpoint[]>([])
+
+async function fetchEndpoints() {
+  try {
+    const { data } = await apiClient.get<StorageEndpoint[]>('/storage/endpoints?enabled_only=true')
+    endpoints.value = data
+    // 默认选择默认上传端点
+    const defaultEp = data.find(ep => ep.is_default_upload)
+    if (defaultEp) {
+      selectedEndpointId.value = defaultEp.id
+    }
+  } catch (e) {
+    // 忽略错误，使用默认端点
+  }
+}
+
+onMounted(() => {
+  if (isAdmin.value) {
+    fetchEndpoints()
+  }
+})
 
 interface FileItem {
   file: File
@@ -140,6 +172,7 @@ async function uploadSingle(item: FileItem) {
         autoAnalyze: shouldAnalyze.value,
         skipAnalyze: !shouldAnalyze.value,
         categoryId: selectedCategoryId.value ?? undefined,
+        endpointId: selectedEndpointId.value ?? undefined,
       })
       clearInterval(progressInterval)
       item.progress = 100
@@ -240,6 +273,20 @@ const pendingCount = computed(() => files.value.filter(f => f.status === 'pendin
             <option :value="null">不指定分类</option>
             <option v-for="cat in categories" :key="cat.id" :value="cat.id">
               {{ cat.name }}
+            </option>
+          </select>
+        </div>
+
+        <!-- 存储端点选择（仅管理员） -->
+        <div v-if="isAdmin && endpoints.length > 0" class="flex items-center gap-2">
+          <HardDrive class="w-4 h-4 text-muted-foreground" />
+          <select
+            v-model="selectedEndpointId"
+            class="px-3 py-1.5 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring"
+          >
+            <option :value="null">默认端点</option>
+            <option v-for="ep in endpoints" :key="ep.id" :value="ep.id">
+              {{ ep.name }} ({{ ep.provider === 'local' ? '本地' : 'S3' }})
             </option>
           </select>
         </div>

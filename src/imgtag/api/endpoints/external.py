@@ -9,6 +9,7 @@ Third-party integration using API key authentication.
 import asyncio
 import hashlib
 import time
+from datetime import datetime, timezone as tz
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,11 +17,16 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.dependencies import require_api_key
-from imgtag.core.config import settings
-from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger, get_perf_logger
+from imgtag.core.storage_constants import StorageProvider
 from imgtag.db import get_async_session
-from imgtag.db.repositories import image_repository, image_tag_repository
+from imgtag.db.repositories import (
+    image_location_repository,
+    image_repository,
+    image_tag_repository,
+    storage_endpoint_repository,
+)
+from imgtag.services.storage_service import storage_service
 from imgtag.services.task_queue import task_queue
 from imgtag.services.upload_service import upload_service
 
@@ -38,24 +44,6 @@ class ExternalImageCreate(BaseModel):
     description: str = ""
     auto_analyze: bool = True
 
-
-async def get_full_url(url: str) -> str:
-    """Convert relative path to full URL.
-
-    Args:
-        url: Image URL or path.
-
-    Returns:
-        Full URL with base_url prepended if relative.
-    """
-    if not url:
-        return url
-    if url.startswith("http"):
-        return url
-    base_url = await config_cache.get("base_url", settings.BASE_URL)
-    if base_url and url.startswith("/"):
-        return base_url.rstrip("/") + url
-    return url
 
 
 @router.get("/random")
@@ -88,17 +76,12 @@ async def random_images(
         # Single query with optional tag filter
         result = await image_repository.get_random_by_tags(session, tags, count)
 
-        # Process URLs
-        base_url = await config_cache.get("base_url", "") if include_full_url else ""
+        # Process URLs - format determined by endpoint's public_url_prefix
         images = []
         for img in result:
-            url = img["image_url"]
-            if include_full_url and base_url and url.startswith("/"):
-                url = base_url.rstrip("/") + url
-
             images.append({
                 "id": img["id"],
-                "url": url,
+                "url": img["image_url"],
                 "description": img["description"],
                 "tags": img["tags"],
             })
@@ -140,15 +123,13 @@ async def analyze_image_from_url(
             request.image_url
         )
 
-        # Calculate hash (线程池执行避免阻塞)
+        # Calculate hash and size
         file_hash = await asyncio.to_thread(lambda: hashlib.md5(content).hexdigest())
         file_size = round(len(content) / (1024 * 1024), 2)
 
-        # Create image record
+        # Create image record (without legacy fields)
         new_image = await image_repository.create_image(
             session,
-            image_url=local_url,
-            file_path=file_path,
             file_hash=file_hash,
             file_size=file_size,
             description=request.description,
@@ -156,6 +137,23 @@ async def analyze_image_from_url(
             embedding=None,
             uploaded_by=api_user.get("id"),
         )
+        
+        # Create local ImageLocation record
+        local_endpoint = await storage_endpoint_repository.get_by_name(session, StorageProvider.LOCAL)
+        if local_endpoint:
+            local_object_key = file_path.replace("\\", "/").lstrip("/")
+            if local_object_key.startswith("uploads/"):
+                local_object_key = local_object_key[8:]
+            
+            await image_location_repository.create(
+                session,
+                image_id=new_image.id,
+                endpoint_id=local_endpoint.id,
+                object_key=local_object_key,
+                is_primary=True,
+                sync_status="synced",
+                synced_at=datetime.now(tz),
+            )
 
         # Set tags if provided
         if request.tags:
@@ -172,10 +170,13 @@ async def analyze_image_from_url(
             await task_queue.add_tasks([new_image.id])
 
         process_time = time.time() - start_time
+        
+        # Get display URL from storage service
+        display_url = await storage_service.get_read_url(new_image) or ""
 
         return {
             "id": new_image.id,
-            "image_url": await get_full_url(local_url),
+            "image_url": display_url,
             "original_url": request.image_url,
             "tags": request.tags,
             "description": request.description,
@@ -211,9 +212,12 @@ async def get_image_info(
     if not image:
         raise HTTPException(status_code=404, detail="图片不存在")
 
+    # Get display URL from storage service
+    display_url = await storage_service.get_read_url(image) or ""
+
     return {
         "id": image.id,
-        "url": await get_full_url(image.image_url),
+        "url": display_url,
         "description": image.description or "",
         "tags": [t.name for t in image.tags if t.level == 2],
         "created_at": image.created_at,
@@ -256,12 +260,16 @@ async def search_images(
             offset=offset,
         )
 
-        # Process URLs
+        # Batch get URLs from storage service
+        result_images = result["images"]
+        urls = await storage_service.get_read_urls(result_images)
+        
+        # Process results - URL format determined by endpoint config
         images = []
-        for img in result["images"]:
+        for img in result_images:
             images.append({
                 "id": img.id,
-                "image_url": await get_full_url(img.image_url),
+                "image_url": urls.get(img.id, ""),
                 "description": img.description or "",
                 "tags": [t.name for t in img.tags] if hasattr(img, "tags") else [],
                 "created_at": img.created_at,

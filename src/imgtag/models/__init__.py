@@ -11,6 +11,8 @@ from imgtag.models.collection import Collection, ImageCollection
 from imgtag.models.task import Task
 from imgtag.models.approval import Approval, AuditLog
 from imgtag.models.config import Config, SchemaMeta
+from imgtag.models.storage_endpoint import StorageEndpoint
+from imgtag.models.image_location import ImageLocation
 
 __all__ = [
     "Base",
@@ -26,4 +28,7 @@ __all__ = [
     "AuditLog",
     "Config",
     "SchemaMeta",
+    "StorageEndpoint",
+    "ImageLocation",
 ]
+

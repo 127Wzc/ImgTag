@@ -20,6 +20,7 @@ import {
   Image,
   ChevronUp,
   Activity,
+  HardDrive,
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -55,6 +56,7 @@ const coreItems = computed(() => [
 
 // 管理功能区（仅管理员可见）
 const adminItems = computed(() => [
+  { name: 'StorageEndpoints', path: '/storage-endpoints', icon: HardDrive, label: '存储端点' },
   { name: 'Tags', path: '/tags', icon: Tags, label: '标签管理' },
   { name: 'Approvals', path: '/approvals', icon: CheckSquare, label: '审批管理' },
   { name: 'Settings', path: '/settings', icon: Settings, label: '系统设置' },

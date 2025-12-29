@@ -38,18 +38,6 @@ DEFAULT_CONFIG: dict[str, str] = {
     "queue_batch_interval": "1",
     # 上传配置
     "max_upload_size": "10",
-    # S3 存储配置
-    "s3_enabled": "false",
-    "s3_endpoint_url": "",
-    "s3_access_key_id": "",
-    "s3_secret_access_key": "",
-    "s3_bucket_name": "",
-    "s3_region": "us-east-1",
-    "s3_public_url_prefix": "",
-    "s3_path_prefix": "imgtag/",
-    "s3_force_reupload": "false",
-    "image_url_priority": "auto",
     # 系统配置
-    "base_url": "",
     "allow_register": "true",
 }

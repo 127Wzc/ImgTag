@@ -13,32 +13,27 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "python-multipart>=0.0.17",
-    
     # 数据库 (SQLAlchemy 2.0 + 异步)
     "sqlalchemy[asyncio]>=2.0.45",
     "asyncpg>=0.31.0",
     "pgvector>=0.4.2",
     "alembic>=1.17.2",
-    "psycopg[binary,pool]>=3.2.0",  # Legacy: 迁移完成后移除
-    
+    "psycopg[binary,pool]>=3.2.0", # Legacy: 迁移完成后移除
     # HTTP 客户端
     "httpx>=0.28.0",
     "aiofiles>=24.1.0",
-    
     # 数据验证
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
-    
     # 工具
     "python-dotenv>=1.0.1",
     "pillow>=11.0.0",
     "numpy>=2.2.0",
-    
     # 认证
     "pyjwt>=2.10.1",
-    
     # S3 存储
     "boto3>=1.35.0",
+    "cryptography>=46.0.3",
 ]
 
 [project.optional-dependencies]

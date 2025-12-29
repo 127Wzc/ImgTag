@@ -86,6 +86,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/pages/StorageManagement.vue'),
         meta: { title: '存储管理', requiresAdmin: true },
     },
+    {
+        path: '/storage-endpoints',
+        name: 'StorageEndpoints',
+        component: () => import('@/pages/StorageEndpoints.vue'),
+        meta: { title: '存储端点', requiresAdmin: true },
+    },
     // 404 页面
     {
         path: '/:pathMatch(.*)*',

@@ -54,6 +54,8 @@ export interface UploadOptions {
     categoryId?: number
     tags?: string
     description?: string
+    endpointId?: number  // 目标存储端点 ID
+    isPublic?: boolean   // 是否公开
 }
 
 /**
@@ -76,6 +78,12 @@ export function useUploadImage() {
             }
             if (options.description) {
                 formData.append('description', options.description)
+            }
+            if (options.endpointId) {
+                formData.append('endpoint_id', String(options.endpointId))
+            }
+            if (options.isPublic !== undefined) {
+                formData.append('is_public', String(options.isPublic))
             }
 
             const { data } = await apiClient.post<UploadAnalyzeResponse>('/images/upload', formData, {

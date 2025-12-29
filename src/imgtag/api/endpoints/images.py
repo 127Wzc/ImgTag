@@ -31,8 +31,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import get_current_user, require_admin
 from imgtag.core.logging_config import get_logger, get_perf_logger
+from imgtag.core.storage_constants import StorageProvider
 from imgtag.db import get_async_session
-from imgtag.db.repositories import image_repository, image_tag_repository, tag_repository
+from imgtag.db.repositories import (
+    image_location_repository,
+    image_repository,
+    image_tag_repository,
+    storage_endpoint_repository,
+    tag_repository,
+)
 from imgtag.models.image import Image
 from imgtag.schemas import (
     ImageCreateByUrl,
@@ -46,10 +53,8 @@ from imgtag.schemas import (
     SimilarSearchResponse,
     UploadAnalyzeResponse,
 )
-from imgtag.services import embedding_service, upload_service
+from imgtag.services import embedding_service, storage_service, upload_service
 from imgtag.services.task_queue import task_queue
-from imgtag.core.config_cache import config_cache
-from imgtag.services.s3_service import s3_service
 
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
@@ -72,79 +77,109 @@ router = APIRouter()
 
 
 async def _get_display_url(image: Image) -> str:
-    """根据 image_url_priority 配置返回正确的显示 URL。
+    """从存储端点获取图片访问 URL。
     
-    对于本地相对路径，会自动拼接系统基础 URL（base_url）。
-    对于完整 URL（http/https 开头），保持不变。
+    URL 格式由端点的 public_url_prefix 和 bucket_name 决定。
     
     Args:
         image: Image model instance.
         
     Returns:
-        str: 应该显示的图片 URL。
+        str: 图片访问 URL。
     """
-    priority = await config_cache.get("image_url_priority", "auto")
-    
-    # 如果配置为 S3 优先 且有 S3 路径
-    if priority == "s3" and image.s3_path and await s3_service.is_enabled():
-        return await s3_service.get_public_url(image.s3_path)
-    
-    # 如果配置为 auto（S3 启用时优先 S3）
-    if priority == "auto" and image.s3_path and await s3_service.is_enabled():
-        return await s3_service.get_public_url(image.s3_path)
-    
-    # 返回本地 URL，如果是相对路径则拼接 base_url
-    local_url = image.image_url or ""
-    
-    # 如果已经是完整 URL，直接返回
-    if local_url.startswith("http://") or local_url.startswith("https://"):
-        return local_url
-    
-    # 如果是相对路径，拼接 base_url
-    if local_url.startswith("/"):
-        base_url = await config_cache.get("base_url", "")
-        if base_url:
-            # 确保 base_url 末尾没有斜杠
-            base_url = base_url.rstrip("/")
-            return f"{base_url}{local_url}"
-    
-    return local_url
+    try:
+        return await storage_service.get_read_url(image) or ""
+    except Exception:
+        return ""
+
+
 
 
 async def _image_to_response(
     image: Image,
     tags_with_source: list[dict] | None = None,
+    display_url: str | None = None,
 ) -> ImageResponse:
     """Convert Image model to response schema.
 
     Args:
         image: Image model instance.
         tags_with_source: Optional tags with source info.
+        display_url: Pre-computed display URL (for batch optimization).
 
     Returns:
         ImageResponse schema.
     """
-    display_url = await _get_display_url(image)
+    if display_url is None:
+        display_url = await _get_display_url(image)
     
     return ImageResponse(
         id=image.id,
         image_url=display_url,
-        file_path=image.file_path,
         file_hash=image.file_hash,
         file_type=image.file_type,
         file_size=float(image.file_size) if image.file_size else None,
         width=image.width,
         height=image.height,
-        storage_type=image.storage_type,
-        s3_path=image.s3_path,
-        local_exists=image.local_exists,
         original_url=image.original_url,
         description=image.description,
         tags=tags_with_source or [],
-        created_at=image.created_at,
-        updated_at=image.updated_at,
+        is_public=image.is_public,
+        created_at=str(image.created_at) if image.created_at else None,
+        updated_at=str(image.updated_at) if image.updated_at else None,
         uploaded_by=image.uploaded_by,
     )
+
+
+
+async def _images_to_responses(
+    images: list[Image],
+    tags_map: dict[int, list[dict]],
+) -> list[ImageResponse]:
+    """Convert multiple Image models to response schemas efficiently.
+    
+    Batches URL retrieval to avoid N+1 queries.
+    URLs are fully managed by storage_service based on endpoint configuration.
+
+    Args:
+        images: List of Image model instances.
+        tags_map: Dictionary mapping image_id to tags with source info.
+
+    Returns:
+        List of ImageResponse schemas.
+    """
+    if not images:
+        return []
+    
+    # Batch get URLs from storage endpoints
+    # URL format is determined by each endpoint's public_url_prefix or default path
+    urls = await storage_service.get_read_urls(images)
+    
+    # Build responses
+    responses = []
+    for img in images:
+        display_url = urls.get(img.id, "")
+        
+        responses.append(ImageResponse(
+            id=img.id,
+            image_url=display_url,
+            file_hash=img.file_hash,
+            file_type=img.file_type,
+            file_size=float(img.file_size) if img.file_size else None,
+            width=img.width,
+            height=img.height,
+            original_url=img.original_url,
+            description=img.description,
+            tags=tags_map.get(img.id, []),
+            is_public=img.is_public,
+            created_at=str(img.created_at) if img.created_at else None,
+            updated_at=str(img.updated_at) if img.updated_at else None,
+            uploaded_by=img.uploaded_by,
+        ))
+    
+    return responses
+
+
 
 
 @router.post("/", response_model=dict[str, Any], status_code=201)
@@ -173,12 +208,11 @@ async def create_image_manual(
             image.tags,
         )
 
-        # Create image record
+        # Create image record (without legacy fields)
         new_image = await image_repository.create_image(
             session,
-            image_url=image.image_url,
             description=image.description,
-            original_url=image.image_url,
+            original_url=image.image_url,  # Store provided URL as original_url
             embedding=embedding_vector,
             uploaded_by=user.get("id"),
         )
@@ -244,11 +278,9 @@ async def analyze_and_create_from_url(
         # 获取文件类型
         file_type = file_path.split(".")[-1] if "." in file_path else "jpg"
 
-        # Create initial record with local path
+        # Create initial record (without legacy storage fields)
         new_image = await image_repository.create_image(
             session,
-            image_url=access_url,  # 本地访问路径
-            file_path=file_path,    # 本地文件路径
             original_url=request.image_url,  # 原始 URL
             file_hash=file_hash,
             file_type=file_type,
@@ -259,6 +291,23 @@ async def analyze_and_create_from_url(
             embedding=None,  # Pending analysis
             uploaded_by=user.get("id"),
         )
+        
+        # Create local ImageLocation record
+        local_endpoint = await storage_endpoint_repository.get_by_name(session, StorageProvider.LOCAL)
+        if local_endpoint:
+            local_object_key = file_path.replace("\\", "/").lstrip("/")
+            if local_object_key.startswith("uploads/"):
+                local_object_key = local_object_key[8:]
+            
+            await image_location_repository.create(
+                session,
+                image_id=new_image.id,
+                endpoint_id=local_endpoint.id,
+                object_key=local_object_key,
+                is_primary=True,
+                sync_status="synced",
+                synced_at=datetime.now(timezone.utc),
+            )
 
         # Set initial tags
         if tags:
@@ -311,6 +360,8 @@ async def upload_and_analyze(
     tags: str = Form(default="", description="手动标签，逗号分隔"),
     description: str = Form(default="", description="手动描述"),
     category_id: Optional[int] = Form(default=None, description="主分类ID"),
+    is_public: bool = Form(default=True, description="是否公开可见"),
+    endpoint_id: Optional[int] = Form(default=None, description="目标存储端点ID"),
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_async_session),
 ):
@@ -324,39 +375,70 @@ async def upload_and_analyze(
         tags: Manual tags (comma-separated).
         description: Manual description.
         category_id: Category ID (level=0).
+        is_public: Whether image is publicly visible (default True).
+        endpoint_id: Target storage endpoint ID (uses default if None).
         user: Current user.
         session: Database session.
 
     Returns:
         Upload response with image ID.
     """
+    # storage_service and repositories imported at top level
+    
     start_time = time.time()
     logger.info(
         f"上传文件: {file.filename}, auto_analyze={auto_analyze}, "
-        f"category_id={category_id}"
+        f"category_id={category_id}, is_public={is_public}, endpoint_id={endpoint_id}"
     )
 
     try:
         file_content = await file.read()
 
-        # Save file
-        file_path, access_url, file_type, width, height = (
-            await upload_service.save_uploaded_file(file_content, file.filename)
-        )
+        # Calculate hash early for object key generation
+        file_hash = await asyncio.to_thread(lambda: hashlib.md5(file_content).hexdigest())
+        file_size = round(len(file_content) / (1024 * 1024), 2)
+        
+        # Get file extension
+        ext = file.filename.split(".")[-1].lower() if "." in file.filename else "jpg"
+
+        # Get target endpoint (use specified or default)
+        if endpoint_id:
+            target_endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
+            if not target_endpoint or not target_endpoint.is_enabled:
+                raise HTTPException(400, f"存储端点 {endpoint_id} 不可用")
+        else:
+            target_endpoint = await storage_endpoint_repository.get_default_upload(session)
+        
+        # Generate unified object key based on hash
+        object_key = storage_service.generate_object_key(file_hash, ext)
+        
+        # Upload to target endpoint
+        if target_endpoint:
+            upload_success = await storage_service.upload_to_endpoint(
+                file_content, object_key, target_endpoint
+            )
+            if not upload_success:
+                logger.warning(f"上传到端点 {target_endpoint.name} 失败,改用本地存储")
+                target_endpoint = None
+        
+        # Fallback to local upload if no endpoint or upload failed
+        if not target_endpoint:
+            file_path, access_url, file_type, width, height = (
+                await upload_service.save_uploaded_file(file_content, file.filename)
+            )
+        else:
+            # For endpoint uploads, also save locally for immediate access
+            file_path, access_url, file_type, width, height = (
+                await upload_service.save_uploaded_file(file_content, file.filename)
+            )
 
         final_tags = [t.strip() for t in tags.split(",") if t.strip()]
         final_description = description
 
-        # Calculate hash and size (线程池执行避免阻塞)
-        file_hash = await asyncio.to_thread(lambda: hashlib.md5(file_content).hexdigest())
-        file_size = round(len(file_content) / (1024 * 1024), 2)
-
-        # Create image record
+        # Create image record (without legacy storage fields)
         t1 = time.time()
         new_image = await image_repository.create_image(
             session,
-            image_url=access_url,
-            file_path=file_path,
             file_hash=file_hash,
             file_type=file_type,
             file_size=file_size,
@@ -365,8 +447,41 @@ async def upload_and_analyze(
             description=final_description,
             embedding=None,  # Pending analysis
             uploaded_by=user.get("id"),
+            is_public=is_public,
         )
         perf_logger.debug(f"创建图片记录耗时: {time.time() - t1:.4f}秒")
+
+        # Create image_location record for the storage
+        if target_endpoint:
+            # Upload to remote endpoint
+            await image_location_repository.create(
+                session,
+                image_id=new_image.id,
+                endpoint_id=target_endpoint.id,
+                object_key=object_key,
+                is_primary=True,
+                sync_status="synced",
+                synced_at=datetime.now(timezone.utc),
+            )
+            logger.info(f"创建存储位置记录: image_id={new_image.id}, endpoint={target_endpoint.name}")
+        
+        # Always create local ImageLocation (local is always saved)
+        local_endpoint = await storage_endpoint_repository.get_by_name(session, StorageProvider.LOCAL)
+        if local_endpoint:
+            # Use file_path relative to uploads dir as object_key
+            local_object_key = file_path.replace("\\", "/").lstrip("/")
+            if local_object_key.startswith("uploads/"):
+                local_object_key = local_object_key[8:]  # Remove "uploads/" prefix
+            
+            await image_location_repository.create(
+                session,
+                image_id=new_image.id,
+                endpoint_id=local_endpoint.id,
+                object_key=local_object_key,
+                is_primary=not bool(target_endpoint),  # Primary if no remote endpoint
+                sync_status="synced",
+                synced_at=datetime.now(timezone.utc),
+            )
 
         # Set initial tags
         if final_tags:
@@ -389,7 +504,7 @@ async def upload_and_analyze(
                 category_id,
                 source="user",
                 sort_order=0,
-                added_by=user.get("id"),  # 添加用户ID
+                added_by=user.get("id"),
             )
             perf_logger.info(f"设置分类标签耗时: {time.time() - t3:.4f}秒")
         
@@ -399,7 +514,6 @@ async def upload_and_analyze(
             logger.info(f"分辨率判断: {width}x{height} -> {resolution_name}")
             if resolution_name != "unknown":
                 t4 = time.time()
-                # Get or create resolution tag (level=1)
                 resolution_tag = await tag_repository.get_or_create(
                     session, resolution_name, source="system", level=1
                 )
@@ -407,7 +521,6 @@ async def upload_and_analyze(
                 perf_logger.info(f"获取/创建分辨率标签耗时: {time.time() - t4:.4f}秒")
                 
                 t5 = time.time()
-                # Add to image
                 await image_tag_repository.add_tag_to_image(
                     session,
                     new_image.id,
@@ -435,6 +548,8 @@ async def upload_and_analyze(
             description=final_description,
             process_time=f"{total_time:.4f}秒",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"上传和添加任务失败: {e}")
         raise HTTPException(status_code=500, detail=f"上传失败: {e}")
@@ -470,6 +585,9 @@ async def upload_zip(
 
         uploaded_ids = []
         failed_files = []
+        
+        # Query local endpoint ONCE before the loop (optimization)
+        local_endpoint = await storage_endpoint_repository.get_by_name(session, StorageProvider.LOCAL)
 
         with zipfile.ZipFile(io.BytesIO(zip_content), "r") as zf:
             for zip_info in zf.infolist():
@@ -496,8 +614,6 @@ async def upload_zip(
 
                     new_image = await image_repository.create_image(
                         session,
-                        image_url=access_url,
-                        file_path=file_path,
                         file_hash=file_hash,
                         file_type=file_type,
                         file_size=file_size,
@@ -506,6 +622,22 @@ async def upload_zip(
                         embedding=None,
                         uploaded_by=user.get("id"),
                     )
+                    
+                    # Create local ImageLocation record (no DB query in loop)
+                    if local_endpoint:
+                        local_object_key = file_path.replace("\\", "/").lstrip("/")
+                        if local_object_key.startswith("uploads/"):
+                            local_object_key = local_object_key[8:]
+                        
+                        await image_location_repository.create(
+                            session,
+                            image_id=new_image.id,
+                            endpoint_id=local_endpoint.id,
+                            object_key=local_object_key,
+                            is_primary=True,
+                            sync_status="synced",
+                            synced_at=datetime.now(timezone.utc),
+                        )
 
                     if category_id:
                         await image_tag_repository.add_tag_to_image(
@@ -620,11 +752,8 @@ async def search_images(
             session, image_ids
         )
 
-        # Convert to response with tags_with_source
-        images = await asyncio.gather(*[
-            _image_to_response(img, tags_with_source=tags_map.get(img.id, []))
-            for img in results["images"]
-        ])
+        # Convert to response with batch URL retrieval
+        images = await _images_to_responses(results["images"], tags_map)
 
         response = ImageSearchResponse(
             images=images,
@@ -750,10 +879,8 @@ async def get_my_images(
             session, image_ids
         )
 
-        images = await asyncio.gather(*[
-            _image_to_response(img, tags_with_source=tags_map.get(img.id, []))
-            for img in results["images"]
-        ])
+        # Convert to response with batch URL retrieval
+        images = await _images_to_responses(results["images"], tags_map)
 
         response = ImageSearchResponse(
             images=images,
@@ -843,10 +970,10 @@ async def update_image(
         await image_repository.update_image(
             session,
             image,
-            image_url=image_update.image_url,
             description=image_update.description,
             embedding=embedding_vector,
             original_url=image_update.original_url,
+            is_public=image_update.is_public,
         )
 
         # Update tags

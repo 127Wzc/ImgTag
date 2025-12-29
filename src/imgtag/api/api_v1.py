@@ -9,7 +9,7 @@ from fastapi import APIRouter
 
 from imgtag.api.endpoints import (
     images, search, system, config, vectors, queue, collections, tags,
-    tasks, auth, approvals, storage,
+    tasks, auth, approvals, storage_endpoints,
 )
 
 api_router = APIRouter()
@@ -91,9 +91,9 @@ api_router.include_router(
     tags=["任务管理"]
 )
 
-# 注册存储管理路由
+# 注册存储管理路由 (多端点存储)
 api_router.include_router(
-    storage.router, 
+    storage_endpoints.router, 
     prefix="/storage", 
     tags=["存储管理"]
 )
@@ -105,3 +105,4 @@ api_router.include_router(
     prefix="", 
     tags=["外部API"]
 )
+

@@ -406,17 +406,12 @@ async def calculate_missing_hashes(
                             return hashlib.md5(f.read()).hexdigest()
                     file_hash = await asyncio.to_thread(_calc_hash, file_path)
 
-                # URL image - download and hash
-                elif img.get("image_url"):
-                    url = img["image_url"]
-                    if url.startswith("/"):
-                        base_url = await config_cache.get("base_url", "http://localhost:8000")
-                        url = base_url.rstrip("/") + url
-
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        response = await client.get(url)
-                        if response.status_code == 200:
-                            file_hash = hashlib.md5(response.content).hexdigest()
+                # URL image - use storage service to get content
+                else:
+                    from imgtag.services.storage_service import storage_service
+                    content = await storage_service.get_file_content(img["id"])
+                    if content:
+                        file_hash = hashlib.md5(content).hexdigest()
 
                 if file_hash:
                     hash_updates.append({"id": img["id"], "hash": file_hash})

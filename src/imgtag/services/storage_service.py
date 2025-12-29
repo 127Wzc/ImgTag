@@ -1,0 +1,723 @@
+"""Unified storage service for multi-endpoint operations.
+
+Provides abstraction layer for uploading, downloading, and managing
+files across multiple storage endpoints (local, S3, R2, etc.).
+"""
+
+import asyncio
+import hashlib
+import io
+import os
+import random
+from typing import Optional, Sequence
+
+from imgtag.core.config import settings
+from imgtag.core.logging_config import get_logger
+from imgtag.core.storage_constants import DEFAULT_PRIORITY, StorageProvider
+from imgtag.db.database import async_session_maker
+from imgtag.db.repositories import (
+    image_location_repository,
+    storage_endpoint_repository,
+)
+from imgtag.models.image import Image
+from imgtag.models.image_location import ImageLocation
+from imgtag.models.storage_endpoint import StorageEndpoint
+
+logger = get_logger(__name__)
+
+
+def _select_by_weight(
+    locations: Sequence[ImageLocation],
+    endpoint_map: dict[int, StorageEndpoint],
+) -> ImageLocation | None:
+    """Select a location using weighted random among same-priority endpoints.
+    
+    Groups locations by endpoint priority, then within the highest priority
+    group, selects randomly based on endpoint read_weight.
+    
+    Args:
+        locations: List of image locations to choose from.
+        endpoint_map: Mapping of endpoint_id to StorageEndpoint.
+        
+    Returns:
+        Selected ImageLocation or None if no valid locations.
+    """
+    if not locations:
+        return None
+    
+    # Filter and sort by priority
+    valid_locations = [
+        loc for loc in locations 
+        if loc.endpoint_id in endpoint_map and endpoint_map[loc.endpoint_id].is_enabled
+    ]
+    if not valid_locations:
+        return None
+    
+    # Sort by priority (lower = higher priority)
+    valid_locations.sort(
+        key=lambda loc: endpoint_map[loc.endpoint_id].read_priority
+    )
+    
+    # Get the best (lowest) priority
+    best_priority = endpoint_map[valid_locations[0].endpoint_id].read_priority
+    
+    # Get all locations with best priority
+    top_tier = [
+        loc for loc in valid_locations
+        if endpoint_map[loc.endpoint_id].read_priority == best_priority
+    ]
+    
+    # If only one, return it directly
+    if len(top_tier) == 1:
+        return top_tier[0]
+    
+    # Weighted random selection based on read_weight (clamp negative to 0)
+    weights = [max(0, endpoint_map[loc.endpoint_id].read_weight) for loc in top_tier]
+    total_weight = sum(weights)
+    
+    # If all weights are 0, pick random uniformly
+    if total_weight == 0:
+        return random.choice(top_tier)
+    
+    # Weighted random choice
+    return random.choices(top_tier, weights=weights, k=1)[0]
+
+
+class StorageService:
+    """Unified storage service for multi-endpoint file operations.
+    
+    Handles file upload/download across multiple storage backends
+    with automatic endpoint selection and failover support.
+    """
+
+    def generate_object_key(self, file_hash: str, extension: str) -> str:
+        """Generate unified object key based on file hash.
+        
+        Uses hash-based directory structure for even distribution:
+        images/{hash[0:2]}/{hash[2:4]}/{full_hash}.{ext}
+        
+        Args:
+            file_hash: MD5 or SHA256 hash of the file.
+            extension: File extension without dot (e.g., 'jpg').
+            
+        Returns:
+            Object key string for storage.
+        """
+        ext = extension.lstrip(".")
+        return f"images/{file_hash[:2]}/{file_hash[2:4]}/{file_hash}.{ext}"
+
+    def _resolve_local_path(self, endpoint: StorageEndpoint) -> str:
+        """Resolve bucket_name to absolute physical path for local storage.
+        
+        For local endpoints, bucket_name serves as the directory name relative
+        to the project root (e.g., 'uploads' -> /project/uploads).
+        
+        Args:
+            endpoint: Storage endpoint with bucket_name.
+            
+        Returns:
+            Absolute path string for file storage.
+        """
+        bucket = endpoint.bucket_name or "uploads"
+        
+        # If bucket_name is an absolute path, use as-is
+        if os.path.isabs(bucket):
+            return bucket
+        
+        # Relative path - resolve relative to project root
+        project_root = settings.get_upload_path().parent
+        return str(project_root / bucket)
+
+    async def get_default_upload_endpoint(self) -> Optional[StorageEndpoint]:
+        """Get the default endpoint for uploads."""
+        async with async_session_maker() as session:
+            endpoint = await storage_endpoint_repository.get_default_upload(session)
+            if not endpoint:
+                # Fallback to first enabled endpoint
+                endpoints = await storage_endpoint_repository.get_enabled(session)
+                endpoint = endpoints[0] if endpoints else None
+            return endpoint
+
+    async def get_endpoints(
+        self,
+        enabled_only: bool = True,
+        healthy_only: bool = False,
+    ) -> list[StorageEndpoint]:
+        """Get all storage endpoints.
+        
+        Args:
+            enabled_only: Only return enabled endpoints.
+            healthy_only: Only return healthy endpoints.
+            
+        Returns:
+            List of StorageEndpoint instances.
+        """
+        async with async_session_maker() as session:
+            if healthy_only:
+                return list(await storage_endpoint_repository.get_healthy_for_read(session))
+            elif enabled_only:
+                return list(await storage_endpoint_repository.get_enabled(session))
+            else:
+                return list(await storage_endpoint_repository.get_all(session))
+
+    async def get_read_url(self, image: Image) -> str:
+        """Get best accessible URL for an image.
+        
+        Selects from available locations based on endpoint priority
+        and health status.
+        
+        NOTE: For batch operations, use get_read_urls() to avoid N+1 queries.
+        
+        Args:
+            image: Image instance with locations relationship loaded.
+            
+        Returns:
+            URL string for accessing the image.
+        """
+        urls = await self.get_read_urls([image])
+        return urls.get(image.id, "")
+
+    async def get_local_file_path(self, image_id: int) -> str | None:
+        """Get local file path for an image.
+        
+        Looks up the image's local endpoint location and returns the full
+        filesystem path.
+        
+        Args:
+            image_id: Image ID.
+            
+        Returns:
+            Local file path string, or None if not found.
+        """
+        async with async_session_maker() as session:
+            locations = await image_location_repository.get_by_image(session, image_id)
+            endpoints = await storage_endpoint_repository.get_enabled(session)
+            
+            # Find local endpoint
+            local_endpoint = None
+            for ep in endpoints:
+                if ep.provider == StorageProvider.LOCAL:
+                    local_endpoint = ep
+                    break
+            
+            if not local_endpoint:
+                return None
+            
+            # Find location for local endpoint
+            for loc in locations:
+                if loc.endpoint_id == local_endpoint.id:
+                    base_path = self._resolve_local_path(local_endpoint)
+                    return os.path.join(base_path, loc.object_key)
+            
+            return None
+
+    async def get_file_content(self, image_id: int) -> bytes | None:
+        """Get file content for an image from any available source.
+        
+        Tries local file first, then remote endpoints in priority order.
+        
+        Args:
+            image_id: Image ID.
+            
+        Returns:
+            File content bytes, or None if not available.
+        """
+        async with async_session_maker() as session:
+            # Single query for locations
+            locations = await image_location_repository.get_by_image(session, image_id)
+            if not locations:
+                return None
+            
+            # Get healthy endpoints once (includes enabled check)
+            endpoints = await storage_endpoint_repository.get_healthy_for_read(session)
+            endpoint_map = {ep.id: ep for ep in endpoints}
+            
+            # Find local endpoint from healthy list
+            local_endpoint = None
+            for ep in endpoints:
+                if ep.provider == StorageProvider.LOCAL:
+                    local_endpoint = ep
+                    break
+            
+            # Try local file first
+            if local_endpoint:
+                for loc in locations:
+                    if loc.endpoint_id == local_endpoint.id:
+                        base_path = self._resolve_local_path(local_endpoint)
+                        local_path = os.path.join(base_path, loc.object_key)
+                        if os.path.exists(local_path):
+                            def _read():
+                                with open(local_path, "rb") as f:
+                                    return f.read()
+                            return await asyncio.to_thread(_read)
+                        break
+            
+            # Try remote endpoints with weighted selection (excluding local)
+            remote_locations = [
+                loc for loc in locations 
+                if loc.endpoint_id in endpoint_map 
+                and endpoint_map[loc.endpoint_id].provider != StorageProvider.LOCAL
+            ]
+            selected = _select_by_weight(remote_locations, endpoint_map)
+            if selected:
+                endpoint = endpoint_map.get(selected.endpoint_id)
+                if endpoint:
+                    content = await self.download_from_endpoint(selected.object_key, endpoint)
+                    if content:
+                        return content
+        
+        return None
+
+    async def get_read_urls(self, images: list[Image]) -> dict[int, str]:
+        """Get accessible URLs for multiple images efficiently.
+        
+        Batches database queries to avoid N+1 problem.
+        
+        Args:
+            images: List of Image instances.
+            
+        Returns:
+            Dictionary mapping image_id to URL.
+        """
+        if not images:
+            return {}
+        
+        image_ids = [img.id for img in images]
+        result = {img.id: "" for img in images}
+        
+        async with async_session_maker() as session:
+            # Get healthy endpoints once
+            endpoints = await storage_endpoint_repository.get_healthy_for_read(session)
+            endpoint_map = {ep.id: ep for ep in endpoints}
+            
+            if not endpoint_map:
+                return result
+            
+            # Batch get all locations for all images (single query)
+            all_locations = await image_location_repository.get_by_image_ids(session, image_ids)
+            
+            # Build URLs for each image using weighted selection
+            for image_id in image_ids:
+                locations = all_locations.get(image_id, [])
+                
+                # Select location using priority + weight-based load balancing
+                selected = _select_by_weight(locations, endpoint_map)
+                if selected:
+                    endpoint = endpoint_map.get(selected.endpoint_id)
+                    if endpoint:
+                        url = self._build_url(endpoint, selected.object_key)
+                        if url:
+                            result[image_id] = url
+        
+        return result
+
+    async def download_from_any_endpoint(
+        self,
+        session,
+        image_id: int,
+        target_path: str,
+    ) -> bool:
+        """Download file from any available endpoint for an image.
+        
+        Uses weighted selection with fallback to try all endpoints.
+        
+        Args:
+            session: Database session.
+            image_id: Image ID to download file for.
+            target_path: Local path to save the file.
+            
+        Returns:
+            True if download successful.
+        """
+        
+        locations = await image_location_repository.get_by_image(session, image_id)
+        if not locations:
+            return False
+        
+        endpoints = await storage_endpoint_repository.get_healthy_for_read(session)
+        endpoint_map = {ep.id: ep for ep in endpoints}
+        
+        # Try weighted selection first
+        selected = _select_by_weight(locations, endpoint_map)
+        if selected:
+            endpoint = endpoint_map.get(selected.endpoint_id)
+            if endpoint:
+                content = await self.download_from_endpoint(selected.object_key, endpoint)
+                if content:
+                    def _write():
+                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        with open(target_path, "wb") as f:
+                            f.write(content)
+                    await asyncio.to_thread(_write)
+                    logger.info(f"Downloaded from {endpoint.name} to {target_path}")
+                    return True
+        
+        # Fallback: try remaining endpoints in priority order
+        tried = {selected.endpoint_id} if selected else set()
+        remaining = [loc for loc in locations if loc.endpoint_id not in tried]
+        remaining.sort(key=lambda loc: endpoint_map.get(loc.endpoint_id, StorageEndpoint()).read_priority)
+        
+        for location in remaining:
+            endpoint = endpoint_map.get(location.endpoint_id)
+            if not endpoint:
+                continue
+            content = await self.download_from_endpoint(location.object_key, endpoint)
+            if content:
+                def _write():
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    with open(target_path, "wb") as f:
+                        f.write(content)
+                await asyncio.to_thread(_write)
+                logger.info(f"Downloaded from {endpoint.name} (fallback) to {target_path}")
+                return True
+        
+        return False
+
+    def _build_url(self, endpoint: StorageEndpoint, object_key: str) -> str:
+        """Build public URL for an object.
+        
+        Args:
+            endpoint: Storage endpoint configuration.
+            object_key: Object key/path.
+            
+        Returns:
+            Public URL string.
+        """
+        bucket = endpoint.bucket_name or "uploads"
+        path_prefix = (endpoint.path_prefix or "").strip("/")
+        
+        # Check public_url_prefix first (works for all endpoint types)
+        if endpoint.public_url_prefix:
+            # CDN or custom domain
+            prefix = endpoint.public_url_prefix.rstrip("/")
+            if path_prefix:
+                return f"{prefix}/{bucket}/{path_prefix}/{object_key}"
+            return f"{prefix}/{bucket}/{object_key}"
+        
+        if endpoint.provider == StorageProvider.LOCAL:
+            # Local files served through /{bucket_name}/...
+            if path_prefix:
+                return f"/{bucket}/{path_prefix}/{object_key}"
+            return f"/{bucket}/{object_key}"
+        
+        if endpoint.endpoint_url and bucket:
+            # Direct S3 URL
+            base = endpoint.endpoint_url.rstrip("/")
+            if path_prefix:
+                return f"{base}/{bucket}/{path_prefix}/{object_key}"
+            return f"{base}/{bucket}/{object_key}"
+        
+        return ""
+
+    async def upload_to_endpoint(
+        self,
+        file_content: bytes,
+        object_key: str,
+        endpoint: StorageEndpoint,
+    ) -> bool:
+        """Upload file content to a specific endpoint.
+        
+        Args:
+            file_content: Raw file bytes.
+            object_key: Target object key.
+            endpoint: Target endpoint configuration.
+            
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            if endpoint.provider == StorageProvider.LOCAL:
+                return await self._upload_local(file_content, object_key, endpoint)
+            else:
+                return await self._upload_s3(file_content, object_key, endpoint)
+        except Exception as e:
+            logger.error(f"Upload failed to {endpoint.name}: {e}")
+            return False
+
+    async def _upload_local(
+        self,
+        file_content: bytes,
+        object_key: str,
+        endpoint: StorageEndpoint,
+    ) -> bool:
+        """Upload to local filesystem."""
+        
+        
+        base_path = self._resolve_local_path(endpoint)
+        full_path = os.path.join(base_path, object_key)
+        
+        # Create directories
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        
+        # Write file asynchronously
+        def _write():
+            with open(full_path, "wb") as f:
+                f.write(file_content)
+        
+        await asyncio.to_thread(_write)
+        logger.info(f"Uploaded to local: {full_path}")
+        return True
+
+    async def _upload_s3(
+        self,
+        file_content: bytes,
+        object_key: str,
+        endpoint: StorageEndpoint,
+    ) -> bool:
+        """Upload to S3-compatible storage."""
+        
+        import boto3
+        from botocore.config import Config as BotoConfig
+        
+        def _do_upload():
+            # Use path style or virtual-hosted based on endpoint config
+            addressing_style = "path" if endpoint.path_style else "virtual"
+            config = BotoConfig(
+                signature_version="s3v4",
+                s3={"addressing_style": addressing_style},
+            )
+            
+            client = boto3.client(
+                "s3",
+                endpoint_url=endpoint.endpoint_url,
+                aws_access_key_id=endpoint.access_key_id,
+                aws_secret_access_key=endpoint.secret_access_key,
+                region_name=endpoint.region or "auto",
+                config=config,
+            )
+            
+            full_key = object_key
+            if endpoint.path_prefix:
+                full_key = f"{endpoint.path_prefix.strip('/')}/{object_key}"
+            
+            client.put_object(
+                Bucket=endpoint.bucket_name,
+                Key=full_key,
+                Body=file_content,
+            )
+        
+        await asyncio.to_thread(_do_upload)
+        logger.info(f"Uploaded to {endpoint.name}: {object_key}")
+        return True
+
+    async def download_from_endpoint(
+        self,
+        object_key: str,
+        endpoint: StorageEndpoint,
+    ) -> Optional[bytes]:
+        """Download file from a specific endpoint.
+        
+        Args:
+            object_key: Object key to download.
+            endpoint: Source endpoint configuration.
+            
+        Returns:
+            File content bytes or None if failed.
+        """
+        try:
+            if endpoint.provider == StorageProvider.LOCAL:
+                return await self._download_local(object_key, endpoint)
+            else:
+                return await self._download_s3(object_key, endpoint)
+        except Exception as e:
+            logger.error(f"Download failed from {endpoint.name}: {e}")
+            return None
+
+    async def _download_local(
+        self,
+        object_key: str,
+        endpoint: StorageEndpoint,
+    ) -> Optional[bytes]:
+        """Download from local filesystem."""
+        
+        
+        base_path = self._resolve_local_path(endpoint)
+        full_path = os.path.join(base_path, object_key)
+        
+        if not os.path.exists(full_path):
+            return None
+        
+        def _read():
+            with open(full_path, "rb") as f:
+                return f.read()
+        
+        return await asyncio.to_thread(_read)
+
+    async def _download_s3(
+        self,
+        object_key: str,
+        endpoint: StorageEndpoint,
+    ) -> Optional[bytes]:
+        """Download from S3-compatible storage."""
+        
+        import boto3
+        from botocore.config import Config as BotoConfig
+        
+        def _do_download():
+            addressing_style = "path" if endpoint.path_style else "virtual"
+            config = BotoConfig(
+                signature_version="s3v4",
+                s3={"addressing_style": addressing_style},
+            )
+            
+            client = boto3.client(
+                "s3",
+                endpoint_url=endpoint.endpoint_url,
+                aws_access_key_id=endpoint.access_key_id,
+                aws_secret_access_key=endpoint.secret_access_key,
+                region_name=endpoint.region or "auto",
+                config=config,
+            )
+            
+            full_key = object_key
+            if endpoint.path_prefix:
+                full_key = f"{endpoint.path_prefix.strip('/')}/{object_key}"
+            
+            buffer = io.BytesIO()
+            client.download_fileobj(endpoint.bucket_name, full_key, buffer)
+            return buffer.getvalue()
+        
+        return await asyncio.to_thread(_do_download)
+
+    async def file_exists(
+        self,
+        object_key: str,
+        endpoint: StorageEndpoint,
+    ) -> bool:
+        """Check if file exists on endpoint.
+        
+        Args:
+            object_key: Object key to check.
+            endpoint: Target endpoint.
+            
+        Returns:
+            True if file exists.
+        """
+        try:
+            if endpoint.provider == StorageProvider.LOCAL:
+                
+                base_path = self._resolve_local_path(endpoint)
+                full_path = os.path.join(base_path, object_key)
+                return os.path.exists(full_path)
+            else:
+                return await self._s3_file_exists(object_key, endpoint)
+        except Exception:
+            return False
+
+    async def _s3_file_exists(
+        self,
+        object_key: str,
+        endpoint: StorageEndpoint,
+    ) -> bool:
+        """Check if file exists in S3."""
+        
+        import boto3
+        from botocore.config import Config as BotoConfig
+        from botocore.exceptions import ClientError
+        
+        def _check():
+            addressing_style = "path" if endpoint.path_style else "virtual"
+            config = BotoConfig(
+                signature_version="s3v4",
+                s3={"addressing_style": addressing_style},
+            )
+            
+            client = boto3.client(
+                "s3",
+                endpoint_url=endpoint.endpoint_url,
+                aws_access_key_id=endpoint.access_key_id,
+                aws_secret_access_key=endpoint.secret_access_key,
+                region_name=endpoint.region or "auto",
+                config=config,
+            )
+            
+            full_key = object_key
+            if endpoint.path_prefix:
+                full_key = f"{endpoint.path_prefix.strip('/')}/{object_key}"
+            
+            try:
+                client.head_object(Bucket=endpoint.bucket_name, Key=full_key)
+                return True
+            except ClientError:
+                return False
+        
+        return await asyncio.to_thread(_check)
+
+    async def delete_from_endpoint(
+        self,
+        object_key: str,
+        endpoint: StorageEndpoint,
+    ) -> bool:
+        """Delete file from a specific endpoint.
+        
+        Args:
+            object_key: Object key to delete.
+            endpoint: Target endpoint.
+            
+        Returns:
+            True if successful.
+        """
+        try:
+            if endpoint.provider == StorageProvider.LOCAL:
+                
+                base_path = self._resolve_local_path(endpoint)
+                full_path = os.path.join(base_path, object_key)
+                if os.path.exists(full_path):
+                    os.remove(full_path)
+                return True
+            else:
+                return await self._delete_s3(object_key, endpoint)
+        except Exception as e:
+            logger.error(f"Delete failed from {endpoint.name}: {e}")
+            return False
+
+    async def _delete_s3(
+        self,
+        object_key: str,
+        endpoint: StorageEndpoint,
+    ) -> bool:
+        """Delete from S3-compatible storage."""
+        
+        import boto3
+        from botocore.config import Config as BotoConfig
+        
+        def _do_delete():
+            addressing_style = "path" if endpoint.path_style else "virtual"
+            config = BotoConfig(
+                signature_version="s3v4",
+                s3={"addressing_style": addressing_style},
+            )
+            
+            client = boto3.client(
+                "s3",
+                endpoint_url=endpoint.endpoint_url,
+                aws_access_key_id=endpoint.access_key_id,
+                aws_secret_access_key=endpoint.secret_access_key,
+                region_name=endpoint.region or "auto",
+                config=config,
+            )
+            
+            full_key = object_key
+            if endpoint.path_prefix:
+                full_key = f"{endpoint.path_prefix.strip('/')}/{object_key}"
+            
+            client.delete_object(Bucket=endpoint.bucket_name, Key=full_key)
+        
+        await asyncio.to_thread(_do_delete)
+        return True
+
+    @staticmethod
+    def compute_file_hash(content: bytes) -> str:
+        """Compute MD5 hash of file content.
+        
+        Args:
+            content: File content bytes.
+            
+        Returns:
+            Hex-encoded MD5 hash string.
+        """
+        return hashlib.md5(content).hexdigest()
+
+
+# Singleton instance
+storage_service = StorageService()

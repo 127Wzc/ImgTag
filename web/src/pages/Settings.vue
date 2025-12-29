@@ -12,8 +12,6 @@ import {
   Brain,
   Cloud,
   ListTodo,
-  HardDrive,
-  Settings2,
   X,
   ChevronRight,
   RefreshCw,
@@ -36,9 +34,7 @@ const categories = [
   { key: 'vision', label: '视觉模型', icon: Eye, description: 'AI 图片分析和标签提取', color: 'text-violet-500 bg-violet-500/10' },
   { key: 'embedding', label: '向量嵌入', icon: Brain, description: '语义搜索向量化配置', color: 'text-blue-500 bg-blue-500/10' },
   { key: 'queue', label: '队列上传', icon: ListTodo, description: '任务并发与上传限制', color: 'text-amber-500 bg-amber-500/10' },
-  { key: 'storage', label: '存储配置', icon: HardDrive, description: 'S3 兼容对象存储', color: 'text-emerald-500 bg-emerald-500/10' },
-  { key: 'system', label: '系统设置', icon: Settings2, description: '基础系统配置项', color: 'text-slate-500 bg-slate-500/10' },
-  { key: 'maintenance', label: '系统维护', icon: Wrench, description: '重复检测与存储清理', color: 'text-rose-500 bg-rose-500/10' },
+  { key: 'maintenance', label: '系统维护', icon: Wrench, description: '系统设置与存储清理', color: 'text-rose-500 bg-rose-500/10' },
 ]
 
 // 配置项定义 - 支持 showWhen 条件
@@ -80,25 +76,8 @@ const configDefinitions: Record<string, ConfigDef[]> = {
     { key: 'queue_batch_interval', label: '批处理间隔 (秒)', type: 'number' },
     { key: 'max_upload_size', label: '最大上传 (MB)', type: 'number' },
   ],
-  storage: [
-    { key: 's3_enabled', label: '启用 S3 存储', type: 'boolean', description: '启用后图片存储到 S3' },
-    { key: 's3_endpoint_url', label: '端点地址', type: 'text', showWhen: { key: 's3_enabled', value: 'true' } },
-    { key: 's3_access_key_id', label: 'Access Key', type: 'text', showWhen: { key: 's3_enabled', value: 'true' } },
-    { key: 's3_secret_access_key', label: 'Secret Key', type: 'password', showWhen: { key: 's3_enabled', value: 'true' } },
-    { key: 's3_bucket_name', label: 'Bucket', type: 'text', showWhen: { key: 's3_enabled', value: 'true' } },
-    { key: 's3_region', label: '区域', type: 'text', showWhen: { key: 's3_enabled', value: 'true' } },
-    { key: 's3_public_url_prefix', label: '公开 URL 前缀', type: 'text', showWhen: { key: 's3_enabled', value: 'true' } },
-    { key: 's3_path_prefix', label: '路径前缀', type: 'text', showWhen: { key: 's3_enabled', value: 'true' } },
-    { key: 's3_force_reupload', label: '强制重新上传', type: 'boolean', description: '批量同步时覆盖已有 S3 文件', showWhen: { key: 's3_enabled', value: 'true' } },
-    { key: 'image_url_priority', label: 'URL 优先级', type: 'select', options: [
-      { value: 'auto', label: '自动' },
-      { value: 's3', label: 'S3 优先' },
-      { value: 'local', label: '本地优先' },
-    ] },
-  ],
-  system: [
-    { key: 'base_url', label: '系统基础 URL', type: 'text', description: '用于生成分享链接' },
-    { key: 'allow_register', label: '允许注册', type: 'boolean' },
+  maintenance: [
+    { key: 'allow_register', label: '允许注册', type: 'boolean', description: '关闭后禁止新用户注册' },
   ],
 }
 
@@ -451,10 +430,12 @@ import { watch } from 'vue'
 watch(activeCategory, (newVal) => {
   if (newVal === 'embedding') {
     fetchVectorStatus()
+  } else if (newVal === 'storage') {
+    fetchS3Stats()
   }
 })
 
-// ========== S3 存储管理 ==========
+// ========== 存储同步状态 ==========
 interface S3Stats {
   total: number
   with_s3: number
@@ -675,12 +656,14 @@ onMounted(() => fetchConfigs())
                   </div>
                 </div>
 
-                <!-- S3 存储管理 -->
+
+
+                <!-- S3 同步状态（保留） -->
                 <div class="p-4 bg-muted/50 rounded-xl">
                   <div class="flex items-center justify-between mb-3">
                     <div class="flex items-center gap-2">
-                      <HardDrive class="w-5 h-5 text-emerald-500" />
-                      <h3 class="font-medium text-foreground">S3 存储管理</h3>
+                      <FolderSync class="w-5 h-5 text-emerald-500" />
+                      <h3 class="font-medium text-foreground">同步状态</h3>
                     </div>
                     <Button 
                       variant="outline"
@@ -698,7 +681,7 @@ onMounted(() => fetchConfigs())
                   <div v-if="s3Stats" class="grid grid-cols-2 gap-3 mb-4">
                     <div class="p-3 bg-background rounded-lg">
                       <p class="text-2xl font-semibold text-foreground">{{ s3Stats.with_s3 }}</p>
-                      <p class="text-xs text-muted-foreground">已上传 S3</p>
+                      <p class="text-xs text-muted-foreground">已同步远程</p>
                     </div>
                     <div class="p-3 bg-background rounded-lg">
                       <p class="text-2xl font-semibold text-amber-500">{{ s3Stats.local_only }}</p>
@@ -709,8 +692,8 @@ onMounted(() => fetchConfigs())
                   <!-- 同步按钮 -->
                   <div v-if="s3Stats && s3Stats.local_only > 0" class="flex items-center justify-between p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
                     <div>
-                      <p class="text-sm font-medium text-foreground">{{ s3Stats.local_only }} 张图片未上传 S3</p>
-                      <p class="text-xs text-muted-foreground">点击同步将本地图片上传到 S3</p>
+                      <p class="text-sm font-medium text-foreground">{{ s3Stats.local_only }} 张图片未同步</p>
+                      <p class="text-xs text-muted-foreground">同步到默认上传端点</p>
                     </div>
                     <Button 
                       size="sm"
@@ -724,11 +707,11 @@ onMounted(() => fetchConfigs())
 
                   <div v-else-if="s3Stats && s3Stats.local_only === 0" class="p-3 bg-green-500/10 border border-green-500/20 rounded-lg flex items-center gap-2">
                     <CheckCircle class="w-4 h-4 text-green-500" />
-                    <p class="text-sm text-foreground">所有图片均已上传 S3</p>
+                    <p class="text-sm text-foreground">所有图片均已同步</p>
                   </div>
 
                   <div v-else class="text-center py-4 text-muted-foreground text-sm">
-                    点击刷新查看 S3 存储状态
+                    点击刷新查看同步状态
                   </div>
                 </div>
               </template>

@@ -133,6 +133,31 @@ class TaskRepository(BaseRepository[Task]):
 
         return tasks, total
 
+    async def update_payload_field(
+        self,
+        session: AsyncSession,
+        task_id: str,
+        field: str,
+        value: Any,
+    ) -> bool:
+        """Update a specific field in task payload.
+        
+        Args:
+            session: Database session.
+            task_id: Task ID to update.
+            field: Payload field name.
+            value: New value for the field.
+            
+        Returns:
+            True if task was updated.
+        """
+        task = await self.get_by_id(session, task_id)
+        if not task or not task.payload:
+            return False
+        task.payload[field] = value
+        await session.flush()
+        return True
+
     async def get_pending_and_processing(
         self,
         session: AsyncSession,

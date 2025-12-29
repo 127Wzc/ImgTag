@@ -272,6 +272,7 @@ class TaskQueueService:
     async def _process_task(self, task: AnalysisTask, worker_id: int):
         """处理单个任务"""
         from imgtag.services import vision_service, embedding_service
+        from imgtag.services.storage_service import storage_service
         
         logger.info(f"Worker {worker_id} 处理图片 ID: {task.image_id}")
         
@@ -293,11 +294,11 @@ class TaskQueueService:
                 # 转换为 dict 格式（兼容后续代码）
                 image = {
                     "id": image_model.id,
-                    "image_url": image_model.image_url,
-                    "file_path": image_model.file_path,
+                    "file_type": image_model.file_type,
                     "description": image_model.description,
                     "tags": [t.name for t in image_model.tags] if image_model.tags else [],
                     "embedding": image_model.embedding,
+                    "original_url": image_model.original_url,
                 }
                 
                 # 获取配置
@@ -308,7 +309,8 @@ class TaskQueueService:
                     session, "vision_convert_gif", "true"
                 ) or "true").lower() == "true"
             
-            image_url = image.get("image_url", "")
+            # 获取文件扩展名（从 file_type 字段获取）
+            file_ext = image.get("file_type", "") or ""
             
             # 如果已有描述和标签，直接生成向量
             if image.get("description") and image.get("tags"):
@@ -328,14 +330,6 @@ class TaskQueueService:
                     await session.commit()
                 
             else:
-                # 获取文件扩展名
-                file_ext = ""
-                if image_url.startswith("/uploads/"):
-                    file_ext = os.path.splitext(image_url)[1].lower().lstrip(".")
-                else:
-                    url_path = image_url.split("?")[0]
-                    file_ext = os.path.splitext(url_path)[1].lower().lstrip(".")
-                
                 allowed_list = [ext.strip().lower() for ext in (allowed_extensions or "").split(",")]
                 
                 # GIF 特殊处理
@@ -386,93 +380,49 @@ class TaskQueueService:
                         self._completed.append(task)
                     return
                 
-                # 分析图片
-                file_content = None
-                temp_file_path = None  # 临时文件路径，用完删除
+                # 获取文件内容（通过 storage_service）
+                file_content = await storage_service.get_file_content(task.image_id)
                 
-                if image_url.startswith("/uploads/"):
-                    from imgtag.core.config import settings
-                    
-                    file_path = image.get("file_path") or str(
-                        settings.get_upload_path() / 
-                        image_url.replace("/uploads/", "")
-                    )
-                    
-                    if os.path.exists(file_path):
-                        # 本地文件存在，直接读取
-                        with open(file_path, "rb") as f:
-                            file_content = f.read()
-                    else:
-                        # 本地文件不存在，尝试从 S3 或 original_url 下载
-                        logger.warning(f"本地文件不存在: {file_path}，尝试备用下载")
+                # 如果本地和远程都没有，尝试 original_url
+                if file_content is None and image.get("original_url"):
+                    try:
+                        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                            resp = await client.get(image["original_url"])
+                            if resp.status_code == 200:
+                                file_content = resp.content
+                                logger.info(f"从 original_url 下载成功: {image['original_url']}")
+                    except Exception as e:
+                        logger.warning(f"从 original_url 下载失败: {e}")
+                
+                if file_content is None:
+                    raise Exception(f"无法获取图片内容: image_id={task.image_id}")
+                
+                # 根据 file_ext 确定 mime_type
+                from imgtag.core.storage_constants import get_mime_type
+                mime_type = get_mime_type(file_ext)
+                
+                # GIF 转换为 PNG
+                if file_ext == "gif" and convert_gif:
+                    try:
+                        def _convert_gif_to_png(content: bytes) -> bytes:
+                            from PIL import Image as PILImage
+                            img = PILImage.open(io.BytesIO(content))
+                            if hasattr(img, 'n_frames') and img.n_frames > 1:
+                                img.seek(0)
+                            if img.mode in ('RGBA', 'LA', 'P'):
+                                img = img.convert('RGB')
+                            output = io.BytesIO()
+                            img.save(output, format='PNG')
+                            return output.getvalue()
                         
-                        async with async_session_maker() as session:
-                            image_model = await image_repository.get_by_id(session, task.image_id)
-                            if image_model:
-                                # 优先从 S3 下载
-                                if image_model.s3_path:
-                                    try:
-                                        from imgtag.services.s3_service import s3_service
-                                        if await s3_service.is_enabled():
-                                            temp_file_path = tempfile.mktemp(suffix=f".{file_ext or 'jpg'}")
-                                            await s3_service.download_file(image_model.s3_path, temp_file_path)
-                                            with open(temp_file_path, "rb") as f:
-                                                file_content = f.read()
-                                            logger.info(f"从 S3 下载临时文件成功: {image_model.s3_path}")
-                                    except Exception as e:
-                                        logger.warning(f"从 S3 下载失败: {e}")
-                                
-                                # S3 失败或无 S3，尝试 original_url
-                                if file_content is None and image_model.original_url:
-                                    try:
-                                        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-                                            resp = await client.get(image_model.original_url)
-                                            if resp.status_code == 200:
-                                                file_content = resp.content
-                                                logger.info(f"从 original_url 下载成功: {image_model.original_url}")
-                                    except Exception as e:
-                                        logger.warning(f"从 original_url 下载失败: {e}")
-                        
-                        if file_content is None:
-                            raise Exception(f"无法获取图片内容: {file_path}")
-                    
-                    # GIF 转换为 PNG
-                    if file_ext == "gif" and convert_gif:
-                        try:
-                            def _convert_gif_to_png(content: bytes) -> bytes:
-                                from PIL import Image
-                                img = Image.open(io.BytesIO(content))
-                                if hasattr(img, 'n_frames') and img.n_frames > 1:
-                                    img.seek(0)
-                                if img.mode in ('RGBA', 'LA', 'P'):
-                                    img = img.convert('RGB')
-                                output = io.BytesIO()
-                                img.save(output, format='PNG')
-                                return output.getvalue()
-                            
-                            file_content = await asyncio.to_thread(_convert_gif_to_png, file_content)
-                            mime_type = "image/png"
-                            logger.info(f"图片 {task.image_id} GIF 已转换为 PNG")
-                        except Exception as e:
-                            logger.warning(f"GIF 转换失败: {str(e)}，使用原始格式")
-                            from imgtag.services.upload_service import UploadService
-                            mime_type = UploadService().get_mime_type(file_path)
-                    else:
-                        from imgtag.services.upload_service import UploadService
-                        mime_type = UploadService().get_mime_type(file_path)
-                    
-                    analysis = await vision_service.analyze_image_base64(file_content, mime_type)
-                    
-                    # 删除临时文件
-                    if temp_file_path and os.path.exists(temp_file_path):
-                        try:
-                            os.remove(temp_file_path)
-                            logger.debug(f"临时文件已删除: {temp_file_path}")
-                        except Exception as e:
-                            logger.warning(f"删除临时文件失败: {e}")
-                else:
-                    # 远程 URL
-                    analysis = await vision_service.analyze_image_url(image_url)
+                        file_content = await asyncio.to_thread(_convert_gif_to_png, file_content)
+                        mime_type = "image/png"
+                        logger.info(f"图片 {task.image_id} GIF 已转换为 PNG")
+                    except Exception as e:
+                        logger.warning(f"GIF 转换失败: {str(e)}，使用原始格式")
+                
+                # 分析图片
+                analysis = await vision_service.analyze_image_base64(file_content, mime_type)
                 
                 # 生成向量
                 embedding = await embedding_service.get_embedding_combined(

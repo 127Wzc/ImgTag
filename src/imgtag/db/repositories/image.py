@@ -36,8 +36,6 @@ class ImageRepository(BaseRepository[Image]):
         self,
         session: AsyncSession,
         *,
-        image_url: str,
-        file_path: Optional[str] = None,
         file_hash: Optional[str] = None,
         file_type: Optional[str] = None,
         file_size: Optional[float] = None,
@@ -46,17 +44,15 @@ class ImageRepository(BaseRepository[Image]):
         description: Optional[str] = None,
         original_url: Optional[str] = None,
         embedding: Optional[list[float]] = None,
-        storage_type: str = "local",
-        s3_path: Optional[str] = None,
-        local_exists: bool = True,
         uploaded_by: Optional[int] = None,
+        is_public: bool = True,
     ) -> Image:
         """Create a new image record.
 
+        Note: Storage locations are created separately via ImageLocation.
+
         Args:
             session: Database session.
-            image_url: Access URL for the image.
-            file_path: Local file path.
             file_hash: MD5 hash for deduplication.
             file_type: File extension (jpg, png, etc).
             file_size: File size in MB.
@@ -65,18 +61,14 @@ class ImageRepository(BaseRepository[Image]):
             description: Image description.
             original_url: Original source URL.
             embedding: Vector embedding (512 dimensions).
-            storage_type: Storage type (local/s3).
-            s3_path: S3 storage path.
-            local_exists: Whether local file exists.
             uploaded_by: User ID who uploaded.
+            is_public: Whether image is publicly visible.
 
         Returns:
             Created Image instance.
         """
         return await self.create(
             session,
-            image_url=image_url,
-            file_path=file_path,
             file_hash=file_hash,
             file_type=file_type,
             file_size=Decimal(str(file_size)) if file_size else None,
@@ -85,10 +77,8 @@ class ImageRepository(BaseRepository[Image]):
             description=description,
             original_url=original_url,
             embedding=embedding,
-            storage_type=storage_type,
-            s3_path=s3_path,
-            local_exists=local_exists,
             uploaded_by=uploaded_by,
+            is_public=is_public,
         )
 
     async def get_by_hash(
@@ -217,33 +207,33 @@ class ImageRepository(BaseRepository[Image]):
         session: AsyncSession,
         image: Image,
         *,
-        image_url: Optional[str] = None,
         description: Optional[str] = None,
         embedding: Optional[list[float]] = None,
         original_url: Optional[str] = None,
+        is_public: Optional[bool] = None,
     ) -> Image:
         """Update image fields.
 
         Args:
             session: Database session.
             image: Image to update.
-            image_url: New access URL.
             description: New description.
             embedding: New vector embedding.
             original_url: New original URL.
+            is_public: New visibility status.
 
         Returns:
             Updated Image instance.
         """
         update_data = {}
-        if image_url is not None:
-            update_data["image_url"] = image_url
         if description is not None:
             update_data["description"] = description
         if embedding is not None:
             update_data["embedding"] = embedding
         if original_url is not None:
             update_data["original_url"] = original_url
+        if is_public is not None:
+            update_data["is_public"] = is_public
 
         if update_data:
             update_data["updated_at"] = datetime.now(timezone.utc)
@@ -594,13 +584,10 @@ class ImageRepository(BaseRepository[Image]):
             )
             SELECT 
                 i.id, 
-                i.image_url, 
                 i.description, 
                 i.original_url,
                 (1 - (i.embedding <=> :vector)) as vector_score,
-                (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) as tag_score,
-                i.s3_path, 
-                i.local_exists
+                (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) as tag_score
             FROM images i
             LEFT JOIN tag_match tm ON i.id = tm.image_id
             WHERE i.embedding IS NOT NULL
@@ -616,7 +603,7 @@ class ImageRepository(BaseRepository[Image]):
         result = await session.execute(query, params)
         rows = result.fetchall()
 
-        # Get image IDs for tag lookup
+        # Get image IDs for tag lookup and URL generation
         image_ids = [row[0] for row in rows]
 
         # Batch fetch tags with full info (level, source) - SQLAlchemy 2.0 ORM style
@@ -644,35 +631,31 @@ class ImageRepository(BaseRepository[Image]):
                     "source": tag_row.source,
                     "sort_order": tag_row.sort_order,
                 })
+        
+        # Batch fetch URLs using storage service (avoids N+1)
+        url_map: dict[int, str] = {}
+        if image_ids:
+            from imgtag.services.storage_service import storage_service
+            images_for_url = await self.get_by_ids(session, image_ids)
+            url_map = await storage_service.get_read_urls(list(images_for_url))
 
         # Build response
         images = []
         for row in rows:
-            vector_score = float(row[4])
-            tag_score = float(row[5])
+            image_id = row[0]
+            vector_score = float(row[3])
+            tag_score = float(row[4])
             final_score = vector_score * vector_weight + tag_score * tag_weight
-
-            # Determine display URL based on S3 config
-            display_url = row[1]  # Default to image_url
-            if row[6]:  # Has s3_path
-                # 使用 S3 公开 URL 前缀，而不是 BASE_URL
-                s3_public_prefix = await config_cache.get("s3_public_url_prefix", "") or ""
-                if s3_public_prefix:
-                    display_url = f"{s3_public_prefix.rstrip('/')}/{row[6]}"
-                else:
-                    # 无自定义前缀，使用端点 URL + bucket
-                    s3_endpoint = await config_cache.get("s3_endpoint_url", "") or ""
-                    s3_bucket = await config_cache.get("s3_bucket_name", "") or ""
-                    display_url = f"{s3_endpoint.rstrip('/')}/{s3_bucket}/{row[6]}"
-            elif row[7] is False:  # local_exists is False
-                pass  # Keep image_url
+            
+            # Get URL from storage service (fallback to empty string)
+            display_url = url_map.get(image_id, "")
 
             images.append({
-                "id": row[0],
+                "id": image_id,
                 "image_url": display_url,
-                "tags": tags_map.get(row[0], []),
-                "description": row[2],
-                "original_url": row[3],
+                "tags": tags_map.get(image_id, []),
+                "description": row[1],
+                "original_url": row[2],
                 "similarity": final_score,
                 "vector_score": vector_score,
                 "tag_score": tag_score,

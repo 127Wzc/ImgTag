@@ -18,6 +18,14 @@ from imgtag.db.repositories.collection import (
 )
 from imgtag.db.repositories.config import ConfigRepository, config_repository
 from imgtag.db.repositories.image import ImageRepository, image_repository
+from imgtag.db.repositories.image_location import (
+    ImageLocationRepository,
+    image_location_repository,
+)
+from imgtag.db.repositories.storage_endpoint import (
+    StorageEndpointRepository,
+    storage_endpoint_repository,
+)
 from imgtag.db.repositories.tag import (
     ImageTagRepository,
     TagRepository,
@@ -45,6 +53,12 @@ __all__ = [
     # Image
     "ImageRepository",
     "image_repository",
+    # ImageLocation
+    "ImageLocationRepository",
+    "image_location_repository",
+    # StorageEndpoint
+    "StorageEndpointRepository",
+    "storage_endpoint_repository",
     # Tag
     "TagRepository",
     "tag_repository",
@@ -57,3 +71,4 @@ __all__ = [
     "UserRepository",
     "user_repository",
 ]
+

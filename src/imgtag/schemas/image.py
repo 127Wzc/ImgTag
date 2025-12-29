@@ -47,16 +47,24 @@ class TagWithSource(BaseModel):
 
 
 class ImageResponse(BaseModel):
-    """图像响应"""
+    """图像响应
+    
+    Note: image_url is computed dynamically from image_locations.
+    """
     id: int = Field(..., description="图像 ID")
-    image_url: str = Field(..., description="图像 URL")
-    tags: List[TagWithSource] = Field(default_factory=list, description="标签列表（包含 level, source）")
+    image_url: str = Field(..., description="图像访问 URL (动态计算)")
+    tags: List[TagWithSource] = Field(default_factory=list, description="标签列表")
     description: Optional[str] = Field(default=None, description="图像描述")
-    original_url: Optional[str] = Field(default=None, description="原始 URL")
-    width: Optional[int] = Field(default=None, description="图片宽度（像素）")
-    height: Optional[int] = Field(default=None, description="图片高度（像素）")
-    file_size: Optional[float] = Field(default=None, description="文件大小（MB）")
+    original_url: Optional[str] = Field(default=None, description="原始来源 URL")
+    width: Optional[int] = Field(default=None, description="宽度(px)")
+    height: Optional[int] = Field(default=None, description="高度(px)")
+    file_size: Optional[float] = Field(default=None, description="文件大小(MB)")
+    file_type: Optional[str] = Field(default=None, description="文件类型")
+    file_hash: Optional[str] = Field(default=None, description="文件哈希")
     uploaded_by: Optional[int] = Field(default=None, description="上传者用户ID")
+    is_public: bool = Field(default=True, description="是否公开")
+    created_at: Optional[str] = Field(default=None, description="创建时间")
+    updated_at: Optional[str] = Field(default=None, description="更新时间")
 
 
 class ImageWithSimilarity(ImageResponse):
@@ -68,11 +76,12 @@ class ImageWithSimilarity(ImageResponse):
 
 class ImageUpdate(BaseModel):
     """图像更新请求"""
-    image_url: Optional[str] = Field(default=None, description="新的图像 URL")
     tags: Optional[List[str]] = Field(default=None, description="新的标签列表（按名称，废弃）")
     tag_ids: Optional[List[int]] = Field(default=None, description="新的标签ID列表（推荐）")
     description: Optional[str] = Field(default=None, description="新的描述")
     original_url: Optional[str] = Field(default=None, description="原始来源地址")
+    is_public: Optional[bool] = Field(default=None, description="是否公开")
+
 
 
 # ============= 搜索请求 =============

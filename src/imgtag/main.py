@@ -128,8 +128,18 @@ async def lifespan(app: FastAPI):
             
             # 直接添加到队列，不创建新的数据库记录
             restored = 0
+            sync_restored = 0
             for task_data in pending_tasks:
                 payload = task_data.payload or {}
+                
+                # Handle storage_sync tasks separately
+                if task_data.type == "storage_sync":
+                    from imgtag.services.storage_sync_service import storage_sync_service
+                    asyncio.create_task(storage_sync_service._process_sync_task(task_data.id))
+                    sync_restored += 1
+                    continue
+                
+                # Handle analyze_image/rebuild_vector tasks
                 image_id = payload.get("image_id")
                 if image_id:
                     task = AnalysisTask(
@@ -140,7 +150,7 @@ async def lifespan(app: FastAPI):
                     task_queue._queue.append(task)
                     restored += 1
             
-            logger.info(f"成功恢复 {restored} 个任务到队列")
+            logger.info(f"成功恢复 {restored} 个分析任务, {sync_restored} 个同步任务到队列")
             
             # 启动处理
             asyncio.create_task(task_queue.start_processing())
