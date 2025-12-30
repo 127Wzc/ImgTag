@@ -4,14 +4,14 @@ import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
 import ImageDetailModal from '@/components/ImageDetailModal.vue'
 import { toast } from 'vue-sonner'
-import { getErrorMessage } from '@/utils/api-error'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { 
   Save,
   Loader2,
   Eye,
   Brain,
   Cloud,
-  ListTodo,
   X,
   ChevronRight,
   RefreshCw,
@@ -33,9 +33,10 @@ import {
 const categories = [
   { key: 'vision', label: '视觉模型', icon: Eye, description: 'AI 图片分析和标签提取', color: 'text-violet-500 bg-violet-500/10' },
   { key: 'embedding', label: '向量嵌入', icon: Brain, description: '语义搜索向量化配置', color: 'text-blue-500 bg-blue-500/10' },
-  { key: 'queue', label: '队列上传', icon: ListTodo, description: '任务并发与上传限制', color: 'text-amber-500 bg-amber-500/10' },
   { key: 'maintenance', label: '系统维护', icon: Wrench, description: '系统设置与存储清理', color: 'text-rose-500 bg-rose-500/10' },
 ]
+
+const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
 
 // 配置项定义 - 支持 showWhen 条件
 interface ConfigDef {
@@ -56,6 +57,8 @@ const configDefinitions: Record<string, ConfigDef[]> = {
     { key: 'vision_allowed_extensions', label: '允许的扩展名', type: 'text' },
     { key: 'vision_convert_gif', label: 'GIF 转静态图', type: 'boolean' },
     { key: 'vision_max_image_size', label: '压缩阈值 (KB)', type: 'number' },
+    { key: 'queue_max_workers', label: '最大并发数', type: 'number', description: '同时分析多少张图片' },
+    { key: 'queue_batch_interval', label: '任务间隔 (秒)', type: 'number', description: '每张图片分析后的等待时间' },
   ],
   embedding: [
     { key: 'embedding_mode', label: '嵌入模式', type: 'select', options: [
@@ -71,12 +74,8 @@ const configDefinitions: Record<string, ConfigDef[]> = {
     { key: 'embedding_model', label: 'API 模型', type: 'text', showWhen: { key: 'embedding_mode', value: 'api' } },
     { key: 'embedding_dimensions', label: '向量维度', type: 'number' },
   ],
-  queue: [
-    { key: 'queue_max_workers', label: '最大并发数', type: 'number' },
-    { key: 'queue_batch_interval', label: '批处理间隔 (秒)', type: 'number' },
-    { key: 'max_upload_size', label: '最大上传 (MB)', type: 'number' },
-  ],
   maintenance: [
+    { key: 'max_upload_size', label: '最大上传 (MB)', type: 'number', description: '单张图片上传大小限制' },
     { key: 'allow_register', label: '允许注册', type: 'boolean', description: '关闭后禁止新用户注册' },
   ],
 }
@@ -184,14 +183,22 @@ async function saveConfigs() {
       fetchVectorStatus() // 刷新状态以更新 dimensions_match
     }
   } catch (e: any) {
-    alert(e.response?.data?.detail || '保存失败')
+    toast.error(e.response?.data?.detail || '保存失败')
   } finally {
     saving.value = false
   }
 }
 
-function closeDrawer() {
-  if (hasChanges.value && !confirm('有未保存的更改，确定关闭？')) return
+async function closeDrawer() {
+  if (hasChanges.value) {
+    const confirmed = await confirm({
+      title: '放弃更改',
+      message: '有未保存的更改，确定关闭吗？',
+      variant: 'warning',
+      confirmText: '关闭',
+    })
+    if (!confirmed.confirmed) return
+  }
   configs.value = { ...originalConfigs.value }
   activeCategory.value = null
 }
@@ -243,8 +250,9 @@ async function scanDuplicates() {
     duplicateGroups.value = data.duplicate_groups || []
     totalGroups.value = data.total_groups || 0
     imagesWithoutHash.value = data.images_without_hash || 0
+    toast.success(`扫描完成: 发现 ${data.total_groups} 组重复图片`)
   } catch (e: any) {
-    alert(e.response?.data?.detail || '扫描失败')
+    toast.error(e.response?.data?.detail || '扫描失败')
   } finally {
     scanning.value = false
   }
@@ -254,17 +262,24 @@ async function calculateHashes() {
   calculating.value = true
   try {
     const { data } = await apiClient.post('/system/duplicates/calculate-hashes')
-    alert(`计算完成: 处理了 ${data.processed || 0} 张图片`)
+    toast.success(`计算完成: 处理了 ${data.processed || 0} 张图片`)
     imagesWithoutHash.value = data.remaining || 0
   } catch (e: any) {
-    alert(e.response?.data?.detail || '计算失败')
+    toast.error(e.response?.data?.detail || '计算失败')
   } finally {
     calculating.value = false
   }
 }
 
 async function deleteImage(imageId: number) {
-  if (!confirm('确定删除这张图片？此操作不可恢复。')) return
+  const confirmed = await confirm({
+    title: '删除图片',
+    message: '确定删除这张图片？此操作不可恢复。',
+    variant: 'danger',
+    confirmText: '删除',
+  })
+  if (!confirmed.confirmed) return
+  
   deleting.value = imageId
   try {
     await apiClient.delete(`/images/${imageId}`)
@@ -283,8 +298,9 @@ async function deleteImage(imageId: number) {
         break
       }
     }
+    toast.success('图片已删除')
   } catch (e: any) {
-    alert(e.response?.data?.detail || '删除失败')
+    toast.error(e.response?.data?.detail || '删除失败')
   } finally {
     deleting.value = null
   }
@@ -370,27 +386,41 @@ async function fetchVectorStatus() {
 }
 
 async function rebuildVectors() {
-  if (!confirm('确定要重建所有向量吗？这可能需要很长时间，期间搜索功能将受限。')) return
+  const confirmed = await confirm({
+    title: '重建向量',
+    message: '确定要重建所有向量吗？这可能需要很长时间，期间搜索功能将受限。',
+    variant: 'warning',
+    confirmText: '开始重建',
+  })
+  if (!confirmed.confirmed) return
+  
   rebuilding.value = true
   try {
     await apiClient.post('/vectors/rebuild')
     toast.success('重建任务已启动')
     pollRebuildStatus()
   } catch(e: any) {
-    alert(e.response?.data?.detail || '启动失败')
+    toast.error(e.response?.data?.detail || '启动失败')
     rebuilding.value = false
   }
 }
 
 async function resizeVectorTable() {
-  if (!confirm('确定要修改数据库向量维度吗？这将清空现有索引，建议随后立即重建向量。')) return
+  const confirmed = await confirm({
+    title: '修改向量维度',
+    message: '确定要修改数据库向量维度吗？这将清空现有索引，建议随后立即重建向量。',
+    variant: 'danger',
+    confirmText: '修改维度',
+  })
+  if (!confirmed.confirmed) return
+  
   resizing.value = true
   try {
     const { data } = await apiClient.post('/vectors/resize-table')
     toast.success(data.message)
     await fetchVectorStatus()
   } catch(e: any) {
-    alert(e.response?.data?.detail || '修改失败')
+    toast.error(e.response?.data?.detail || '修改失败')
   } finally {
     resizing.value = false
   }
@@ -430,50 +460,8 @@ import { watch } from 'vue'
 watch(activeCategory, (newVal) => {
   if (newVal === 'embedding') {
     fetchVectorStatus()
-  } else if (newVal === 'storage') {
-    fetchS3Stats()
   }
 })
-
-// ========== 存储同步状态 ==========
-interface S3Stats {
-  total: number
-  with_s3: number
-  local_only: number
-  s3_only: number
-}
-
-const s3Stats = ref<S3Stats | null>(null)
-const s3Loading = ref(false)
-const s3Syncing = ref(false)
-
-async function fetchS3Stats() {
-  s3Loading.value = true
-  try {
-    const { data } = await apiClient.get<S3Stats>('/storage/status')
-    s3Stats.value = data
-  } catch (e: any) {
-    console.error('获取存储统计失败', e)
-  } finally {
-    s3Loading.value = false
-  }
-}
-
-async function syncToS3() {
-  s3Syncing.value = true
-  try {
-    const { data } = await apiClient.post('/storage/sync-to-s3', {})
-    toast.success(`已同步 ${data.success} 张图片到 S3`)
-    if (data.failed > 0) {
-      toast.warning(`${data.failed} 张同步失败`)
-    }
-    await fetchS3Stats()
-  } catch (e: any) {
-    toast.error(getErrorMessage(e))
-  } finally {
-    s3Syncing.value = false
-  }
-}
 
 onMounted(() => fetchConfigs())
 </script>
@@ -656,62 +644,36 @@ onMounted(() => fetchConfigs())
                   </div>
                 </div>
 
-
-
-                <!-- S3 同步状态（保留） -->
-                <div class="p-4 bg-muted/50 rounded-xl">
-                  <div class="flex items-center justify-between mb-3">
-                    <div class="flex items-center gap-2">
-                      <FolderSync class="w-5 h-5 text-emerald-500" />
-                      <h3 class="font-medium text-foreground">同步状态</h3>
-                    </div>
-                    <Button 
-                      variant="outline"
-                      size="sm"
-                      @click="fetchS3Stats"
-                      :disabled="s3Loading"
+                <!-- 通用配置项 -->
+                <div 
+                  v-for="def in visibleDefinitions" 
+                  :key="def.key"
+                  class="space-y-1.5"
+                >
+                  <label class="block text-sm font-medium text-foreground">{{ def.label }}</label>
+                  <p v-if="def.description" class="text-xs text-muted-foreground mb-1">{{ def.description }}</p>
+                  
+                  <!-- Number -->
+                  <input
+                    v-if="def.type === 'number'"
+                    v-model="configs[def.key]"
+                    type="number"
+                    class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  
+                  <!-- Boolean -->
+                  <div v-else-if="def.type === 'boolean'" class="flex items-center gap-2">
+                    <button
+                      @click="configs[def.key] = configs[def.key] === 'true' ? 'false' : 'true'"
+                      class="w-12 h-6 rounded-full transition-colors relative"
+                      :class="configs[def.key] === 'true' ? 'bg-primary' : 'bg-muted'"
                     >
-                      <Loader2 v-if="s3Loading" class="w-4 h-4 mr-1 animate-spin" />
-                      <RefreshCw v-else class="w-4 h-4 mr-1" />
-                      刷新
-                    </Button>
-                  </div>
-
-                  <!-- S3 统计 -->
-                  <div v-if="s3Stats" class="grid grid-cols-2 gap-3 mb-4">
-                    <div class="p-3 bg-background rounded-lg">
-                      <p class="text-2xl font-semibold text-foreground">{{ s3Stats.with_s3 }}</p>
-                      <p class="text-xs text-muted-foreground">已同步远程</p>
-                    </div>
-                    <div class="p-3 bg-background rounded-lg">
-                      <p class="text-2xl font-semibold text-amber-500">{{ s3Stats.local_only }}</p>
-                      <p class="text-xs text-muted-foreground">仅本地</p>
-                    </div>
-                  </div>
-
-                  <!-- 同步按钮 -->
-                  <div v-if="s3Stats && s3Stats.local_only > 0" class="flex items-center justify-between p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-                    <div>
-                      <p class="text-sm font-medium text-foreground">{{ s3Stats.local_only }} 张图片未同步</p>
-                      <p class="text-xs text-muted-foreground">同步到默认上传端点</p>
-                    </div>
-                    <Button 
-                      size="sm"
-                      @click="syncToS3()"
-                      :disabled="s3Syncing"
-                    >
-                      <Loader2 v-if="s3Syncing" class="w-4 h-4 mr-1 animate-spin" />
-                      同步 10 张
-                    </Button>
-                  </div>
-
-                  <div v-else-if="s3Stats && s3Stats.local_only === 0" class="p-3 bg-green-500/10 border border-green-500/20 rounded-lg flex items-center gap-2">
-                    <CheckCircle class="w-4 h-4 text-green-500" />
-                    <p class="text-sm text-foreground">所有图片均已同步</p>
-                  </div>
-
-                  <div v-else class="text-center py-4 text-muted-foreground text-sm">
-                    点击刷新查看同步状态
+                      <div 
+                        class="absolute top-1 w-4 h-4 bg-white rounded-full transition-transform"
+                        :class="configs[def.key] === 'true' ? 'translate-x-7' : 'translate-x-1'"
+                      />
+                    </button>
+                    <span class="text-sm text-muted-foreground">{{ configs[def.key] === 'true' ? '开启' : '关闭' }}</span>
                   </div>
                 </div>
               </template>
@@ -1054,6 +1016,19 @@ onMounted(() => fetchConfigs())
     <ImageDetailModal
       :image="previewImage"
       @close="closeImagePreview"
+    />
+
+    <!-- 确认弹窗 -->
+    <ConfirmDialog
+      :open="confirmState.open"
+      :title="confirmState.title"
+      :message="confirmState.message"
+      :confirm-text="confirmState.confirmText"
+      :cancel-text="confirmState.cancelText"
+      :variant="confirmState.variant"
+      :loading="confirmState.loading"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
     />
   </div>
 </template>

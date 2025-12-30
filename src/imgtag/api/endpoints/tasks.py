@@ -8,6 +8,7 @@
 
 from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, Query, Depends
+from pydantic import BaseModel
 
 from imgtag.api.endpoints.auth import get_current_user
 
@@ -58,3 +59,19 @@ async def create_vectorize_task(
         {"image_ids": image_ids, "force": force}
     )
     return {"task_id": task_id, "message": "批量向量化任务已提交"}
+
+
+class BatchDeleteRequest(BaseModel):
+    """批量删除请求"""
+    task_ids: List[str]
+
+
+@router.delete("/batch", response_model=Dict[str, Any])
+async def batch_delete_tasks(
+    request: BatchDeleteRequest,
+    user: Dict = Depends(get_current_user)
+):
+    """批量删除任务（需登录）"""
+    count = await task_service.batch_delete(request.task_ids)
+    return {"message": f"已删除 {count} 个任务", "deleted_count": count}
+

@@ -3,6 +3,9 @@ import { ref, onMounted } from 'vue'
 import { useUserStore } from '@/stores'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
+import { toast } from 'vue-sonner'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { 
   User, 
   Key, 
@@ -15,6 +18,7 @@ import {
 } from 'lucide-vue-next'
 
 const userStore = useUserStore()
+const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
 
 // API Key 状态
 const apiKeyStatus = ref<{ has_key: boolean; masked_key: string | null }>({ has_key: false, masked_key: null })
@@ -58,14 +62,22 @@ async function generateApiKey() {
 }
 
 async function deleteApiKey() {
-  if (!confirm('确定要删除 API 密钥吗？')) return
+  const confirmed = await confirm({
+    title: '删除 API 密钥',
+    message: '确定要删除 API 密钥吗？删除后外部程序将无法访问。',
+    variant: 'warning',
+    confirmText: '删除',
+  })
+  if (!confirmed.confirmed) return
+  
   deletingKey.value = true
   try {
     await apiClient.delete('/auth/me/api-key')
     apiKeyStatus.value = { has_key: false, masked_key: null }
     newApiKey.value = null
+    toast.success('API 密钥已删除')
   } catch {
-    // ignore
+    toast.error('删除失败')
   } finally {
     deletingKey.value = false
   }
@@ -101,7 +113,7 @@ async function handleChangePassword() {
     oldPassword.value = ''
     newPassword.value = ''
     confirmPassword.value = ''
-    alert('密码修改成功')
+    toast.success('密码修改成功')
   } catch (e: any) {
     passwordError.value = e.response?.data?.detail || '修改失败'
   } finally {
@@ -272,6 +284,19 @@ onMounted(() => {
         </div>
       </Transition>
     </Teleport>
+
+    <!-- 确认弹窗 -->
+    <ConfirmDialog
+      :open="confirmState.open"
+      :title="confirmState.title"
+      :message="confirmState.message"
+      :confirm-text="confirmState.confirmText"
+      :cancel-text="confirmState.cancelText"
+      :variant="confirmState.variant"
+      :loading="confirmState.loading"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
+    />
   </div>
 </template>
 

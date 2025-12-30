@@ -11,6 +11,10 @@ import os
 import random
 from typing import Optional, Sequence
 
+import boto3
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
+
 from imgtag.core.config import settings
 from imgtag.core.logging_config import get_logger
 from imgtag.core.storage_constants import DEFAULT_PRIORITY, StorageProvider
@@ -94,7 +98,10 @@ class StorageService:
         """Generate unified object key based on file hash.
         
         Uses hash-based directory structure for even distribution:
-        images/{hash[0:2]}/{hash[2:4]}/{full_hash}.{ext}
+        {hash[0:2]}/{hash[2:4]}/{full_hash}.{ext}
+        
+        Note: This returns only the hash-based path. Use get_full_object_key()
+        to include the category_code prefix for actual storage.
         
         Args:
             file_hash: MD5 or SHA256 hash of the file.
@@ -104,7 +111,25 @@ class StorageService:
             Object key string for storage.
         """
         ext = extension.lstrip(".")
-        return f"images/{file_hash[:2]}/{file_hash[2:4]}/{file_hash}.{ext}"
+        return f"{file_hash[:2]}/{file_hash[2:4]}/{file_hash}.{ext}"
+
+    @staticmethod
+    def get_full_object_key(
+        object_key: str,
+        category_code: str | None = None,
+    ) -> str:
+        """Build full object key with optional category prefix.
+        
+        Args:
+            object_key: Base object key (hash-based path).
+            category_code: Optional category code for subdirectory.
+            
+        Returns:
+            Full object key: "{category_code}/{object_key}" or "{object_key}".
+        """
+        if category_code:
+            return f"{category_code}/{object_key}"
+        return object_key
 
     def _resolve_local_path(self, endpoint: StorageEndpoint) -> str:
         """Resolve bucket_name to absolute physical path for local storage.
@@ -466,9 +491,6 @@ class StorageService:
     ) -> bool:
         """Upload to S3-compatible storage."""
         
-        import boto3
-        from botocore.config import Config as BotoConfig
-        
         def _do_upload():
             # Use path style or virtual-hosted based on endpoint config
             addressing_style = "path" if endpoint.path_style else "virtual"
@@ -550,9 +572,6 @@ class StorageService:
     ) -> Optional[bytes]:
         """Download from S3-compatible storage."""
         
-        import boto3
-        from botocore.config import Config as BotoConfig
-        
         def _do_download():
             addressing_style = "path" if endpoint.path_style else "virtual"
             config = BotoConfig(
@@ -610,10 +629,6 @@ class StorageService:
         endpoint: StorageEndpoint,
     ) -> bool:
         """Check if file exists in S3."""
-        
-        import boto3
-        from botocore.config import Config as BotoConfig
-        from botocore.exceptions import ClientError
         
         def _check():
             addressing_style = "path" if endpoint.path_style else "virtual"
@@ -678,9 +693,6 @@ class StorageService:
     ) -> bool:
         """Delete from S3-compatible storage."""
         
-        import boto3
-        from botocore.config import Config as BotoConfig
-        
         def _do_delete():
             addressing_style = "path" if endpoint.path_style else "virtual"
             config = BotoConfig(
@@ -705,6 +717,59 @@ class StorageService:
         
         await asyncio.to_thread(_do_delete)
         return True
+
+    async def copy_between_endpoints(
+        self,
+        session,
+        image_id: int,
+        source_endpoint: StorageEndpoint,
+        target_endpoint: StorageEndpoint,
+        object_key: str,
+    ) -> bool:
+        """在端点之间复制文件并创建 location 记录。
+        
+        Args:
+            session: Database session.
+            image_id: 图片ID.
+            source_endpoint: 源端点.
+            target_endpoint: 目标端点.
+            object_key: 对象键.
+            
+        Returns:
+            True if successful.
+        """
+        try:
+            # 下载源文件
+            content = await self.download_from_endpoint(object_key, source_endpoint)
+            if not content:
+                logger.warning(f"无法从端点 {source_endpoint.name} 下载 {object_key}")
+                return False
+            
+            # 上传到目标端点
+            success = await self.upload_to_endpoint(content, object_key, target_endpoint)
+            if not success:
+                return False
+            
+            # 创建 location 记录
+            from imgtag.models.image_location import ImageLocation
+            from datetime import datetime, timezone
+            
+            location = ImageLocation(
+                image_id=image_id,
+                endpoint_id=target_endpoint.id,
+                object_key=object_key,
+                is_primary=False,  # 备份不是主存储
+                sync_status="synced",
+                synced_at=datetime.now(timezone.utc),
+            )
+            session.add(location)
+            await session.flush()
+            
+            logger.info(f"图片 {image_id} 已复制到端点 {target_endpoint.name}")
+            return True
+        except Exception as e:
+            logger.error(f"复制图片 {image_id} 到 {target_endpoint.name} 失败: {e}")
+            return False
 
     @staticmethod
     def compute_file_hash(content: bytes) -> str:

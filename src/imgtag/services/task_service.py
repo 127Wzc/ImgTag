@@ -218,7 +218,16 @@ class TaskService:
             deleted = await task_repository.cleanup_old_tasks(session, days)
             await session.commit()
             return deleted
+    
+    async def batch_delete(self, task_ids: list[str]) -> int:
+        """批量删除任务"""
+        async with async_session_maker() as session:
+            deleted = await task_repository.batch_delete(session, task_ids)
+            await session.commit()
+            logger.info(f"批量删除了 {deleted} 个任务")
+            return deleted
 
 
 # 全局实例
 task_service = TaskService()
+

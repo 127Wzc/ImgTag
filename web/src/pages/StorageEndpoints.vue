@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { toast } from 'vue-sonner'
 import { getErrorMessage } from '@/utils/api-error'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { 
   Plus,
   Loader2,
   HardDrive,
   Cloud,
-  RefreshCw,
+  Pencil,
   Trash2,
   Play,
   TestTube,
@@ -18,10 +20,21 @@ import {
   Star,
   X,
   Save,
-  ChevronDown
+  ChevronDown,
+  Unlink,
 } from 'lucide-vue-next'
 
 // 端点类型
+interface ActiveTaskInfo {
+  task_id: string
+  task_type: string
+  status: string
+  progress_percent: number
+  success_count: number
+  failed_count: number
+  total_count: number
+}
+
 interface StorageEndpoint {
   id: number
   name: string
@@ -30,6 +43,8 @@ interface StorageEndpoint {
   region: string | null
   bucket_name: string | null
   has_credentials: boolean
+  access_key_id: string | null  // 明文，前端显示时伪装
+  secret_access_key: string | null  // 明文，前端显示时伪装
   public_url_prefix: string | null
   path_prefix: string
   path_style: boolean
@@ -42,6 +57,7 @@ interface StorageEndpoint {
   read_weight: number
   is_healthy: boolean
   location_count: number
+  active_task: ActiveTaskInfo | null
 }
 
 const loading = ref(false)
@@ -51,6 +67,12 @@ const editingEndpoint = ref<StorageEndpoint | null>(null)
 const saving = ref(false)
 const testing = ref<number | null>(null)
 const deleting = ref<number | null>(null)
+const unlinking = ref<number | null>(null)  // 解绑位置记录
+
+// 确认弹窗
+const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
+// ConfirmDialog 需要的 props
+const confirmDialogProps = confirmState
 
 // 同步相关
 const syncing = ref(false)
@@ -76,7 +98,6 @@ const form = ref({
   role: 'primary',
   is_enabled: true,
   is_default_upload: false,
-  auto_sync_enabled: false,
   read_priority: 100,
   read_weight: 1
 })
@@ -85,6 +106,14 @@ const providers = [
   { value: 'local', label: '本地存储', icon: HardDrive },
   { value: 's3', label: 'S3 兼容', icon: Cloud },
 ]
+
+const roles = [
+  { value: 'primary', label: '主端点', description: '可直接上传' },
+  { value: 'backup', label: '备份端点', description: '自动同步备份' },
+]
+
+// 凭据显示状态（默认隐藏，点击可显示明文）
+const showCredentials = ref(false)
 
 const isS3Like = computed(() => form.value.provider === 's3')
 const isDefaultEndpoint = computed(() => editingEndpoint.value?.id === 1)
@@ -158,7 +187,6 @@ function openCreate() {
     role: 'primary',
     is_enabled: true,
     is_default_upload: endpoints.value.length === 0,
-    auto_sync_enabled: false,
     read_priority: 100,
     read_weight: 1
   }
@@ -167,21 +195,21 @@ function openCreate() {
 
 function openEdit(ep: StorageEndpoint) {
   editingEndpoint.value = ep
+  showCredentials.value = false  // 默认隐藏密钥
   form.value = {
     name: ep.name,
     provider: ep.provider,
     endpoint_url: ep.endpoint_url || '',
     region: ep.region || 'auto',
     bucket_name: ep.bucket_name || '',
-    access_key_id: '',
-    secret_access_key: '',
+    access_key_id: ep.access_key_id || '',  // 从 API 加载
+    secret_access_key: ep.secret_access_key || '',  // 从 API 加载
     public_url_prefix: ep.public_url_prefix || '',
     path_prefix: ep.path_prefix,
     path_style: ep.path_style ?? true,
     role: ep.role,
     is_enabled: ep.is_enabled,
     is_default_upload: ep.is_default_upload,
-    auto_sync_enabled: ep.auto_sync_enabled,
     read_priority: ep.read_priority,
     read_weight: ep.read_weight
   }
@@ -240,7 +268,14 @@ async function setDefault(ep: StorageEndpoint) {
 }
 
 async function deleteEndpoint(ep: StorageEndpoint) {
-  if (!confirm(`确定删除端点 "${ep.name}" 吗？`)) return
+  const confirmed = await confirm({
+    title: '删除端点',
+    message: `确定删除端点 "${ep.name}" 吗？`,
+    variant: 'danger',
+    confirmText: '删除',
+  })
+  if (!confirmed.confirmed) return
+  
   deleting.value = ep.id
   try {
     await apiClient.delete(`/storage/endpoints/${ep.id}`)
@@ -250,6 +285,35 @@ async function deleteEndpoint(ep: StorageEndpoint) {
     toast.error(getErrorMessage(e))
   } finally {
     deleting.value = null
+  }
+}
+
+// 解绑端点位置记录
+async function unlinkLocations(ep: StorageEndpoint) {
+  const result = await confirm({
+    title: '解除关联',
+    message: `确定解除端点 "${ep.name}" 的所有 ${ep.location_count} 张图片关联吗？此操作不可恢复！`,
+    variant: 'danger',
+    confirmText: '解除',
+    checkboxLabel: '同时删除物理文件',
+    checkboxDefault: false,
+  })
+  if (!result.confirmed) return
+  
+  unlinking.value = ep.id
+  try {
+    const { data } = await apiClient.delete(`/storage/endpoints/${ep.id}/locations`, {
+      data: { 
+        confirm: true,
+        delete_files: result.checkboxChecked,
+      }
+    })
+    toast.success(data.message || '位置记录已解除关联')
+    await fetchEndpoints()
+  } catch (e: any) {
+    toast.error(getErrorMessage(e))
+  } finally {
+    unlinking.value = null
   }
 }
 
@@ -295,7 +359,38 @@ function getProviderLabel(provider: string) {
   return p?.label || provider
 }
 
-onMounted(() => fetchEndpoints())
+// 轮询间隔（如有活动任务，30秒刷新一次）
+const POLL_INTERVAL_MS = 30000
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+// 检查是否有端点正在执行任务
+const hasActiveTask = computed(() => 
+  endpoints.value.some(ep => ep.active_task !== null)
+)
+
+// 启动/停止轮询
+function updatePolling() {
+  if (hasActiveTask.value && !pollTimer) {
+    // 有活动任务，启动轮询
+    pollTimer = setInterval(fetchEndpoints, POLL_INTERVAL_MS)
+  } else if (!hasActiveTask.value && pollTimer) {
+    // 无活动任务，停止轮询
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+onMounted(async () => {
+  await fetchEndpoints()
+  updatePolling()
+})
+
+onUnmounted(() => {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+})
 </script>
 
 <template>
@@ -385,6 +480,29 @@ onMounted(() => fetchEndpoints())
                   </span>
                 </span>
               </div>
+              
+              <!-- 进行中任务进度条 -->
+              <div v-if="ep.active_task" class="mt-2">
+                <div class="flex items-center gap-2 text-xs">
+                  <Loader2 class="w-3 h-3 animate-spin text-primary" />
+                  <span class="text-muted-foreground">
+                    {{ ep.active_task.task_type === 'storage_sync' ? '同步中' : 
+                       ep.active_task.task_type === 'storage_delete' ? '删除中' : '解除关联中' }}
+                  </span>
+                  <span class="text-primary font-medium">
+                    {{ ep.active_task.progress_percent.toFixed(1) }}%
+                  </span>
+                  <span class="text-muted-foreground">
+                    ({{ ep.active_task.success_count }}/{{ ep.active_task.total_count }})
+                  </span>
+                </div>
+                <div class="mt-1 h-1 bg-muted rounded-full overflow-hidden">
+                  <div 
+                    class="h-full bg-primary rounded-full transition-all duration-300"
+                    :style="{ width: `${ep.active_task.progress_percent}%` }"
+                  />
+                </div>
+              </div>
             </div>
 
             <!-- 操作按钮 -->
@@ -393,7 +511,7 @@ onMounted(() => fetchEndpoints())
                 variant="ghost" 
                 size="sm"
                 @click="testConnection(ep)"
-                :disabled="testing === ep.id"
+                :disabled="testing === ep.id || !!ep.active_task"
                 title="测试连接"
               >
                 <Loader2 v-if="testing === ep.id" class="w-4 h-4 animate-spin" />
@@ -404,6 +522,7 @@ onMounted(() => fetchEndpoints())
                 variant="ghost" 
                 size="sm"
                 @click="setDefault(ep)"
+                :disabled="!!ep.active_task"
                 title="设为默认上传端点"
               >
                 <Star class="w-4 h-4" />
@@ -412,17 +531,31 @@ onMounted(() => fetchEndpoints())
                 variant="ghost" 
                 size="sm"
                 @click="openEdit(ep)"
-                title="编辑端点配置"
+                :disabled="!!ep.active_task"
+                title="编辑配置"
               >
-                <RefreshCw class="w-4 h-4" />
+                <Pencil class="w-4 h-4" />
+              </Button>
+              <!-- 解绑位置记录按钮 -->
+              <Button 
+                v-if="ep.location_count > 0 && ep.id !== 1"
+                variant="ghost" 
+                size="sm"
+                class="text-amber-600 hover:text-amber-600"
+                @click="unlinkLocations(ep)"
+                :disabled="unlinking === ep.id || !!ep.active_task"
+                :title="ep.active_task ? '有任务进行中' : '解除关联'"
+              >
+                <Loader2 v-if="unlinking === ep.id" class="w-4 h-4 animate-spin" />
+                <Unlink v-else class="w-4 h-4" />
               </Button>
               <Button 
                 variant="ghost" 
                 size="sm"
                 class="text-destructive hover:text-destructive"
                 @click="deleteEndpoint(ep)"
-                :disabled="deleting === ep.id || ep.location_count > 0 || ep.id === 1"
-                :title="ep.id === 1 ? '默认本地端点无法删除' : ep.location_count > 0 ? '有图片存储在此端点，无法删除' : '删除'"
+                :disabled="deleting === ep.id || ep.location_count > 0 || ep.id === 1 || !!ep.active_task"
+                :title="ep.id === 1 ? '默认本地端点无法删除' : ep.active_task ? '有任务进行中' : ep.location_count > 0 ? '有图片关联，请先解除关联' : '删除端点'"
               >
                 <Loader2 v-if="deleting === ep.id" class="w-4 h-4 animate-spin" />
                 <Trash2 v-else class="w-4 h-4" />
@@ -514,21 +647,29 @@ onMounted(() => fetchEndpoints())
                     <label class="block text-sm font-medium">Access Key ID</label>
                     <input 
                       v-model="form.access_key_id"
-                      type="text"
-                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                      :placeholder="editingEndpoint?.has_credentials ? '(已保存)' : ''"
+                      :type="showCredentials ? 'text' : 'password'"
+                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                      placeholder=""
                     />
                   </div>
                   <div class="space-y-1.5">
                     <label class="block text-sm font-medium">Secret Access Key</label>
                     <input 
                       v-model="form.secret_access_key"
-                      type="password"
-                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                      :placeholder="editingEndpoint?.has_credentials ? '(已保存)' : ''"
+                      :type="showCredentials ? 'text' : 'password'"
+                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                      placeholder=""
                     />
                   </div>
                 </div>
+                <label class="flex items-center gap-2 cursor-pointer text-sm text-muted-foreground">
+                  <input 
+                    v-model="showCredentials"
+                    type="checkbox"
+                    class="w-3.5 h-3.5 rounded border-border"
+                  />
+                  <span>显示密钥</span>
+                </label>
 
                 <label class="flex items-center gap-3 cursor-pointer">
                   <input 
@@ -553,12 +694,17 @@ onMounted(() => fetchEndpoints())
                     <input 
                       v-model="form.bucket_name"
                       type="text"
-                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
                       :placeholder="isLocal ? 'uploads' : 'my-bucket'"
-                      :disabled="isDefaultEndpoint && false"
+                      :disabled="!!(editingEndpoint && editingEndpoint.location_count > 0)"
                     />
                     <p class="text-xs text-muted-foreground">
-                      {{ isLocal ? '相对于项目根目录的存储路径' : 'S3 存储桶名称' }}
+                      <template v-if="editingEndpoint && editingEndpoint.location_count > 0">
+                        <span class="text-amber-500">⚠ 有 {{ editingEndpoint.location_count }} 张关联图片，无法修改</span>
+                      </template>
+                      <template v-else>
+                        {{ isLocal ? '相对于项目根目录的存储路径' : 'S3 存储桶名称' }}
+                      </template>
                     </p>
                   </div>
                   <div v-if="!isDefaultEndpoint" class="space-y-1.5">
@@ -622,7 +768,34 @@ onMounted(() => fetchEndpoints())
               </div>
 
               <!-- 开关选项 (非默认端点) -->
-              <div v-if="!isDefaultEndpoint" class="space-y-3">
+              <div v-if="!isDefaultEndpoint" class="space-y-4 pt-2 border-t border-border/50">
+                <!-- 角色选择 -->
+                <div class="space-y-1.5">
+                  <label class="block text-sm font-medium">端点角色</label>
+                  <div class="grid grid-cols-3 gap-2">
+                    <button
+                      v-for="r in roles"
+                      :key="r.value"
+                      @click="form.role = r.value"
+                      class="p-2 rounded-xl border text-center transition-all text-sm"
+                      :class="form.role === r.value 
+                        ? 'bg-primary/10 border-primary' 
+                        : 'bg-muted/30 border-border hover:bg-muted/50'"
+                    >
+                      <div class="font-medium">{{ r.label }}</div>
+                      <div class="text-xs text-muted-foreground">{{ r.description }}</div>
+                    </button>
+                  </div>
+                </div>
+
+                <!-- 备份端点提示 -->
+                <div v-if="form.role === 'backup'" class="p-3 bg-blue-500/10 border border-blue-500/30 rounded-xl">
+                  <p class="text-sm text-blue-600 dark:text-blue-400">
+                    💾 备份端点会自动同步所有上传到主端点的图片。系统仅允许一个备份端点。
+                  </p>
+                </div>
+
+                <!-- 其他开关 -->
                 <label class="flex items-center gap-3 cursor-pointer">
                   <input 
                     v-model="form.is_enabled"
@@ -671,21 +844,21 @@ onMounted(() => fetchEndpoints())
 
             <div class="p-5 space-y-4">
               <p class="text-xs text-muted-foreground bg-muted/50 p-2 rounded-lg">
-                ⚠️ 目前仅支持 Local → S3 同步。反向同步功能开发中。
+                💡 支持双向同步：Local ↔ S3。同步会复制源端点的文件到目标端点。
               </p>
               
               <div class="space-y-1.5">
-                <label class="block text-sm font-medium">源端点 (仅本地)</label>
+                <label class="block text-sm font-medium">源端点</label>
                 <select 
                   v-model="syncForm.source_endpoint_id"
                   class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 >
                   <option 
-                    v-for="ep in endpoints.filter(e => e.provider === 'local')" 
+                    v-for="ep in endpoints" 
                     :key="ep.id" 
                     :value="ep.id"
                   >
-                    {{ ep.name }} ({{ ep.location_count }} 张)
+                    {{ ep.name }} ({{ ep.provider === 'local' ? '本地' : 'S3' }}, {{ ep.location_count }} 张)
                   </option>
                 </select>
               </div>
@@ -695,20 +868,21 @@ onMounted(() => fetchEndpoints())
               </div>
 
               <div class="space-y-1.5">
-                <label class="block text-sm font-medium">目标端点 (仅 S3)</label>
+                <label class="block text-sm font-medium">目标端点</label>
                 <select 
                   v-model="syncForm.target_endpoint_id"
                   class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 >
                   <option 
-                    v-for="ep in endpoints.filter(e => e.provider !== 'local')" 
+                    v-for="ep in endpoints.filter(e => e.id !== syncForm.source_endpoint_id)" 
                     :key="ep.id" 
                     :value="ep.id"
                   >
-                    {{ ep.name }}
+                    {{ ep.name }} ({{ ep.provider === 'local' ? '本地' : 'S3' }})
                   </option>
                 </select>
               </div>
+
 
               <label class="flex items-center gap-3 cursor-pointer">
                 <input 
@@ -732,6 +906,22 @@ onMounted(() => fetchEndpoints())
         </div>
       </Transition>
     </Teleport>
+
+    <!-- 确认弹窗 -->
+    <ConfirmDialog
+      :open="confirmDialogProps.open"
+      :title="confirmDialogProps.title"
+      :message="confirmDialogProps.message"
+      :confirm-text="confirmDialogProps.confirmText"
+      :cancel-text="confirmDialogProps.cancelText"
+      :variant="confirmDialogProps.variant"
+      :loading="confirmDialogProps.loading"
+      :checkbox-label="confirmDialogProps.checkboxLabel"
+      :checkbox-checked="confirmDialogProps.checkboxChecked"
+      @update:checkbox-checked="confirmDialogProps.checkboxChecked = $event"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
+    />
   </div>
 </template>
 

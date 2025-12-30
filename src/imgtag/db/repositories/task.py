@@ -183,6 +183,41 @@ class TaskRepository(BaseRepository[Task]):
         result = await session.execute(stmt)
         return result.scalars().all()
 
+    async def get_active_for_endpoint(
+        self,
+        session: AsyncSession,
+        endpoint_id: int,
+        task_types: list[str] | None = None,
+    ) -> Optional[Task]:
+        """Get active (pending/processing) task for an endpoint.
+        
+        Queries tasks where payload contains endpoint_id.
+        
+        Args:
+            session: Database session.
+            endpoint_id: Endpoint ID to check.
+            task_types: Optional list of task types to filter.
+            
+        Returns:
+            Active task if found, None otherwise.
+        """
+        from sqlalchemy.dialects.postgresql import JSONB
+        from sqlalchemy import cast
+        
+        stmt = (
+            select(Task)
+            .where(Task.status.in_(["pending", "processing"]))
+            .where(Task.payload["endpoint_id"].as_integer() == endpoint_id)
+            .order_by(Task.created_at.desc())
+            .limit(1)
+        )
+        
+        if task_types:
+            stmt = stmt.where(Task.type.in_(task_types))
+        
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def cleanup_old_tasks(
         self,
         session: AsyncSession,
@@ -208,6 +243,27 @@ class TaskRepository(BaseRepository[Task]):
         logger.info(f"清理了 {deleted} 个旧任务（{days} 天前）")
         return deleted
 
+    async def batch_delete(
+        self,
+        session: AsyncSession,
+        task_ids: list[str],
+    ) -> int:
+        """Delete multiple tasks by IDs.
+
+        Args:
+            session: Database session.
+            task_ids: List of task IDs to delete.
+
+        Returns:
+            Number of deleted tasks.
+        """
+        if not task_ids:
+            return 0
+        stmt = delete(Task).where(Task.id.in_(task_ids))
+        result = await session.execute(stmt)
+        return result.rowcount or 0
+
 
 # Global repository instance
 task_repository = TaskRepository()
+

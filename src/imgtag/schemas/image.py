@@ -135,7 +135,7 @@ class SimilarSearchResponse(BaseModel):
 class UploadAnalyzeResponse(BaseModel):
     """上传并分析响应"""
     id: int = Field(..., description="图像 ID")
-    image_url: str = Field(..., description="图像访问 URL")
+    image_url: Optional[str] = Field(default=None, description="图像访问 URL (远程端点可能为空)")
     tags: List[str] = Field(default_factory=list, description="提取的标签")
     description: str = Field(default="", description="图像描述")
     process_time: str = Field(..., description="处理耗时")

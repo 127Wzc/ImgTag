@@ -32,11 +32,9 @@ class StorageEndpoint(Base, TimestampMixin):
         secret_access_key: Encrypted secret access key.
         public_url_prefix: CDN or public access URL prefix.
         path_prefix: Object key prefix for organization.
-        role: Endpoint role (primary/mirror/backup).
+        role: Endpoint role (primary/backup).
         is_enabled: Whether endpoint is active.
         is_default_upload: Whether this is the default upload target.
-        auto_sync_enabled: Whether to auto-sync from another endpoint.
-        sync_from_endpoint_id: Source endpoint for auto-sync.
         read_priority: Lower value = higher priority for reading.
         read_weight: Weight for load balancing.
         is_healthy: Current health status.
@@ -88,7 +86,7 @@ class StorageEndpoint(Base, TimestampMixin):
     # Role and status
     role: Mapped[str] = mapped_column(
         String(20), server_default="primary", nullable=False,
-        comment="角色: primary/mirror/backup"
+        comment="角色: primary(主)/backup(备份)"
     )
     is_enabled: Mapped[bool] = mapped_column(
         Boolean, server_default="true", nullable=False, comment="是否启用"

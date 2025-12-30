@@ -9,6 +9,7 @@ Handles image CRUD, upload, search, and batch operations.
 import asyncio
 import hashlib
 import io
+import logging
 import os
 import time
 import zipfile
@@ -41,6 +42,7 @@ from imgtag.db.repositories import (
     tag_repository,
 )
 from imgtag.models.image import Image
+from imgtag.models.tag import Tag
 from imgtag.schemas import (
     ImageCreateByUrl,
     ImageCreateManual,
@@ -351,6 +353,80 @@ async def analyze_and_create_from_url(
         raise HTTPException(status_code=500, detail=f"添加任务失败: {e}")
 
 
+async def _post_upload_process(
+    image_id: int,
+    user_id: int | None,
+    tags: list[str],
+    category_id: int | None,
+    width: int | None,
+    height: int | None,
+    auto_analyze: bool,
+    log: logging.Logger,
+) -> None:
+    """后台异步处理上传后的标签、分辨率、AI分析任务。
+    
+    此函数在响应返回后异步执行，不阻塞上传响应。
+    使用独立的数据库会话，确保事务独立性。
+    
+    Args:
+        image_id: 图片 ID
+        user_id: 上传用户 ID
+        tags: 用户指定的标签列表
+        category_id: 分类 ID
+        width: 图片宽度
+        height: 图片高度  
+        auto_analyze: 是否启用 AI 分析
+        log: 日志记录器
+    """
+    from imgtag.db.database import async_session_maker
+    
+    try:
+        async with async_session_maker() as session:
+            # 1. 设置用户标签
+            if tags:
+                t1 = time.time()
+                await image_tag_repository.set_image_tags(
+                    session, image_id, tags, source="user", added_by=user_id
+                )
+                perf_logger.debug(f"[Async] 设置用户标签耗时: {time.time() - t1:.4f}秒")
+            
+            # 2. 设置分类标签
+            if category_id:
+                t2 = time.time()
+                await image_tag_repository.add_tag_to_image(
+                    session, image_id, category_id, source="user", sort_order=0, added_by=user_id
+                )
+                perf_logger.debug(f"[Async] 设置分类标签耗时: {time.time() - t2:.4f}秒")
+            
+            # 3. 设置分辨率标签
+            if width and height:
+                resolution_name = upload_service.get_resolution_level(width, height)
+                if resolution_name != "unknown":
+                    t3 = time.time()
+                    resolution_tag = await tag_repository.get_or_create(
+                        session, resolution_name, source="system", level=1
+                    )
+                    await image_tag_repository.add_tag_to_image(
+                        session, image_id, resolution_tag.id, source="system", sort_order=1
+                    )
+                    perf_logger.debug(f"[Async] 设置分辨率标签耗时: {time.time() - t3:.4f}秒")
+            
+            # 提交标签事务
+            await session.commit()
+            
+            # 4. 添加 AI 分析任务
+            if auto_analyze:
+                t4 = time.time()
+                await task_queue.add_tasks([image_id])
+                perf_logger.debug(f"[Async] 添加AI分析任务耗时: {time.time() - t4:.4f}秒")
+                if not task_queue._running:
+                    asyncio.create_task(task_queue.start_processing())
+            
+            log.info(f"[Async] 后台处理完成: image_id={image_id}")
+    except Exception as e:
+        log.error(f"[Async] 后台处理失败: image_id={image_id}, error={e}")
+
+
 @router.post("/upload", response_model=UploadAnalyzeResponse, status_code=201)
 async def upload_and_analyze(
     background_tasks: BackgroundTasks,
@@ -406,31 +482,66 @@ async def upload_and_analyze(
             target_endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
             if not target_endpoint or not target_endpoint.is_enabled:
                 raise HTTPException(400, f"存储端点 {endpoint_id} 不可用")
+            # Check if backup endpoint (not allowed for direct upload)
+            from imgtag.core.storage_constants import EndpointRole
+            if target_endpoint.role == EndpointRole.BACKUP.value:
+                raise HTTPException(400, "不能直接上传到备份端点")
         else:
             target_endpoint = await storage_endpoint_repository.get_default_upload(session)
         
-        # Generate unified object key based on hash
+        # Get category code for subdirectory (if category specified)
+        category_code = None
+        if category_id:
+            from imgtag.core.category_cache import get_category_code_cached
+            category_code = await get_category_code_cached(session, category_id)
+        
+        # Generate object key (hash-based path without category)
         object_key = storage_service.generate_object_key(file_hash, ext)
         
-        # Upload to target endpoint
-        if target_endpoint:
+        # Build full key with category prefix for actual upload
+        full_object_key = storage_service.get_full_object_key(object_key, category_code)
+        
+        # 获取本地默认端点（如果没有指定或指定的是本地）
+        local_endpoint = await storage_endpoint_repository.get_by_id(session, 1)  # id=1 是本地端点
+        is_local_endpoint = target_endpoint and target_endpoint.provider == StorageProvider.LOCAL
+        
+        # 提取图片信息（统一处理，避免重复代码）
+        width, height = upload_service.extract_image_dimensions(file_content)
+        file_type = ext
+        
+        if is_local_endpoint or not target_endpoint:
+            # 本地端点：使用统一的 upload_to_endpoint 处理（会创建子目录）
+            actual_endpoint = target_endpoint or local_endpoint
+            # 本地也使用 full_object_key（含 category 前缀，如果有的话）
             upload_success = await storage_service.upload_to_endpoint(
-                file_content, object_key, target_endpoint
+                file_content, full_object_key, actual_endpoint
             )
             if not upload_success:
-                logger.warning(f"上传到端点 {target_endpoint.name} 失败,改用本地存储")
-                target_endpoint = None
-        
-        # Fallback to local upload if no endpoint or upload failed
-        if not target_endpoint:
-            file_path, access_url, file_type, width, height = (
-                await upload_service.save_uploaded_file(file_content, file.filename)
-            )
+                raise HTTPException(status_code=500, detail="文件保存失败")
+            
+            location_object_key = full_object_key
+            access_url = f"/uploads/{full_object_key}"
         else:
-            # For endpoint uploads, also save locally for immediate access
-            file_path, access_url, file_type, width, height = (
-                await upload_service.save_uploaded_file(file_content, file.filename)
+            # 远程端点：上传到远程
+            upload_success = await storage_service.upload_to_endpoint(
+                file_content, full_object_key, target_endpoint
             )
+            if not upload_success:
+                # 上传失败，改用本地存储
+                logger.warning(f"上传到端点 {target_endpoint.name} 失败，改用本地存储")
+                
+                # Fallback 到本地
+                target_endpoint = local_endpoint
+                is_local_endpoint = True
+                await storage_service.upload_to_endpoint(
+                    file_content, full_object_key, target_endpoint
+                )
+                location_object_key = full_object_key
+                access_url = f"/uploads/{full_object_key}"
+            else:
+                # 远程上传成功
+                location_object_key = full_object_key
+                access_url = None  # 远程端点无本地访问 URL
 
         final_tags = [t.strip() for t in tags.split(",") if t.strip()]
         final_description = description
@@ -452,94 +563,49 @@ async def upload_and_analyze(
         perf_logger.debug(f"创建图片记录耗时: {time.time() - t1:.4f}秒")
 
         # Create image_location record for the storage
-        if target_endpoint:
-            # Upload to remote endpoint
-            await image_location_repository.create(
-                session,
-                image_id=new_image.id,
-                endpoint_id=target_endpoint.id,
-                object_key=object_key,
-                is_primary=True,
-                sync_status="synced",
-                synced_at=datetime.now(timezone.utc),
-            )
-            logger.info(f"创建存储位置记录: image_id={new_image.id}, endpoint={target_endpoint.name}")
+        # 注意：如果 target_endpoint 为 None（fallback 失败），使用本地端点
+        actual_endpoint_id = target_endpoint.id if target_endpoint else 1
+        await image_location_repository.create(
+            session,
+            image_id=new_image.id,
+            endpoint_id=actual_endpoint_id,
+            object_key=location_object_key,
+            category_code=category_code,
+            is_primary=True,
+            sync_status="synced",
+            synced_at=datetime.now(timezone.utc),
+        )
+        logger.info(
+            f"创建存储位置记录: image_id={new_image.id}, "
+            f"endpoint={target_endpoint.name if target_endpoint else 'local'}, "
+            f"object_key={location_object_key}, category={category_code}"
+        )
+
+        # 立即提交核心数据（image + location）
+        await session.commit()
         
-        # Always create local ImageLocation (local is always saved)
-        local_endpoint = await storage_endpoint_repository.get_by_name(session, StorageProvider.LOCAL)
-        if local_endpoint:
-            # Use file_path relative to uploads dir as object_key
-            local_object_key = file_path.replace("\\", "/").lstrip("/")
-            if local_object_key.startswith("uploads/"):
-                local_object_key = local_object_key[8:]  # Remove "uploads/" prefix
-            
-            await image_location_repository.create(
-                session,
-                image_id=new_image.id,
-                endpoint_id=local_endpoint.id,
-                object_key=local_object_key,
-                is_primary=not bool(target_endpoint),  # Primary if no remote endpoint
-                sync_status="synced",
-                synced_at=datetime.now(timezone.utc),
-            )
-
-        # Set initial tags
-        if final_tags:
-            t2 = time.time()
-            await image_tag_repository.set_image_tags(
-                session,
-                new_image.id,
-                final_tags,
-                source="user",
-                added_by=user.get("id"),
-            )
-            perf_logger.info(f"设置用户标签耗时: {time.time() - t2:.4f}秒")
-
-        # Set category if provided
-        if category_id:
-            t3 = time.time()
-            await image_tag_repository.add_tag_to_image(
-                session,
-                new_image.id,
-                category_id,
-                source="user",
-                sort_order=0,
-                added_by=user.get("id"),
-            )
-            perf_logger.info(f"设置分类标签耗时: {time.time() - t3:.4f}秒")
-        
-        # Auto-set resolution tag based on image dimensions
-        if width and height:
-            resolution_name = upload_service.get_resolution_level(width, height)
-            logger.info(f"分辨率判断: {width}x{height} -> {resolution_name}")
-            if resolution_name != "unknown":
-                t4 = time.time()
-                resolution_tag = await tag_repository.get_or_create(
-                    session, resolution_name, source="system", level=1
-                )
-                logger.info(f"分辨率标签: id={resolution_tag.id}, name={resolution_tag.name}, level={resolution_tag.level}")
-                perf_logger.info(f"获取/创建分辨率标签耗时: {time.time() - t4:.4f}秒")
-                
-                t5 = time.time()
-                await image_tag_repository.add_tag_to_image(
-                    session,
-                    new_image.id,
-                    resolution_tag.id,
-                    source="system",
-                    sort_order=1,
-                )
-                perf_logger.info(f"关联分辨率标签耗时: {time.time() - t5:.4f}秒")
-
-        # Queue for analysis
-        if auto_analyze and not skip_analyze:
-            t6 = time.time()
-            await task_queue.add_tasks([new_image.id])
-            perf_logger.info(f"添加队列任务耗时: {time.time() - t6:.4f}秒")
-            if not task_queue._running:
-                background_tasks.add_task(task_queue.start_processing)
-
         total_time = time.time() - start_time
-        perf_logger.info(f"上传并添加任务耗时: {total_time:.4f}秒")
+        perf_logger.info(f"上传核心数据耗时: {total_time:.4f}秒")
+        
+        # 后台异步处理标签、分辨率、AI分析（不阻塞响应）
+        asyncio.create_task(
+            _post_upload_process(
+                image_id=new_image.id,
+                user_id=user.get("id"),
+                tags=final_tags,
+                category_id=category_id,
+                width=width,
+                height=height,
+                auto_analyze=auto_analyze and not skip_analyze,
+                log=logger,
+            )
+        )
+        
+        # 触发自动备份到备份端点
+        from imgtag.services.backup_service import trigger_backup_for_image
+        asyncio.create_task(
+            trigger_backup_for_image(new_image.id, actual_endpoint_id)
+        )
 
         return UploadAnalyzeResponse(
             id=new_image.id,
@@ -939,8 +1005,6 @@ async def update_image(
             tag_ids_to_set = image_update.tag_ids
             # 查询标签名用于 embedding
             if tag_ids_to_set:
-                from sqlalchemy import select
-                from imgtag.models.tag import Tag
                 stmt = select(Tag.name).where(Tag.id.in_(tag_ids_to_set))
                 result = await session.execute(stmt)
                 tag_names_for_embedding = [row.name for row in result]
@@ -1039,31 +1103,15 @@ async def delete_image(
 
         check_image_permission(image, user, "删除")
 
-        # Delete local file
-        file_path = image.file_path
-        file_deleted = False
-
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                file_deleted = True
-                logger.info(f"已删除本地文件: {file_path}")
-            except Exception as e:
-                logger.warning(f"删除本地文件失败: {file_path}, 错误: {e}")
-
-        # Delete database record
+        # Delete database record (ImageLocations deleted via CASCADE)
+        # Physical files on storage endpoints should be cleaned separately if needed
         await image_repository.delete(session, image)
 
         process_time = time.time() - start_time
         perf_logger.info(f"删除图像耗时: {process_time:.4f}秒")
 
-        msg = f"图像 ID:{image_id} 删除成功"
-        if file_deleted:
-            msg += " (含本地文件)"
-
         return {
-            "message": msg,
-            "file_deleted": file_deleted,
+            "message": f"图像 ID:{image_id} 删除成功",
             "process_time": f"{process_time:.4f}秒",
         }
     except HTTPException:
@@ -1072,19 +1120,25 @@ async def delete_image(
         logger.error(f"删除图像失败: {e}")
         raise HTTPException(status_code=500, detail=f"删除图像失败: {e}")
 
+class BatchDeleteRequest(BaseModel):
+    """Request body for batch delete."""
+    image_ids: list[int]
+    delete_files: bool = False
+
 
 @router.post("/batch/delete", response_model=dict[str, Any])
 async def batch_delete_images(
-    image_ids: list[int],
+    request: BatchDeleteRequest,
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Batch delete images (requires login).
 
     Uses bulk WHERE IN() query instead of N individual queries.
+    Optionally deletes physical files from storage endpoints.
 
     Args:
-        image_ids: List of image IDs.
+        request: Request body with image_ids and delete_files flag.
         user: Current user.
         session: Database session.
 
@@ -1092,7 +1146,9 @@ async def batch_delete_images(
         Deletion results.
     """
     start_time = time.time()
-    logger.info(f"批量删除图像: {len(image_ids)} 张")
+    image_ids = request.image_ids
+    delete_files = request.delete_files
+    logger.info(f"批量删除图像: {len(image_ids)} 张, delete_files={delete_files}")
 
     if not image_ids:
         return {
@@ -1102,21 +1158,47 @@ async def batch_delete_images(
             "process_time": "0秒",
         }
 
+    # 收集需要删除的文件信息（在事务前完成）
+    files_to_delete: list[dict] = []
+    
     try:
-        # Bulk delete with permission filter (SQL 层过滤)
-        deleted_count, file_paths = await image_repository.delete_by_ids(
-            session, image_ids, owner_id=get_owner_filter(user)
-        )
+        # 权限过滤
+        owner_id = get_owner_filter(user)
+        
+        # 如果需要删除物理文件，先收集文件位置信息
+        if delete_files:
+            from sqlalchemy.orm import selectinload
+            
+            stmt = select(Image).where(
+                Image.id.in_(image_ids)
+            ).options(selectinload(Image.locations))
+            
+            if owner_id is not None:
+                stmt = stmt.where(Image.uploaded_by == owner_id)
+            
+            result = await session.execute(stmt)
+            images = result.scalars().all()
+            
+            for image in images:
+                for location in image.locations:
+                    files_to_delete.append({
+                        "endpoint_id": location.endpoint_id,
+                        "object_key": location.object_key,
+                    })
 
-        # Delete local files (after DB transaction commits)
-        files_deleted = 0
-        for file_path in file_paths:
-            if file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                    files_deleted += 1
-                except Exception:
-                    pass
+        # 事务内删除元数据（ImageLocations 通过 CASCADE 自动删除）
+        deleted_count, _ = await image_repository.delete_by_ids(
+            session, image_ids, owner_id=owner_id
+        )
+        
+        # 提交事务
+        await session.commit()
+
+        # 后台异步删除物理文件（不阻塞响应）
+        if files_to_delete:
+            asyncio.create_task(
+                _delete_files_async(files_to_delete, logger)
+            )
 
         process_time = time.time() - start_time
         perf_logger.info(f"批量删除耗时: {process_time:.4f}秒")
@@ -1127,12 +1209,53 @@ async def batch_delete_images(
             "message": f"批量删除完成: 成功 {deleted_count} 张，失败 {fail_count} 张",
             "success_count": deleted_count,
             "fail_count": fail_count,
-            "files_deleted": files_deleted,
+            "files_scheduled": len(files_to_delete) if delete_files else 0,
             "process_time": f"{process_time:.4f}秒",
         }
     except Exception as e:
+        await session.rollback()
         logger.error(f"批量删除失败: {e}")
         raise HTTPException(status_code=500, detail=f"批量删除失败: {e}")
+
+
+async def _delete_files_async(
+    files: list[dict],
+    log: Any,
+) -> None:
+    """后台异步删除物理文件。
+    
+    Args:
+        files: 文件位置列表 [{"endpoint_id": int, "object_key": str}, ...]
+        log: Logger instance.
+    """
+    from imgtag.db.database import async_session_maker
+    
+    deleted = 0
+    failed = 0
+    
+    async with async_session_maker() as session:
+        for file_info in files:
+            try:
+                endpoint = await storage_endpoint_repository.get_by_id(
+                    session, file_info["endpoint_id"]
+                )
+                if not endpoint:
+                    continue
+                
+                # 使用 delete_from_endpoint 统一删除（同时支持本地和远程）
+                success = await storage_service.delete_from_endpoint(
+                    object_key=file_info["object_key"],
+                    endpoint=endpoint,
+                )
+                if success:
+                    deleted += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                failed += 1
+                log.warning(f"删除文件失败: {file_info['object_key']}, 错误: {e}")
+    
+    log.info(f"后台删除文件完成: 成功 {deleted}, 失败 {failed}")
 
 
 class BatchUpdateTagsRequest(BaseModel):

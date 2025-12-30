@@ -309,6 +309,8 @@ class TagRepository(BaseRepository[Tag]):
                 Tag.description,
                 Tag.sort_order,
                 Tag.created_at,
+                Tag.code,
+                Tag.prompt,
                 func.count(ImageTag.image_id).label("usage_count"),
             )
             .outerjoin(ImageTag, Tag.id == ImageTag.tag_id)
@@ -342,6 +344,8 @@ class TagRepository(BaseRepository[Tag]):
                 "sort_order": row.sort_order,
                 "usage_count": row.usage_count,
                 "created_at": row.created_at,
+                "code": row.code,
+                "prompt": row.prompt,
             }
             for row in result
         ]

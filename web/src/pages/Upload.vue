@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { useUploadImage, useUploadZip, useUploadFromUrl, useCategories } from '@/api/queries'
 import { useUserStore } from '@/stores/user'
 import apiClient from '@/api/client'
+import { toast } from 'vue-sonner'
 import type { UploadAnalyzeResponse } from '@/types'
 import { 
   Upload as UploadIcon, 
@@ -203,9 +204,9 @@ async function uploadFromUrl() {
       categoryId: selectedCategoryId.value ?? undefined,
     })
     urlInput.value = ''
-    alert('添加成功')
+    toast.success('图片添加成功')
   } catch (e: any) {
-    alert(e.response?.data?.detail || '添加失败')
+    toast.error(e.response?.data?.detail || '添加失败')
   }
 }
 

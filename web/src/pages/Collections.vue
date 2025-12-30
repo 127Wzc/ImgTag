@@ -2,6 +2,9 @@
 import { ref, onMounted } from 'vue'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
+import { toast } from 'vue-sonner'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { 
   Folder, 
   Plus, 
@@ -11,6 +14,8 @@ import {
   FolderOpen
 } from 'lucide-vue-next'
 import type { Collection } from '@/types'
+
+const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
 
 const loading = ref(false)
 const collections = ref<Collection[]>([])
@@ -44,21 +49,30 @@ async function handleCreate() {
     newCollectionName.value = ''
     newCollectionDesc.value = ''
     showCreateDialog.value = false
+    toast.success('收藏夹创建成功')
     await fetchCollections()
   } catch (e: any) {
-    alert(e.response?.data?.detail || '创建失败')
+    toast.error(e.response?.data?.detail || '创建失败')
   } finally {
     creating.value = false
   }
 }
 
-async function handleDelete(id: number) {
-  if (!confirm('确定要删除这个收藏夹吗？')) return
+async function handleDelete(collection: Collection) {
+  const confirmed = await confirm({
+    title: '删除收藏夹',
+    message: `确定要删除收藏夹 "${collection.name}" 吗？`,
+    variant: 'danger',
+    confirmText: '删除',
+  })
+  if (!confirmed.confirmed) return
+  
   try {
-    await apiClient.delete(`/collections/${id}`)
+    await apiClient.delete(`/collections/${collection.id}`)
+    toast.success('收藏夹已删除')
     await fetchCollections()
   } catch (e: any) {
-    alert(e.response?.data?.detail || '删除失败')
+    toast.error(e.response?.data?.detail || '删除失败')
   }
 }
 
@@ -125,7 +139,7 @@ onMounted(() => {
                 </div>
               </div>
               <div class="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                <Button variant="ghost" size="icon" class="text-destructive" @click="handleDelete(collection.id)">
+                <Button variant="ghost" size="icon" class="text-destructive" @click="handleDelete(collection)">
                   <Trash2 class="w-4 h-4" />
                 </Button>
               </div>
@@ -181,6 +195,19 @@ onMounted(() => {
         </div>
       </Transition>
     </Teleport>
+
+    <!-- 确认弹窗 -->
+    <ConfirmDialog
+      :open="confirmState.open"
+      :title="confirmState.title"
+      :message="confirmState.message"
+      :confirm-text="confirmState.confirmText"
+      :cancel-text="confirmState.cancelText"
+      :variant="confirmState.variant"
+      :loading="confirmState.loading"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
+    />
   </div>
 </template>
 

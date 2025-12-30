@@ -219,6 +219,25 @@ class ImageLocationRepository(BaseRepository[ImageLocation]):
         result = await session.execute(stmt)
         return result.scalar() or 0
 
+    async def count_by_image(
+        self,
+        session: AsyncSession,
+        image_id: int,
+    ) -> int:
+        """Count locations for an image.
+        
+        Used to determine if an image will become orphan after removing a location.
+        """
+        from sqlalchemy import func
+
+        stmt = (
+            select(func.count())
+            .select_from(self.model)
+            .where(self.model.image_id == image_id)
+        )
+        result = await session.execute(stmt)
+        return result.scalar() or 0
+
     async def create_pending(
         self,
         session: AsyncSession,
@@ -235,6 +254,34 @@ class ImageLocationRepository(BaseRepository[ImageLocation]):
             sync_status="pending",
             is_primary=False,
         )
+
+    async def delete_by_endpoint(
+        self,
+        session: AsyncSession,
+        endpoint_id: int,
+    ) -> int:
+        """Delete all locations for an endpoint.
+        
+        Used for soft delete (removing associations without deleting files).
+        
+        Args:
+            session: Database session.
+            endpoint_id: Endpoint ID to delete locations for.
+            
+        Returns:
+            Number of deleted records.
+        """
+        from sqlalchemy import delete, func
+        
+        # First count for return value
+        count = await self.count_by_endpoint(session, endpoint_id)
+        
+        # Delete all
+        stmt = delete(self.model).where(self.model.endpoint_id == endpoint_id)
+        await session.execute(stmt)
+        await session.flush()
+        
+        return count
 
 
 # Singleton instance

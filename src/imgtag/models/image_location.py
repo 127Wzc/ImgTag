@@ -37,12 +37,13 @@ class ImageLocation(Base):
         id: Primary key.
         image_id: Foreign key to images table.
         endpoint_id: Foreign key to storage_endpoints table.
-        object_key: Storage path/key (e.g., images/ab/cd/hash.jpg).
+        object_key: Storage path/key (e.g., ab/cd/hash.jpg).
         is_primary: Whether this is the primary storage location.
         sync_status: Current sync status (synced/pending/failed).
         sync_error: Error message if sync failed.
         created_at: When this location was created.
         synced_at: When sync completed successfully.
+        category_code: Category code at upload time (for building full path).
     """
 
     __tablename__ = "image_locations"
@@ -95,6 +96,12 @@ class ImageLocation(Base):
     )
     synced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), comment="同步完成时间"
+    )
+
+    # Category directory (stored at upload time, immutable after)
+    category_code: Mapped[str | None] = mapped_column(
+        String(50), nullable=True,
+        comment="上传时的分类代码(用于构建完整存储路径)"
     )
 
     # Relationships

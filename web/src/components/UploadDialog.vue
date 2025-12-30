@@ -3,10 +3,11 @@
  * UploadDialog - 上传图片弹框
  * 支持拖拽上传、ZIP 压缩包、URL 添加
  */
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, watchEffect, onMounted } from 'vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useUploadImage, useUploadZip, useUploadFromUrl, useCategories } from '@/api/queries'
+import apiClient from '@/api/client'
 import { useUserStore } from '@/stores/user'
 import type { UploadAnalyzeResponse } from '@/types'
 import { 
@@ -20,6 +21,7 @@ import {
   Link,
   Folder,
   Sparkles,
+  HardDrive,
 } from 'lucide-vue-next'
 
 const props = defineProps<{
@@ -38,11 +40,51 @@ type UploadMode = 'file' | 'zip' | 'url'
 const uploadMode = ref<UploadMode>('file')
 
 // 上传选项
-const autoAnalyze = ref(true)
+const autoAnalyze = ref(false)
 const selectedCategoryId = ref<number | null>(null)
 
 // 获取主分类列表
 const { data: categories } = useCategories()
+
+// 默认选中"其他"分类
+watchEffect(() => {
+  if (categories.value && categories.value.length > 0 && selectedCategoryId.value === null) {
+    const otherCategory = categories.value.find(c => c.name === '其他')
+    if (otherCategory) {
+      selectedCategoryId.value = otherCategory.id
+    }
+  }
+})
+
+// 存储端点（仅管理员）
+interface StorageEndpoint {
+  id: number
+  name: string
+  provider: string
+  is_default_upload: boolean
+}
+const endpoints = ref<StorageEndpoint[]>([])
+const selectedEndpointId = ref<number | null>(null)
+
+async function fetchEndpoints() {
+  try {
+    const { data } = await apiClient.get<StorageEndpoint[]>('/storage/endpoints?enabled_only=true')
+    endpoints.value = data
+    // 默认选择默认上传端点
+    const defaultEp = data.find(ep => ep.is_default_upload)
+    if (defaultEp) {
+      selectedEndpointId.value = defaultEp.id
+    }
+  } catch (e) {
+    // 忽略错误，使用默认端点
+  }
+}
+
+onMounted(() => {
+  if (isAdmin.value) {
+    fetchEndpoints()
+  }
+})
 
 interface FileItem {
   file: File
@@ -157,6 +199,7 @@ async function uploadSingle(item: FileItem) {
         autoAnalyze: shouldAnalyze.value,
         skipAnalyze: !shouldAnalyze.value,
         categoryId: selectedCategoryId.value ?? undefined,
+        endpointId: selectedEndpointId.value ?? undefined,
       })
       clearInterval(progressInterval)
       item.progress = 100
@@ -262,8 +305,19 @@ const pendingCount = computed(() => files.value.filter(f => f.status === 'pendin
               v-model="selectedCategoryId"
               class="px-2 py-1 text-sm bg-background border border-border rounded-lg focus:outline-none"
             >
-              <option :value="null">不指定分类</option>
               <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
+            </select>
+          </div>
+          <!-- 存储端点选择（仅管理员） -->
+          <div v-if="isAdmin && endpoints.length > 1" class="flex items-center gap-2">
+            <HardDrive class="w-4 h-4 text-muted-foreground" />
+            <select
+              v-model="selectedEndpointId"
+              class="px-2 py-1 text-sm bg-background border border-border rounded-lg focus:outline-none"
+            >
+              <option v-for="ep in endpoints" :key="ep.id" :value="ep.id">
+                {{ ep.name }}{{ ep.is_default_upload ? ' (默认)' : '' }}
+              </option>
             </select>
           </div>
           <div v-if="isAdmin" class="flex items-center gap-2">

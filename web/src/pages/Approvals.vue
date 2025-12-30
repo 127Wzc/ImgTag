@@ -2,6 +2,9 @@
 import { ref, onMounted } from 'vue'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
+import { toast } from 'vue-sonner'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { 
   Check, 
   X, 
@@ -10,6 +13,8 @@ import {
   Inbox
 } from 'lucide-vue-next'
 import type { ImageResponse } from '@/types'
+
+const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
 
 const loading = ref(false)
 const pendingImages = ref<ImageResponse[]>([])
@@ -37,31 +42,48 @@ async function approve(imageId: number) {
     await apiClient.post(`/approvals/${imageId}/approve`)
     pendingImages.value = pendingImages.value.filter(img => img.id !== imageId)
     total.value--
+    toast.success('已通过')
   } catch (e: any) {
-    alert(e.response?.data?.detail || '操作失败')
+    toast.error(e.response?.data?.detail || '操作失败')
   }
 }
 
 async function reject(imageId: number) {
-  if (!confirm('确定要拒绝并删除这张图片吗？')) return
+  const confirmed = await confirm({
+    title: '拒绝图片',
+    message: '确定要拒绝并删除这张图片吗？',
+    variant: 'danger',
+    confirmText: '拒绝',
+  })
+  if (!confirmed.confirmed) return
+  
   try {
     await apiClient.post(`/approvals/${imageId}/reject`)
     pendingImages.value = pendingImages.value.filter(img => img.id !== imageId)
     total.value--
+    toast.success('已拒绝')
   } catch (e: any) {
-    alert(e.response?.data?.detail || '操作失败')
+    toast.error(e.response?.data?.detail || '操作失败')
   }
 }
 
 async function approveAll() {
-  if (!confirm(`确定要批量通过 ${pendingImages.value.length} 张图片吗？`)) return
+  const confirmed = await confirm({
+    title: '批量通过',
+    message: `确定要批量通过 ${pendingImages.value.length} 张图片吗？`,
+    variant: 'default',
+    confirmText: '全部通过',
+  })
+  if (!confirmed.confirmed) return
+  
   try {
     for (const img of pendingImages.value) {
       await apiClient.post(`/approvals/${img.id}/approve`)
     }
+    toast.success('批量审批完成')
     await fetchPendingImages()
   } catch (e: any) {
-    alert(e.response?.data?.detail || '操作失败')
+    toast.error(e.response?.data?.detail || '操作失败')
   }
 }
 
@@ -172,4 +194,17 @@ onMounted(() => {
       </div>
     </div>
   </div>
+
+  <!-- 确认弹窗 -->
+  <ConfirmDialog
+    :open="confirmState.open"
+    :title="confirmState.title"
+    :message="confirmState.message"
+    :confirm-text="confirmState.confirmText"
+    :cancel-text="confirmState.cancelText"
+    :variant="confirmState.variant"
+    :loading="confirmState.loading"
+    @confirm="handleConfirm"
+    @cancel="handleCancel"
+  />
 </template>

@@ -5,7 +5,7 @@ import { useUserStore } from '@/stores'
 import { useMyImages } from '@/api/queries'
 import apiClient from '@/api/client'
 import type { ImageResponse, ImageSearchRequest } from '@/types'
-import { Loader2, Filter, CheckSquare, Trash2, Tags, Sparkles, LayoutGrid, ChevronDown, FolderOpen, ArrowUpDown, Cloud, HardDrive } from 'lucide-vue-next'
+import { Loader2, Filter, CheckSquare, Trash2, Tags, Sparkles, LayoutGrid, ChevronDown, FolderOpen, ArrowUpDown } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -16,6 +16,10 @@ import ImageDetailModal from '@/components/ImageDetailModal.vue'
 import { toast } from 'vue-sonner'
 import { getErrorMessage } from '@/utils/api-error'
 import { useCategories } from '@/api/queries'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
+
+const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -139,11 +143,25 @@ async function handleBatchAnalyze() {
 }
 
 async function handleBatchDelete() {
-  if (!selectedIds.value.size || !confirm(`确定要删除 ${selectedIds.value.size} 张图片吗？此操作不可恢复！`)) return
+  if (!selectedIds.value.size) return
+  
+  const result = await confirm({
+    title: '批量删除',
+    message: `确定要删除 ${selectedIds.value.size} 张图片吗？此操作不可恢复！`,
+    variant: 'danger',
+    confirmText: '删除',
+    checkboxLabel: '同时删除物理文件',
+    checkboxDefault: false,
+  })
+  if (!result.confirmed) return
+  
   batchLoading.value = true
   try {
-    await apiClient.post('/images/batch/delete', Array.from(selectedIds.value))
-    toast.success(`已删除 ${selectedIds.value.size} 张图片`)
+    await apiClient.post('/images/batch/delete', {
+      image_ids: Array.from(selectedIds.value),
+      delete_files: result.checkboxChecked,
+    })
+    toast.success(`已删除 ${selectedIds.value.size} 张图片${result.checkboxChecked ? '（含物理文件）' : ''}`)
     clearSelection()
     refetch()
   } catch (e: any) { toast.error(getErrorMessage(e)) }
@@ -188,36 +206,6 @@ async function handleBatchCategory() {
   finally { batchLoading.value = false }
 }
 
-// 存储同步
-async function handleSyncToS3() {
-  if (!selectedIds.value.size) return
-  batchLoading.value = true
-  try {
-    const { data } = await apiClient.post('/storage/sync-to-s3', { image_ids: Array.from(selectedIds.value) })
-    toast.success(`已同步 ${data.success} 张图片到 S3`)
-    if (data.failed > 0) {
-      toast.warning(`${data.failed} 张同步失败`)
-    }
-    clearSelection()
-    refetch()
-  } catch (e: any) { toast.error(getErrorMessage(e)) }
-  finally { batchLoading.value = false }
-}
-
-async function handleSyncToLocal() {
-  if (!selectedIds.value.size) return
-  batchLoading.value = true
-  try {
-    const { data } = await apiClient.post('/storage/sync-to-local', { image_ids: Array.from(selectedIds.value) })
-    toast.success(`已同步 ${data.success} 张图片到本地`)
-    if (data.failed > 0) {
-      toast.warning(`${data.failed} 张同步失败`)
-    }
-    clearSelection()
-    refetch()
-  } catch (e: any) { toast.error(getErrorMessage(e)) }
-  finally { batchLoading.value = false }
-}
 
 // 图片详情
 const selectedImage = ref<ImageResponse | null>(null)
@@ -308,8 +296,6 @@ function nextImage() {
                 <Button size="sm" variant="ghost" @click="showBatchTagDialog = true" class="h-8 gap-1.5"><Tags class="w-4 h-4" /><span class="hidden sm:inline">标签</span></Button>
                 <Button size="sm" variant="ghost" @click="showBatchCategoryDialog = true" class="h-8 gap-1.5"><LayoutGrid class="w-4 h-4" /><span class="hidden sm:inline">分类</span></Button>
                 <Button size="sm" variant="ghost" @click="handleBatchAnalyze" :disabled="batchLoading" class="h-8 gap-1.5"><Sparkles class="w-4 h-4" /><span class="hidden sm:inline">分析</span></Button>
-                <Button size="sm" variant="ghost" @click="handleSyncToS3" :disabled="batchLoading" class="h-8 gap-1.5" title="同步到 S3"><Cloud class="w-4 h-4" /><span class="hidden lg:inline">上传S3</span></Button>
-                <Button size="sm" variant="ghost" @click="handleSyncToLocal" :disabled="batchLoading" class="h-8 gap-1.5" title="同步到本地"><HardDrive class="w-4 h-4" /><span class="hidden lg:inline">下载</span></Button>
               </div>
               <Button size="sm" variant="destructive" @click="handleBatchDelete" :disabled="batchLoading" class="h-8 gap-1.5"><Trash2 class="w-4 h-4" /><span class="hidden sm:inline">删除</span></Button>
             </div>
@@ -412,6 +398,22 @@ function nextImage() {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    <!-- 确认弹窗 -->
+    <ConfirmDialog
+      :open="confirmState.open"
+      :title="confirmState.title"
+      :message="confirmState.message"
+      :confirm-text="confirmState.confirmText"
+      :cancel-text="confirmState.cancelText"
+      :variant="confirmState.variant"
+      :loading="confirmState.loading"
+      :checkbox-label="confirmState.checkboxLabel"
+      :checkbox-checked="confirmState.checkboxChecked"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
+      @update:checkbox-checked="(v) => confirmState.checkboxChecked = v"
+    />
   </div>
 </template>
 

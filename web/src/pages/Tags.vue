@@ -7,6 +7,8 @@ import type { Tag } from '@/types'
 import { Button } from '@/components/ui/button'
 import { toast } from 'vue-sonner'
 import { getErrorMessage } from '@/utils/api-error'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { 
   Plus, 
   Trash2, 
@@ -72,13 +74,18 @@ const tabs = computed(() => [
   { level: 2, label: '普通标签', icon: TagIcon, color: 'text-muted-foreground', count: stats.value?.normal_tags ?? 0 },
 ])
 
-// 编辑状态
+// 编辑状态（内联编辑）
 const editingTagId = ref<number | null>(null)
 const editingName = ref('')
 
-function startEdit(tag: { id: number; name: string }) {
-  editingTagId.value = tag.id
-  editingName.value = tag.name
+function startEdit(tag: Tag) {
+  // 对于分类(level=0)，使用弹窗编辑；否则内联编辑
+  if (activeLevel.value === 0) {
+    showCategoryEdit(tag)
+  } else {
+    editingTagId.value = tag.id
+    editingName.value = tag.name
+  }
 }
 
 function cancelEdit() {
@@ -86,17 +93,54 @@ function cancelEdit() {
   editingName.value = ''
 }
 
-// 重命名
+// 分类编辑弹窗状态
+const showCategoryEditDialog = ref(false)
+const editingCategory = ref<Tag | null>(null)
+const categoryEditForm = ref({ name: '', code: '', prompt: '' })
+
+function showCategoryEdit(tag: Tag) {
+  editingCategory.value = tag
+  categoryEditForm.value = {
+    name: tag.name,
+    code: tag.code || '',
+    prompt: tag.prompt || ''
+  }
+  showCategoryEditDialog.value = true
+}
+
+function closeCategoryEdit() {
+  showCategoryEditDialog.value = false
+  editingCategory.value = null
+}
+
+// 更新标签（支持 name/code/prompt）
 const renameTagMutation = useRenameTag()
+
 async function handleRename() {
   if (!editingTagId.value || !editingName.value.trim()) return
   try {
     await renameTagMutation.mutateAsync({ 
       id: editingTagId.value, 
-      newName: editingName.value.trim() 
+      name: editingName.value.trim() 
     })
     toast.success('重命名成功')
     cancelEdit()
+  } catch (e: any) {
+    toast.error(getErrorMessage(e))
+  }
+}
+
+async function handleCategorySave() {
+  if (!editingCategory.value) return
+  try {
+    await renameTagMutation.mutateAsync({
+      id: editingCategory.value.id,
+      name: categoryEditForm.value.name.trim() || undefined,
+      code: categoryEditForm.value.code.trim() || null,
+      prompt: categoryEditForm.value.prompt.trim() || null,
+    })
+    toast.success('分类更新成功')
+    closeCategoryEdit()
   } catch (e: any) {
     toast.error(getErrorMessage(e))
   }
@@ -123,12 +167,21 @@ async function handleCreateTag() {
   }
 }
 
+const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
+
 // 删除标签
 const deleteTagMutation = useDeleteTag()
-async function handleDeleteTag(tagId: number) {
-  if (!confirm('确定删除？')) return
+async function handleDeleteTag(tag: Tag) {
+  const confirmed = await confirm({
+    title: '删除标签',
+    message: `确定删除标签 "${tag.name}" 吗？`,
+    variant: 'danger',
+    confirmText: '删除',
+  })
+  if (!confirmed.confirmed) return
+  
   try {
-    await deleteTagMutation.mutateAsync(tagId)
+    await deleteTagMutation.mutateAsync(tag.id)
     toast.success('删除成功')
   } catch (e: any) {
     toast.error(getErrorMessage(e))
@@ -243,7 +296,7 @@ const isLoading = computed(() => statsLoading.value || tagsLoading.value)
                 </button>
                 <button 
                   class="p-0.5 hover:text-destructive rounded"
-                  @click.stop="handleDeleteTag(tag.id)"
+                  @click.stop="handleDeleteTag(tag)"
                 >
                   <Trash2 class="w-3 h-3" />
                 </button>
@@ -325,6 +378,83 @@ const isLoading = computed(() => statsLoading.value || tagsLoading.value)
         </div>
       </Transition>
     </Teleport>
+
+    <!-- 分类编辑弹窗 -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div 
+          v-if="showCategoryEditDialog"
+          class="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+          @click.self="closeCategoryEdit"
+        >
+          <div class="bg-card rounded-2xl p-5 w-full max-w-md shadow-xl">
+            <h3 class="text-base font-semibold text-foreground mb-4">
+              编辑分类: {{ editingCategory?.name }}
+            </h3>
+            
+            <div class="space-y-4">
+              <!-- 名称 -->
+              <div>
+                <label class="block text-sm font-medium mb-1.5">分类名称</label>
+                <input
+                  v-model="categoryEditForm.name"
+                  type="text"
+                  placeholder="分类名称"
+                  class="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </div>
+              
+              <!-- 代码 -->
+              <div>
+                <label class="block text-sm font-medium mb-1.5">存储代码 (用于目录名)</label>
+                <input
+                  v-model="categoryEditForm.code"
+                  type="text"
+                  placeholder="如: landscape, portrait, anime"
+                  class="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                />
+                <p class="text-xs text-muted-foreground mt-1">文件将存储在: /{code}/ab/cd/hash.jpg</p>
+              </div>
+              
+              <!-- 提示词 -->
+              <div>
+                <label class="block text-sm font-medium mb-1.5">分析提示词 (追加到全局)</label>
+                <textarea
+                  v-model="categoryEditForm.prompt"
+                  rows="3"
+                  placeholder="如: 请特别关注人物的表情和姿态..."
+                  class="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring resize-none"
+                />
+              </div>
+            </div>
+
+            <div class="flex justify-end gap-2 mt-5">
+              <Button variant="outline" size="sm" @click="closeCategoryEdit">取消</Button>
+              <Button 
+                size="sm"
+                @click="handleCategorySave"
+                :disabled="renameTagMutation.isPending.value"
+              >
+                保存
+              </Button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 确认弹窗 -->
+    <ConfirmDialog
+      :open="confirmState.open"
+      :title="confirmState.title"
+      :message="confirmState.message"
+      :confirm-text="confirmState.confirmText"
+      :cancel-text="confirmState.cancelText"
+      :variant="confirmState.variant"
+      :loading="confirmState.loading"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
+    />
   </div>
 </template>
 
@@ -338,3 +468,4 @@ const isLoading = computed(() => statsLoading.value || tagsLoading.value)
   opacity: 0;
 }
 </style>
+

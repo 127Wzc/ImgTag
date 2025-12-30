@@ -176,8 +176,15 @@ class VisionService:
         """获取视觉模型名称"""
         return await config_cache.get("vision_model", "gpt-4o-mini") or "gpt-4o-mini"
     
-    async def _get_prompt(self) -> str:
-        """获取分析提示词"""
+    async def _get_prompt(self, category_id: int | None = None) -> str:
+        """获取分析提示词（全局 + 分类专用组合）
+        
+        Args:
+            category_id: 可选的分类 ID (level=0 的 Tag)
+            
+        Returns:
+            组合后的提示词字符串
+        """
         default_prompt = """请分析这张图片，并按以下格式返回JSON响应:
 {
     "tags": ["标签1", "标签2", "标签3", ...],
@@ -189,7 +196,26 @@ class VisionService:
 2. description: 用中文详细描述图片内容
 
 请只返回JSON格式，不要添加任何其他文字。"""
-        return await config_cache.get("vision_prompt", default_prompt) or default_prompt
+        
+        # 获取全局提示词
+        base_prompt = await config_cache.get("vision_prompt", default_prompt) or default_prompt
+        
+        # 如果有分类 ID，尝试获取分类专用提示词
+        if category_id:
+            try:
+                from imgtag.db.database import async_session_maker
+                from imgtag.db.repositories import tag_repository
+                
+                async with async_session_maker() as session:
+                    category = await tag_repository.get_by_id(session, category_id)
+                    if category and category.level == 0 and category.prompt:
+                        # 组合全局 + 分类提示词
+                        logger.debug(f"使用分类专用提示词: {category.name}")
+                        return f"{base_prompt}\n\n### 分类特定要求\n{category.prompt}"
+            except Exception as e:
+                logger.warning(f"获取分类提示词失败: {e}")
+        
+        return base_prompt
     
     async def analyze_image_url(self, image_url: str) -> ImageAnalysisResult:
         """Analyze a remote image by URL.

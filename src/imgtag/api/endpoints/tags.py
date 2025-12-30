@@ -11,6 +11,7 @@ Unified tag CRUD with level-based permissions:
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin, get_current_user
@@ -108,7 +109,6 @@ async def resolve_tag(
     - Level 0/1: Must exist (only admin can create)
     - Level 2: Auto-create if not exists
     """
-    from sqlalchemy.exc import IntegrityError
 
     name = name.strip()
     if not name:
@@ -174,16 +174,11 @@ async def rename_tag_by_id(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Rename tag by ID.
+    """Update tag by ID.
     
-    - Level 0/1: Admin only
-    - Level 2: Any authenticated user
+    - Level 0/1: Admin only (supports name, code, prompt)
+    - Level 2: Any authenticated user (name only)
     """
-    if not tag_update.name or not tag_update.name.strip():
-        raise HTTPException(status_code=400, detail="新标签名不能为空")
-
-    new_name = tag_update.name.strip()
-
     tag = await tag_repository.get_by_id(session, tag_id)
     if not tag:
         raise HTTPException(status_code=404, detail="标签不存在")
@@ -192,21 +187,43 @@ async def rename_tag_by_id(
     if tag.level in (0, 1) and user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可修改主分类和分辨率标签")
 
-    if tag.name == new_name:
-        raise HTTPException(status_code=400, detail="新标签名与原标签名相同")
-
-    if await tag_repository.exists(session, new_name):
-        raise HTTPException(status_code=409, detail=f"标签 '{new_name}' 已存在")
-
-    old_name = tag.name
-    tag.name = new_name
+    updated_fields = {}
+    
+    # Update name if provided
+    if tag_update.name and tag_update.name.strip():
+        new_name = tag_update.name.strip()
+        if tag.name != new_name:
+            if await tag_repository.exists(session, new_name):
+                raise HTTPException(status_code=409, detail=f"标签 '{new_name}' 已存在")
+            updated_fields["old_name"] = tag.name
+            tag.name = new_name
+            updated_fields["new_name"] = new_name
+    
+    # Update code if provided (level=0 only)
+    if tag_update.code is not None and tag.level == 0:
+        tag.code = tag_update.code or None
+        updated_fields["code"] = tag.code
+    
+    # Update prompt if provided (level=0 only)
+    if tag_update.prompt is not None and tag.level == 0:
+        tag.prompt = tag_update.prompt or None
+        updated_fields["prompt"] = "已更新" if tag.prompt else "已清空"
+    
+    if not updated_fields:
+        raise HTTPException(status_code=400, detail="没有可更新的字段")
+    
     await session.flush()
+    
+    # Invalidate category cache if level=0 tag was updated
+    if tag.level == 0:
+        from imgtag.core.category_cache import invalidate_category_cache
+        invalidate_category_cache(tag_id)
+        logger.info(f"已刷新分类缓存: {tag_id}")
 
     return {
-        "message": f"标签 '{old_name}' 已重命名为 '{new_name}'",
+        "message": f"标签 '{tag.name}' 更新成功",
         "id": tag_id,
-        "old_name": old_name,
-        "new_name": new_name,
+        **updated_fields,
     }
 
 

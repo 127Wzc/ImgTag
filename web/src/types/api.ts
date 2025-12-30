@@ -38,6 +38,8 @@ export interface Tag {
     usage_count: number
     sort_order: number
     image_count?: number
+    code?: string | null        // 分类代码(用于存储子目录)
+    prompt?: string | null      // 分类专用分析提示词
 }
 
 // ============= 图片相关 =============

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Tuple, Optional
 import aiofiles
 import httpx
+import os
 
 from imgtag.core.config import settings
 from imgtag.core.logging_config import get_logger, get_perf_logger
@@ -56,6 +57,86 @@ class UploadService:
     def _generate_filename(self, extension: str) -> str:
         """生成唯一文件名"""
         return f"{uuid.uuid4().hex}.{extension}"
+    
+    @property
+    def temp_dir(self) -> Path:
+        """临时文件目录（用于远程端点上传时解析图片信息）"""
+        tmp_path = self._upload_dir.parent / "tmp"
+        tmp_path.mkdir(exist_ok=True)
+        return tmp_path
+    
+    async def save_temp_file(
+        self, 
+        file_content: bytes, 
+        file_hash: str, 
+        extension: str
+    ) -> str:
+        """保存临时文件（用于解析图片信息）
+        
+        Args:
+            file_content: 文件内容
+            file_hash: 文件哈希
+            extension: 文件扩展名
+            
+        Returns:
+            str: 临时文件路径
+        """
+        tmp_filename = f"{file_hash}.{extension}"
+        tmp_path = self.temp_dir / tmp_filename
+        
+        async with aiofiles.open(tmp_path, "wb") as f:
+            await f.write(file_content)
+        
+        logger.debug(f"保存临时文件: {tmp_path}")
+        return str(tmp_path)
+    
+    async def delete_temp_file(self, tmp_path: str) -> bool:
+        """删除临时文件
+        
+        Args:
+            tmp_path: 临时文件路径
+            
+        Returns:
+            bool: 是否成功删除
+        """
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+                logger.debug(f"删除临时文件: {tmp_path}")
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"删除临时文件失败: {tmp_path}, 错误: {e}")
+            return False
+    
+    def cleanup_temp_dir(self, max_age_hours: int = 24) -> int:
+        """清理临时目录中的旧文件
+        
+        Args:
+            max_age_hours: 最大保留时间（小时）
+            
+        Returns:
+            int: 删除的文件数量
+        """
+        deleted = 0
+        cutoff_time = time.time() - (max_age_hours * 3600)
+        
+        if not self.temp_dir.exists():
+            return 0
+        
+        for file_path in self.temp_dir.iterdir():
+            if file_path.is_file():
+                try:
+                    if file_path.stat().st_mtime < cutoff_time:
+                        file_path.unlink()
+                        deleted += 1
+                except Exception as e:
+                    logger.warning(f"清理临时文件失败: {file_path}, 错误: {e}")
+        
+        if deleted > 0:
+            logger.info(f"清理了 {deleted} 个过期临时文件 (>{max_age_hours}h)")
+        
+        return deleted
     
     def extract_image_dimensions(self, file_content: bytes) -> Tuple[Optional[int], Optional[int]]:
         """从图片内容提取宽高

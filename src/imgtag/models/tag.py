@@ -33,6 +33,8 @@ class Tag(Base, TimestampMixin):
         level: Tag level (0=category, 1=resolution, 2=normal).
         usage_count: Number of images using this tag.
         sort_order: Display order.
+        code: Category code for storage subdirectory (level=0 only).
+        prompt: Category-specific analysis prompt (level=0 only).
     """
 
     __tablename__ = "tags"
@@ -62,6 +64,16 @@ class Tag(Base, TimestampMixin):
     )
     sort_order: Mapped[int] = mapped_column(
         Integer, server_default="0", nullable=False, comment="排序"
+    )
+
+    # Category-specific fields (only used for level=0)
+    code: Mapped[str | None] = mapped_column(
+        String(50), unique=True, nullable=True,
+        comment="分类代码(用于存储子目录)"
+    )
+    prompt: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="分类专用分析提示词"
     )
 
     # Relationships

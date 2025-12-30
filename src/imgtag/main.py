@@ -93,6 +93,15 @@ async def lifespan(app: FastAPI):
     upload_path = settings.get_upload_path()
     logger.info(f"上传目录: {upload_path}")
     
+    # 清理残留的临时文件（远程上传解析用）
+    try:
+        from imgtag.services.upload_service import upload_service
+        cleaned = upload_service.cleanup_temp_dir(max_age_hours=1)  # 清理1小时前的临时文件
+        if cleaned > 0:
+            logger.info(f"启动时清理了 {cleaned} 个残留临时文件")
+    except Exception as e:
+        logger.warning(f"清理临时文件失败: {e}")
+    
     if STATIC_DIR:
         logger.info(f"前端静态文件目录: {STATIC_DIR}")
     
@@ -155,9 +164,17 @@ async def lifespan(app: FastAPI):
             # 启动处理
             asyncio.create_task(task_queue.start_processing())
         else:
-            logger.info("没有未完成的任务需要恢复")
+            logger.info(f"没有未完成的任务需要恢复")
     except Exception as e:
         logger.error(f"恢复未完成任务失败: {str(e)}")
+    
+    # 启动每日备份定时任务
+    try:
+        from imgtag.services.backup_service import schedule_daily_backup
+        asyncio.create_task(schedule_daily_backup())
+        logger.info("已启动每日备份定时任务（凌晨1点执行）")
+    except Exception as e:
+        logger.warning(f"启动备份定时任务失败: {e}")
     
     yield
     

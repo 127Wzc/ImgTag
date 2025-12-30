@@ -2,6 +2,9 @@
 import { ref, onMounted } from 'vue'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
+import { toast } from 'vue-sonner'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { 
   HardDrive, 
   Database, 
@@ -12,6 +15,8 @@ import {
   CheckCircle,
   FolderSync
 } from 'lucide-vue-next'
+
+const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
 
 interface StorageStats {
   total_images: number
@@ -45,10 +50,10 @@ async function scanDuplicates() {
   scanning.value = true
   try {
     const { data } = await apiClient.post('/storage/scan-duplicates')
-    alert(`扫描完成: 发现 ${data.duplicates_count} 组重复图片`)
+    toast.success(`扫描完成: 发现 ${data.duplicates_count} 组重复图片`)
     await fetchStats()
   } catch (e: any) {
-    alert(e.response?.data?.detail || '扫描失败')
+    toast.error(e.response?.data?.detail || '扫描失败')
   } finally {
     scanning.value = false
   }
@@ -58,24 +63,31 @@ async function calculateHashes() {
   calculating.value = true
   try {
     const { data } = await apiClient.post('/storage/calculate-hashes')
-    alert(`计算完成: 处理了 ${data.processed} 张图片`)
+    toast.success(`计算完成: 处理了 ${data.processed} 张图片`)
     await fetchStats()
   } catch (e: any) {
-    alert(e.response?.data?.detail || '计算失败')
+    toast.error(e.response?.data?.detail || '计算失败')
   } finally {
     calculating.value = false
   }
 }
 
 async function cleanOrphans() {
-  if (!confirm('确定要清理孤立文件吗？此操作不可恢复。')) return
+  const confirmed = await confirm({
+    title: '清理孤立文件',
+    message: '确定要清理孤立文件吗？此操作不可恢复。',
+    variant: 'danger',
+    confirmText: '清理',
+  })
+  if (!confirmed.confirmed) return
+  
   cleaning.value = true
   try {
     const { data } = await apiClient.post('/storage/clean-orphans')
-    alert(`清理完成: 删除了 ${data.deleted_count} 个孤立文件`)
+    toast.success(`清理完成: 删除了 ${data.deleted_count} 个孤立文件`)
     await fetchStats()
   } catch (e: any) {
-    alert(e.response?.data?.detail || '清理失败')
+    toast.error(e.response?.data?.detail || '清理失败')
   } finally {
     cleaning.value = false
   }
@@ -226,4 +238,17 @@ onMounted(() => {
       </div>
     </div>
   </div>
+
+  <!-- 确认弹窗 -->
+  <ConfirmDialog
+    :open="confirmState.open"
+    :title="confirmState.title"
+    :message="confirmState.message"
+    :confirm-text="confirmState.confirmText"
+    :cancel-text="confirmState.cancelText"
+    :variant="confirmState.variant"
+    :loading="confirmState.loading"
+    @confirm="handleConfirm"
+    @cancel="handleCancel"
+  />
 </template>

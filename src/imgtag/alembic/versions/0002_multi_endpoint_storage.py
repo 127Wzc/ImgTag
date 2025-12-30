@@ -41,7 +41,7 @@ def upgrade() -> None:
         sa.Column("public_url_prefix", sa.Text(), nullable=True, comment="CDN或公开访问前缀"),
         sa.Column("path_prefix", sa.String(100), server_default="", nullable=False, comment="对象路径前缀"),
         # Role and status
-        sa.Column("role", sa.String(20), server_default="primary", nullable=False, comment="角色: primary/mirror/backup"),
+        sa.Column("role", sa.String(20), server_default="primary", nullable=False, comment="角色: primary(主)/backup(备份)"),
         sa.Column("is_enabled", sa.Boolean(), server_default="true", nullable=False, comment="是否启用"),
         sa.Column("is_default_upload", sa.Boolean(), server_default="false", nullable=False, comment="是否为默认上传端点"),
         # Auto-sync
@@ -165,8 +165,33 @@ def upgrade() -> None:
         )
     """))
 
+    # === 8. Add category fields to tags table ===
+    op.add_column("tags", sa.Column("code", sa.String(50), unique=True, nullable=True, comment="分类代码(用于存储子目录)"))
+    op.add_column("tags", sa.Column("prompt", sa.Text(), nullable=True, comment="分类专用分析提示词"))
+
+    # Set default codes for existing categories (matching 0001_initial seed data)
+    conn.execute(sa.text("""
+        UPDATE tags SET code = 'landscape' WHERE name = '风景' AND level = 0;
+        UPDATE tags SET code = 'portrait' WHERE name = '人像' AND level = 0;
+        UPDATE tags SET code = 'anime' WHERE name = '动漫' AND level = 0;
+        UPDATE tags SET code = 'meme' WHERE name = '表情包' AND level = 0;
+        UPDATE tags SET code = 'product' WHERE name = '产品' AND level = 0;
+        UPDATE tags SET code = 'art' WHERE name = '艺术' AND level = 0;
+        UPDATE tags SET code = 'screenshot' WHERE name = '截图' AND level = 0;
+        UPDATE tags SET code = 'document' WHERE name = '文档' AND level = 0;
+        UPDATE tags SET code = 'other' WHERE name = '其他' AND level = 0;
+    """))
+
+    # === 9. Add category_code to image_locations ===
+    op.add_column("image_locations", sa.Column("category_code", sa.String(50), nullable=True, comment="上传时的分类代码"))
+
 
 def downgrade() -> None:
+    # Remove new category columns (added in step 8 & 9)
+    op.drop_column("image_locations", "category_code")
+    op.drop_column("tags", "prompt")
+    op.drop_column("tags", "code")
+
     # Restore legacy columns
     op.add_column("images", sa.Column("local_exists", sa.Boolean(), server_default="true", nullable=False, comment="本地文件是否存在"))
     op.add_column("images", sa.Column("s3_path", sa.Text(), nullable=True, comment="S3存储路径"))

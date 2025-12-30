@@ -170,14 +170,25 @@ export function useResolveTag() {
 }
 
 /**
- * 重命名标签（按 ID）
+ * 更新标签（按 ID）
+ * 支持更新 name, code, prompt
  */
 export function useRenameTag() {
     const queryClient = useQueryClient()
 
     return useMutation({
-        mutationFn: async ({ id, newName }: { id: number; newName: string }) => {
-            const { data } = await apiClient.put(`/tags/id/${id}`, { name: newName })
+        mutationFn: async ({ id, name, code, prompt }: {
+            id: number;
+            name?: string;
+            code?: string | null;
+            prompt?: string | null;
+        }) => {
+            const payload: Record<string, any> = {}
+            if (name !== undefined) payload.name = name
+            if (code !== undefined) payload.code = code
+            if (prompt !== undefined) payload.prompt = prompt
+
+            const { data } = await apiClient.put(`/tags/id/${id}`, payload)
             return data
         },
         onSuccess: () => {

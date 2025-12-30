@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from imgtag.core.logging_config import get_logger
+from imgtag.core.storage_constants import BATCH_CONFIG, StorageTaskStatus, StorageTaskType
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import (
     image_location_repository,
@@ -31,14 +32,12 @@ class StorageSyncService:
     - Force overwrite option
     """
 
-    BATCH_SIZE = 500  # Max images per task
-    CHECKPOINT_INTERVAL = 100  # Update DB every N images
-    MAX_CONCURRENT_SYNCS = 2  # Concurrent sync operations
-    SYNC_INTERVAL_SECONDS = 1.0  # Delay between sync operations
+    TASK_TYPE = StorageTaskType.SYNC
+    BATCH_CONFIG = BATCH_CONFIG  # Use unified config
 
     def __init__(self):
         self._running = False
-        self._sync_semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_SYNCS)
+        self._sync_semaphore = asyncio.Semaphore(BATCH_CONFIG.max_concurrent)
 
     async def start_batch_sync(
         self,
@@ -68,18 +67,18 @@ class StorageSyncService:
                 # Stream image IDs in batches to avoid memory issues with large datasets
                 image_ids = []
                 async for loc in image_location_repository.iter_by_endpoint(
-                    session, source_endpoint_id, batch_size=self.BATCH_SIZE
+                    session, source_endpoint_id, batch_size=BATCH_CONFIG.batch_size
                 ):
                     image_ids.append(loc.image_id)
                     
                     # Create task for each complete batch
-                    if len(image_ids) >= self.BATCH_SIZE:
+                    if len(image_ids) >= BATCH_CONFIG.batch_size:
                         batch_index = len(task_ids)
                         task_id = str(uuid.uuid4())
                         await task_repository.create_task(
                             session,
                             task_id=task_id,
-                            task_type="storage_sync",
+                            task_type=self.TASK_TYPE.value,
                             payload={
                                 "sync_type": "batch",
                                 "source_endpoint_id": source_endpoint_id,
@@ -100,7 +99,7 @@ class StorageSyncService:
                     await task_repository.create_task(
                         session,
                         task_id=task_id,
-                        task_type="storage_sync",
+                        task_type=self.TASK_TYPE.value,
                         payload={
                             "sync_type": "batch",
                             "source_endpoint_id": source_endpoint_id,
@@ -134,12 +133,12 @@ class StorageSyncService:
                 logger.info("No images to sync")
                 return []
             
-            total_batches = (len(image_ids) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
+            total_batches = (len(image_ids) + BATCH_CONFIG.batch_size - 1) // BATCH_CONFIG.batch_size
             
             # Split into batches
-            for i in range(0, len(image_ids), self.BATCH_SIZE):
-                batch = image_ids[i:i + self.BATCH_SIZE]
-                batch_index = i // self.BATCH_SIZE
+            for i in range(0, len(image_ids), BATCH_CONFIG.batch_size):
+                batch = image_ids[i:i + BATCH_CONFIG.batch_size]
+                batch_index = i // BATCH_CONFIG.batch_size
                 
                 task_id = str(uuid.uuid4())
                 await task_repository.create_task(
@@ -239,11 +238,11 @@ class StorageSyncService:
                 logger.error(f"Failed to sync image {image_id}: {e}")
             
             # Checkpoint every N images
-            if (i + 1) % self.CHECKPOINT_INTERVAL == 0:
+            if (i + 1) % BATCH_CONFIG.checkpoint_interval == 0:
                 await self._update_progress(task_id, completed, failed, failed_ids)
             
             # Rate limiting
-            await asyncio.sleep(self.SYNC_INTERVAL_SECONDS)
+            await asyncio.sleep(BATCH_CONFIG.rate_limit_seconds)
         
         # Final update
         await self._update_progress(task_id, completed, failed, failed_ids, final=True)
@@ -266,7 +265,9 @@ class StorageSyncService:
                 logger.warning(f"No source location for image {image_id}")
                 return False
             
-            object_key = source_location.object_key
+            # 统一使用 full_object_key：本地和远程都用相同路径结构
+            # object_key 已包含 category 前缀（如果上传时有选分类）
+            full_object_key = source_location.object_key
             
             # Check if already exists at target
             target_location = await image_location_repository.get_by_image_and_endpoint(
@@ -276,14 +277,14 @@ class StorageSyncService:
             if target_location and target_location.sync_status == "synced":
                 if not force_overwrite:
                     # Already synced, check if file exists
-                    exists = await storage_service.file_exists(object_key, target_endpoint)
+                    exists = await storage_service.file_exists(full_object_key, target_endpoint)
                     if exists:
                         logger.debug(f"Image {image_id} already synced, skipping")
                         return True
             
             # Download from source
             content = await storage_service.download_from_endpoint(
-                object_key, source_endpoint
+                full_object_key, source_endpoint
             )
             if not content:
                 logger.error(f"Failed to download image {image_id} from source")
@@ -291,7 +292,7 @@ class StorageSyncService:
             
             # Upload to target
             success = await storage_service.upload_to_endpoint(
-                content, object_key, target_endpoint
+                content, full_object_key, target_endpoint
             )
             if not success:
                 if target_location:
@@ -305,11 +306,13 @@ class StorageSyncService:
             if target_location:
                 await image_location_repository.mark_synced(session, target_location.id)
             else:
+                # Copy object_key and category_code from source
                 await image_location_repository.create(
                     session,
                     image_id=image_id,
                     endpoint_id=target_endpoint.id,
-                    object_key=object_key,
+                    object_key=source_location.object_key,  # Base hash path
+                    category_code=source_location.category_code,  # Copy from source
                     sync_status="synced",
                     synced_at=datetime.now(timezone.utc),
                 )
@@ -328,12 +331,12 @@ class StorageSyncService:
         """Update task progress in database."""
         async with async_session_maker() as session:
             result = {
-                "completed_count": completed,
+                "success_count": completed,  # 统一字段名
                 "failed_count": failed,
-                "failed_ids": failed_ids,
+                "failed_items": failed_ids,  # 统一字段名
             }
             
-            status = "completed" if final else "processing"
+            status = StorageTaskStatus.COMPLETED.value if final else StorageTaskStatus.PROCESSING.value
             await task_repository.update_status(
                 session, task_id, status, result=result
             )
@@ -357,14 +360,15 @@ class StorageSyncService:
             result = task.result or {}
             
             total = payload.get("batch_size", 0)
-            completed = result.get("completed_count", 0)
+            completed = result.get("success_count", 0)
             failed = result.get("failed_count", 0)
             
             return {
                 "task_id": task_id,
+                "task_type": task.type,
                 "status": task.status,
                 "total_count": total,
-                "completed_count": completed,
+                "success_count": completed,
                 "failed_count": failed,
                 "progress_percent": round(
                     (completed + failed) / max(total, 1) * 100, 2
@@ -426,7 +430,7 @@ class StorageSyncService:
                 except Exception as e:
                     logger.error(f"Auto-sync failed for location {location.id}: {e}")
                 
-                await asyncio.sleep(self.SYNC_INTERVAL_SECONDS)
+                await asyncio.sleep(BATCH_CONFIG.rate_limit_seconds)
             
             await session.commit()
         

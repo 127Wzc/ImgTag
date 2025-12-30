@@ -65,17 +65,18 @@ class StorageEndpointRepository(BaseRepository[StorageEndpoint]):
         result = await session.execute(stmt)
         return result.scalars().all()
 
-    async def get_auto_sync_targets(
+    async def get_backup_endpoints(
         self,
         session: AsyncSession,
-        source_endpoint_id: int,
     ) -> Sequence[StorageEndpoint]:
-        """Get endpoints that auto-sync from the given source."""
+        """获取所有启用的备份端点。"""
+        from imgtag.core.storage_constants import EndpointRole
+        
         stmt = (
             select(self.model)
-            .where(self.model.auto_sync_enabled == True)
-            .where(self.model.sync_from_endpoint_id == source_endpoint_id)
+            .where(self.model.role == EndpointRole.BACKUP.value)
             .where(self.model.is_enabled == True)
+            .where(self.model.is_healthy == True)
         )
         result = await session.execute(stmt)
         return result.scalars().all()

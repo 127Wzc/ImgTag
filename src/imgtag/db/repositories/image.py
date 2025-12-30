@@ -720,6 +720,7 @@ class ImageRepository(BaseRepository[Image]):
         """Bulk delete images by IDs.
 
         Also deletes related image_tags via CASCADE or manual cleanup.
+        ImageLocations are deleted via CASCADE.
 
         Args:
             session: Database session.
@@ -727,7 +728,7 @@ class ImageRepository(BaseRepository[Image]):
             owner_id: If provided, only delete images uploaded by this user (for permission check).
 
         Returns:
-            Tuple of (deleted_count, file_paths_to_delete).
+            Tuple of (deleted_count, empty_list for backward compatibility).
         """
         if not image_ids:
             return 0, []
@@ -737,12 +738,10 @@ class ImageRepository(BaseRepository[Image]):
         if owner_id is not None:
             conditions.append(Image.uploaded_by == owner_id)
 
-        # First get file paths for cleanup (with permission filter)
-        stmt = select(Image.id, Image.file_path).where(and_(*conditions))
+        # Get IDs that match the conditions (for permission filtering)
+        stmt = select(Image.id).where(and_(*conditions))
         result = await session.execute(stmt)
-        rows = result.fetchall()
-        file_paths = [row.file_path for row in rows if row.file_path]
-        found_ids = [row.id for row in rows]
+        found_ids = [row[0] for row in result.fetchall()]
 
         if not found_ids:
             return 0, []
@@ -754,12 +753,14 @@ class ImageRepository(BaseRepository[Image]):
             sa_delete(ImageTag).where(ImageTag.image_id.in_(found_ids))
         )
 
-        # Delete images
+        # Delete images (ImageLocations deleted via CASCADE)
         delete_stmt = sa_delete(Image).where(Image.id.in_(found_ids))
         delete_result = await session.execute(delete_stmt)
         await session.flush()
 
-        return delete_result.rowcount, file_paths
+        # Return empty list for file_paths (backward compatibility)
+        # Physical files on endpoints should be cleaned separately if needed
+        return delete_result.rowcount, []
 
     async def batch_update_embeddings(
         self,

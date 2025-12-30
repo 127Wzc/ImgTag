@@ -6,21 +6,25 @@ Admin-only endpoints for managing storage backends (S3, R2, local, etc.).
 import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
 from imgtag.core.config import settings
 from imgtag.core.logging_config import get_logger
+from imgtag.core.storage_constants import EndpointRole, StorageProvider, StorageTaskType
 from imgtag.db import get_async_session
 from imgtag.db.repositories import (
     image_location_repository,
     storage_endpoint_repository,
     task_repository,
 )
+from imgtag.models.image_location import ImageLocation
 from imgtag.models.user import User
 from imgtag.services import storage_service, storage_sync_service
+from imgtag.services.storage_deletion_service import storage_deletion_service
 
 logger = get_logger(__name__)
 
@@ -74,6 +78,17 @@ class EndpointUpdate(BaseModel):
     read_weight: Optional[int] = None
 
 
+class ActiveTaskInfo(BaseModel):
+    """Info about an active task for an endpoint."""
+    task_id: str
+    task_type: str
+    status: str
+    progress_percent: float = 0.0
+    success_count: int = 0
+    failed_count: int = 0
+    total_count: int = 0
+
+
 class EndpointResponse(BaseModel):
     """Response model for storage endpoint."""
 
@@ -85,6 +100,8 @@ class EndpointResponse(BaseModel):
     bucket_name: Optional[str] = None
     path_style: bool = True
     has_credentials: bool = False
+    access_key_id: Optional[str] = None  # 明文返回，前端显示时伪装
+    secret_access_key: Optional[str] = None  # 明文返回，前端显示时伪装
     public_url_prefix: Optional[str] = None
     path_prefix: str = ""
     role: str
@@ -96,9 +113,11 @@ class EndpointResponse(BaseModel):
     read_weight: int
     is_healthy: bool
     location_count: int = 0
+    active_task: Optional[ActiveTaskInfo] = None  # 进行中的任务
 
     class Config:
         from_attributes = True
+
 
 
 class SyncStartRequest(BaseModel):
@@ -114,9 +133,10 @@ class SyncProgressResponse(BaseModel):
     """Response for sync task progress."""
 
     task_id: str
+    task_type: str = "storage_sync"
     status: str
     total_count: int
-    completed_count: int
+    success_count: int
     failed_count: int
     progress_percent: float
     batch_index: Optional[int] = None
@@ -143,9 +163,38 @@ async def list_endpoints(
     else:
         endpoints = await storage_endpoint_repository.get_all(session)
     
+    # 定义存储任务类型
+    # 使用枚举常量而非硬编码
+    storage_task_types = StorageTaskType.all_values()
+    
     result = []
     for ep in endpoints:
         count = await image_location_repository.count_by_endpoint(session, ep.id)
+        
+        # 查询活动任务
+        active_task_info = None
+        active_task = await task_repository.get_active_for_endpoint(
+            session, ep.id, storage_task_types
+        )
+        if active_task:
+            # 计算进度
+            payload = active_task.payload or {}
+            result_data = active_task.result or {}
+            total = payload.get("total_count", 0)
+            success = result_data.get("success_count", 0)
+            failed = result_data.get("failed_count", 0)
+            progress = ((success + failed) / total * 100) if total > 0 else 0
+            
+            active_task_info = ActiveTaskInfo(
+                task_id=active_task.id,
+                task_type=active_task.type,
+                status=active_task.status,
+                progress_percent=round(progress, 1),
+                success_count=success,
+                failed_count=failed,
+                total_count=total,
+            )
+        
         result.append(EndpointResponse(
             id=ep.id,
             name=ep.name,
@@ -155,6 +204,8 @@ async def list_endpoints(
             bucket_name=ep.bucket_name,
             path_style=ep.path_style,
             has_credentials=ep.has_credentials,
+            access_key_id=ep.access_key_id,
+            secret_access_key=ep.secret_access_key,
             public_url_prefix=ep.public_url_prefix,
             path_prefix=ep.path_prefix,
             role=ep.role,
@@ -166,6 +217,7 @@ async def list_endpoints(
             read_weight=ep.read_weight,
             is_healthy=ep.is_healthy,
             location_count=count,
+            active_task=active_task_info,
         ))
     
     return result
@@ -187,6 +239,12 @@ async def create_endpoint(
     existing = await storage_endpoint_repository.get_by_name(session, data.name)
     if existing:
         raise HTTPException(400, f"Endpoint name '{data.name}' already exists")
+    
+    # 检查备份端点唯一性：只允许一个备份端点
+    if data.role == EndpointRole.BACKUP.value:
+        backup_eps = await storage_endpoint_repository.get_backup_endpoints(session)
+        if backup_eps:
+            raise HTTPException(400, f"已存在备份端点 '{backup_eps[0].name}'，系统只允许一个备份端点")
     
     # Create endpoint
     endpoint = await storage_endpoint_repository.create(
@@ -230,6 +288,8 @@ async def create_endpoint(
         bucket_name=endpoint.bucket_name,
         path_style=endpoint.path_style,
         has_credentials=endpoint.has_credentials,
+        access_key_id=endpoint.access_key_id,
+        secret_access_key=endpoint.secret_access_key,
         public_url_prefix=endpoint.public_url_prefix,
         path_prefix=endpoint.path_prefix,
         role=endpoint.role,
@@ -269,6 +329,8 @@ async def get_endpoint(
         bucket_name=endpoint.bucket_name,
         path_style=endpoint.path_style,
         has_credentials=endpoint.has_credentials,
+        access_key_id=endpoint.access_key_id,
+        secret_access_key=endpoint.secret_access_key,
         public_url_prefix=endpoint.public_url_prefix,
         path_prefix=endpoint.path_prefix,
         role=endpoint.role,
@@ -281,6 +343,7 @@ async def get_endpoint(
         is_healthy=endpoint.is_healthy,
         location_count=count,
     )
+
 
 
 @router.put("/endpoints/{endpoint_id}", response_model=EndpointResponse)
@@ -303,27 +366,41 @@ async def update_endpoint(
     # Update fields
     update_data = data.model_dump(exclude_unset=True)
     
-    # Restrict default local endpoint (id=1) to storage and read strategy fields
-    if endpoint_id == 1:
-        allowed_fields = {"bucket_name", "public_url_prefix", "read_priority", "read_weight"}
-        restricted_fields = set(update_data.keys()) - allowed_fields
-        if restricted_fields:
+    # Check if trying to modify bucket_name when endpoint has images
+    new_bucket = update_data.get("bucket_name")
+    if new_bucket and new_bucket != endpoint.bucket_name:
+        location_count = await image_location_repository.count_by_endpoint(session, endpoint_id)
+        if location_count > 0:
             raise HTTPException(
                 400,
-                f"Default local endpoint can only modify: bucket_name, public_url_prefix, read_priority, read_weight. "
-                f"Cannot modify: {', '.join(restricted_fields)}"
+                f"无法修改存储目录：该端点有 {location_count} 张关联图片。请先解绑或迁移图片。"
             )
     
+    # Restrict default local endpoint (id=1) to storage and read strategy fields
+    if endpoint_id == 1:
+        allowed_fields = {"bucket_name", "public_url_prefix", "read_priority", "read_weight", "is_default_upload"}
+        # Filter to only allowed fields instead of rejecting
+        update_data = {k: v for k, v in update_data.items() if k in allowed_fields}
+    
+    # 检查备份端点唯一性：只允许一个备份端点
+    new_role = update_data.get("role")
+    if new_role == EndpointRole.BACKUP.value and endpoint.role != EndpointRole.BACKUP.value:
+        backup_eps = await storage_endpoint_repository.get_backup_endpoints(session)
+        if backup_eps:
+            raise HTTPException(400, f"已存在备份端点 '{backup_eps[0].name}'，系统只允许一个备份端点")
+    
     # Handle credentials separately (encrypted)
+    # Only update if a non-empty value is provided (preserve existing on empty/null)
     access_key = update_data.pop("access_key_id", None)
     secret_key = update_data.pop("secret_access_key", None)
     
     if update_data:
         await storage_endpoint_repository.update(session, endpoint, **update_data)
     
-    if access_key is not None:
+    # Only update credentials if non-empty value provided
+    if access_key:  # Truthy check: not None and not empty string
         endpoint.access_key_id = access_key
-    if secret_key is not None:
+    if secret_key:  # Truthy check: not None and not empty string
         endpoint.secret_access_key = secret_key
     
     # Handle default upload
@@ -344,6 +421,8 @@ async def update_endpoint(
         bucket_name=endpoint.bucket_name,
         path_style=endpoint.path_style,
         has_credentials=endpoint.has_credentials,
+        access_key_id=endpoint.access_key_id,
+        secret_access_key=endpoint.secret_access_key,
         public_url_prefix=endpoint.public_url_prefix,
         path_prefix=endpoint.path_prefix,
         role=endpoint.role,
@@ -361,12 +440,14 @@ async def update_endpoint(
 @router.delete("/endpoints/{endpoint_id}")
 async def delete_endpoint(
     endpoint_id: int,
+    force: bool = False,
     current_user: User = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Delete a storage endpoint.
+    """Delete a storage endpoint configuration.
     
-    Fails if endpoint has associated image locations (RESTRICT).
+    Fails if endpoint has associated image locations unless force=True.
+    Use /endpoints/{id}/locations or /endpoints/{id}/files first to clean up data.
     Requires admin access.
     """
     logger.warning(f"[Admin:{current_user['username']}] Deleting storage endpoint: {endpoint_id}")
@@ -381,17 +462,315 @@ async def delete_endpoint(
     
     # Check for associated locations
     count = await image_location_repository.count_by_endpoint(session, endpoint_id)
-    if count > 0:
+    if count > 0 and not force:
         raise HTTPException(
             400,
             f"Cannot delete endpoint: {count} images are stored here. "
-            "Please migrate them first."
+            "Use /endpoints/{id}/locations to remove associations first, "
+            "or pass force=true to force delete."
         )
+    
+    # If force=True and has locations, delete them first
+    if count > 0:
+        await image_location_repository.delete_by_endpoint(session, endpoint_id)
     
     await storage_endpoint_repository.delete(session, endpoint)
     await session.commit()
     
-    return {"message": "Endpoint deleted"}
+    return {"message": "Endpoint deleted", "locations_removed": count}
+
+
+class DeletionImpactResponse(BaseModel):
+    """Response for deletion impact analysis."""
+    endpoint_id: int
+    endpoint_name: str
+    total_locations: int
+    unique_images: int  # Only on this endpoint
+    shared_images: int  # On other endpoints too
+    total_file_size_mb: float
+    can_soft_delete: bool
+    can_hard_delete: bool
+    warnings: list[str]
+
+
+@router.get("/endpoints/{endpoint_id}/deletion-impact", response_model=DeletionImpactResponse)
+async def get_deletion_impact(
+    endpoint_id: int,
+    current_user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Get deletion impact analysis for an endpoint.
+    
+    Shows how many images would be affected by deletion.
+    Requires admin access.
+    """
+    endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
+    if not endpoint:
+        raise HTTPException(404, "Endpoint not found")
+    
+    # Count total locations
+    total_locations = await image_location_repository.count_by_endpoint(session, endpoint_id)
+    
+    # Images only on this endpoint (subquery for efficiency)
+    unique_subq = (
+        select(ImageLocation.image_id)
+        .group_by(ImageLocation.image_id)
+        .having(func.count(ImageLocation.endpoint_id) == 1)
+        .subquery()
+    )
+    unique_stmt = (
+        select(func.count())
+        .select_from(ImageLocation)
+        .where(ImageLocation.endpoint_id == endpoint_id)
+        .where(ImageLocation.image_id.in_(select(unique_subq.c.image_id)))
+    )
+    unique_result = await session.execute(unique_stmt)
+    unique_images = unique_result.scalar() or 0
+    
+    shared_images = total_locations - unique_images
+    
+    # Estimate file size (simplified)
+    total_file_size_mb = 0.0
+    
+    warnings = []
+    if unique_images > 0:
+        warnings.append(f"{unique_images} 张图片仅存储在此端点，删除后将无法访问")
+    
+    if endpoint_id == 1:
+        warnings.append("这是默认本地端点，不可删除")
+    
+    return DeletionImpactResponse(
+        endpoint_id=endpoint_id,
+        endpoint_name=endpoint.name,
+        total_locations=total_locations,
+        unique_images=unique_images,
+        shared_images=shared_images,
+        total_file_size_mb=total_file_size_mb,
+        can_soft_delete=endpoint_id != 1,
+        can_hard_delete=endpoint_id != 1 and endpoint.provider != "local",
+        warnings=warnings,
+    )
+
+
+class SoftDeleteRequest(BaseModel):
+    """Request for soft delete (unlink locations)."""
+    confirm: bool = False
+    delete_files: bool = False  # 同时删除物理文件和孤儿元数据
+
+
+@router.delete("/endpoints/{endpoint_id}/locations")
+async def soft_delete_endpoint_locations(
+    endpoint_id: int,
+    data: SoftDeleteRequest,
+    current_user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Unlink all ImageLocation records for an endpoint.
+    
+    Starts a background task for batch processing with:
+    - Progress tracking via task system
+    - Optional physical file deletion
+    - Orphan metadata cleanup
+    
+    Requires admin access with confirmation.
+    """
+    if not data.confirm:
+        raise HTTPException(400, "Must confirm deletion with confirm=true")
+    
+    if endpoint_id == 1:
+        raise HTTPException(400, "Cannot delete locations from the default local endpoint")
+    
+    endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
+    if not endpoint:
+        raise HTTPException(404, "Endpoint not found")
+    
+    # 检查是否有进行中的任务
+    # 检查是否有进行中的任务（使用枚举常量）
+    active_task = await task_repository.get_active_for_endpoint(
+        session, endpoint_id, StorageTaskType.all_values()
+    )
+    if active_task:
+        raise HTTPException(
+            409,
+            f"该端点有进行中的任务 ({active_task.type})，请等待完成后再操作"
+        )
+    
+    logger.warning(
+        f"[Admin:{current_user['username']}] Starting unlink task for endpoint: "
+        f"{endpoint.name}, delete_files={data.delete_files}"
+    )
+    
+    # Start background task via service
+    from imgtag.services.storage_unlink_service import storage_unlink_service
+    
+    try:
+        task_id = await storage_unlink_service.start_unlink(
+            endpoint_id=endpoint_id,
+            delete_files=data.delete_files,
+            initiated_by=current_user["username"],
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    
+    # Get initial status
+    location_count = await image_location_repository.count_by_endpoint(session, endpoint_id)
+    
+    return {
+        "message": f"已启动解绑任务，共 {location_count} 条位置记录",
+        "task_id": task_id,
+        "location_count": location_count,
+        "delete_files": data.delete_files,
+    }
+
+
+@router.get("/endpoints/{endpoint_id}/unlink-progress/{task_id}")
+async def get_unlink_progress(
+    endpoint_id: int,
+    task_id: str,
+    current_user: User = Depends(require_admin),
+):
+    """Get unlink task progress.
+    
+    Args:
+        endpoint_id: Endpoint ID (for validation).
+        task_id: Task ID returned by unlink API.
+        
+    Returns:
+        Progress information including status, counts, and percentage.
+    """
+    from imgtag.services.storage_unlink_service import storage_unlink_service
+    
+    progress = await storage_unlink_service.get_unlink_progress(task_id)
+    
+    if "error" in progress:
+        raise HTTPException(404, progress["error"])
+    
+    # Verify endpoint matches
+    if progress.get("endpoint_id") != endpoint_id:
+        raise HTTPException(400, "Task does not belong to this endpoint")
+    
+    return progress
+
+
+@router.get("/endpoints/{endpoint_id}/task")
+async def get_endpoint_active_task(
+    endpoint_id: int,
+    current_user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Get active task for an endpoint (unified progress API).
+    
+    Returns the currently running task (sync/delete/unlink) for the endpoint,
+    or null if no task is running.
+    """
+    endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
+    if not endpoint:
+        raise HTTPException(404, "Endpoint not found")
+    
+    # 使用枚举常量
+    active_task = await task_repository.get_active_for_endpoint(
+        session, endpoint_id, StorageTaskType.all_values()
+    )
+    
+    if not active_task:
+        return {"active_task": None}
+    
+    # Calculate progress
+    payload = active_task.payload or {}
+    result_data = active_task.result or {}
+    total = payload.get("total_count", 0)
+    success = result_data.get("success_count", 0)
+    failed = result_data.get("failed_count", 0)
+    progress = ((success + failed) / total * 100) if total > 0 else 0
+    
+    return {
+        "active_task": ActiveTaskInfo(
+            task_id=active_task.id,
+            task_type=active_task.type,
+            status=active_task.status,
+            progress_percent=round(progress, 1),
+            success_count=success,
+            failed_count=failed,
+            total_count=total,
+        )
+    }
+
+class HardDeleteRequest(BaseModel):
+    """Request for hard delete with confirmation text."""
+    confirm: bool = False
+    confirm_text: str = ""
+
+
+@router.delete("/endpoints/{endpoint_id}/files")
+async def hard_delete_endpoint_files(
+    endpoint_id: int,
+    data: HardDeleteRequest,
+    current_user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Hard delete: Start background task to delete physical files.
+    
+    ⚠️ This is a destructive operation! Files at this endpoint will be permanently deleted.
+    Only works for S3-compatible endpoints (not local).
+    Requires admin access with confirmation text.
+    
+    Returns a task_id to track deletion progress.
+    """
+    if not data.confirm or data.confirm_text != "删除所有文件":
+        raise HTTPException(
+            400, 
+            "Must confirm with confirm=true and confirm_text='删除所有文件'"
+        )
+    
+    if endpoint_id == 1:
+        raise HTTPException(400, "Cannot delete files from the default local endpoint")
+    
+    endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
+    if not endpoint:
+        raise HTTPException(404, "Endpoint not found")
+    
+    # Only allow hard delete for S3 endpoints
+    if endpoint.provider == "local":
+        raise HTTPException(400, "硬删除仅支持 S3 兼容端点，本地端点请手动管理文件")
+    
+    logger.warning(
+        f"[Admin:{current_user['username']}] Starting HARD DELETE task for endpoint: {endpoint.name}"
+    )
+    
+    # Start background deletion task
+    task_id = await storage_deletion_service.start_hard_delete(
+        endpoint_id=endpoint_id,
+        initiated_by=current_user["username"],
+    )
+    
+    return {
+        "message": "删除任务已启动",
+        "task_id": task_id,
+        "endpoint_id": endpoint_id,
+        "endpoint_name": endpoint.name,
+    }
+
+
+@router.get("/endpoints/{endpoint_id}/deletion-progress/{task_id}")
+async def get_deletion_progress(
+    endpoint_id: int,
+    task_id: str,
+    current_user: User = Depends(require_admin),
+):
+    """Get deletion task progress.
+    
+    Returns current deletion task status and counts.
+    """
+    progress = await storage_deletion_service.get_deletion_progress(task_id)
+    
+    if "error" in progress:
+        raise HTTPException(404, progress["error"])
+    
+    # Verify endpoint matches
+    if progress.get("endpoint_id") != endpoint_id:
+        raise HTTPException(400, "Task does not belong to this endpoint")
+    
+    return progress
 
 
 @router.post("/endpoints/{endpoint_id}/test")
@@ -409,7 +788,6 @@ async def test_endpoint_connection(
         raise HTTPException(404, "Endpoint not found")
     
     try:
-        from imgtag.core.storage_constants import StorageProvider
         if endpoint.provider == StorageProvider.LOCAL:
             bucket = endpoint.bucket_name or "uploads"
             project_root = settings.get_upload_path().parent
@@ -500,17 +878,7 @@ async def start_sync(
     if source.id == target.id:
         raise HTTPException(400, "Source and target cannot be the same")
     
-    # Currently only support local -> S3 sync
-    if source.provider != "local":
-        raise HTTPException(
-            400, 
-            "目前仅支持从本地端点同步到 S3。S3 → Local 功能开发中。"
-        )
-    if target.provider == "local":
-        raise HTTPException(
-            400, 
-            "目前仅支持同步到 S3 端点。S3 → Local 功能开发中。"
-        )
+    # 双向同步已支持：Local ↔ S3
     
     task_ids = await storage_sync_service.start_batch_sync(
         source_endpoint_id=data.source_endpoint_id,
