@@ -61,6 +61,7 @@ interface StorageEndpoint {
   id: number
   name: string
   provider: string
+  role: string
   is_default_upload: boolean
 }
 const endpoints = ref<StorageEndpoint[]>([])
@@ -69,7 +70,8 @@ const selectedEndpointId = ref<number | null>(null)
 async function fetchEndpoints() {
   try {
     const { data } = await apiClient.get<StorageEndpoint[]>('/storage/endpoints?enabled_only=true')
-    endpoints.value = data
+    // 过滤掉备份端点，不允许直接上传
+    endpoints.value = data.filter(ep => ep.role !== 'backup')
     // 默认选择默认上传端点
     const defaultEp = data.find(ep => ep.is_default_upload)
     if (defaultEp) {
