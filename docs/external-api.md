@@ -53,31 +53,69 @@ curl -H "api_key: YOUR_API_KEY" "http://your-domain/api/v1/random"
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `image_url` | string | **是** | 图片 URL |
-| `tags` | array | 否 | 初始标签 |
+| `tags` | array | 否 | 初始标签列表 |
 | `description` | string | 否 | 图片描述 |
-| `auto_analyze` | bool | 否 | 是否自动分析，默认 true |
-| `api_key` | string | **是** | API 密钥 |
+| `category_id` | int | 否 | 主分类 ID |
+| `endpoint_id` | int | 否 | 存储端点 ID（默认使用系统默认端点） |
+| `auto_analyze` | bool | 否 | 是否自动 AI 分析，默认 true |
+| `callback_url` | string | 否 | 分析完成后的回调 URL |
 
 **请求示例：**
 ```bash
 curl -X POST "http://your-domain/api/v1/add-image?api_key=YOUR_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"image_url": "https://example.com/image.jpg", "auto_analyze": true}'
+  -d '{
+    "image_url": "https://example.com/image.jpg",
+    "category_id": 1,
+    "auto_analyze": true,
+    "callback_url": "https://your-server.com/webhook/imgtag"
+  }'
 ```
 
 **响应示例：**
 ```json
 {
   "id": 123,
-  "image_url": "/uploads/abc123.jpg",
+  "image_url": "https://oss.example.com/123/abc.jpg",
   "original_url": "https://example.com/image.jpg",
-  "tags": [],
+  "tags": [{"name": "风景", "source": "user"}],
   "description": "",
-  "process_time": "0.05秒"
+  "width": 1920,
+  "height": 1080,
+  "process_time": "0.85秒"
 }
 ```
 
-> 图片会被下载保存到本地，`image_url` 为本地访问路径，`original_url` 为原始远程地址。
+> 图片会保存到系统默认端点（可通过 `endpoint_id` 指定），如有备份端点会自动同步。
+
+#### 回调机制
+
+当指定 `callback_url` 时，AI 分析完成后会 POST 到该地址：
+
+```json
+{
+  "image_id": 123,
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "success": true,
+  "image_url": "https://oss.example.com/123/abc.jpg",
+  "tags": ["风景", "日出", "自然"],
+  "description": "一张美丽的日出风景照片...",
+  "width": 1920,
+  "height": 1080,
+  "error": null
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `image_id` | 图片 ID |
+| `task_id` | 任务 ID（用于追踪） |
+| `success` | 分析是否成功 |
+| `image_url` | 图片访问 URL |
+| `tags` | AI 生成的标签列表 |
+| `description` | AI 生成的图片描述 |
+| `width` / `height` | 图片尺寸 |
+| `error` | 失败时的错误信息（成功时为 null） |
 
 ---
 

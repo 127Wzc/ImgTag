@@ -47,6 +47,7 @@ class AnalysisTask:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     status: TaskStatus = TaskStatus.PENDING
     error: Optional[str] = None
+    callback_url: Optional[str] = None  # 分析完成后回调URL
     created_at: datetime = field(default_factory=datetime.now)
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -112,7 +113,12 @@ class TaskQueueService:
         except (ValueError, TypeError):
             return 1.0
     
-    async def add_tasks(self, image_ids: List[int], task_type: str = "analyze_image") -> int:
+    async def add_tasks(
+        self, 
+        image_ids: List[int], 
+        task_type: str = "analyze_image",
+        callback_url: Optional[str] = None,
+    ) -> int:
         """添加任务到队列
         
         Args:
@@ -120,6 +126,7 @@ class TaskQueueService:
             task_type: 任务类型，可选值：
                 - analyze_image: 分析图片（视觉模型 + 向量）
                 - rebuild_vector: 重建向量（仅向量）
+            callback_url: 分析完成后的回调URL（可选）
         """
         added = 0
         
@@ -133,7 +140,11 @@ class TaskQueueService:
                         continue
                     
                     # 创建任务对象
-                    task = AnalysisTask(image_id=image_id, task_type=task_type)
+                    task = AnalysisTask(
+                        image_id=image_id, 
+                        task_type=task_type,
+                        callback_url=callback_url,
+                    )
                     self._queue.append(task)
                     
                     # 持久化到数据库
@@ -142,7 +153,10 @@ class TaskQueueService:
                             session,
                             task_id=task.id,
                             task_type=task_type,
-                            payload={"image_id": image_id}
+                            payload={
+                                "image_id": image_id,
+                                "callback_url": callback_url,
+                            }
                         )
                     except Exception as e:
                         logger.error(f"创建任务记录失败: {str(e)}")
@@ -152,6 +166,11 @@ class TaskQueueService:
             await session.commit()
         
         logger.info(f"添加了 {added} 个任务到队列 (类型: {task_type})")
+        
+        # 确保 worker 正在运行
+        if added > 0 and not self._running:
+            asyncio.create_task(self.start_processing())
+        
         return added
     
     async def get_status(self) -> Dict[str, Any]:
@@ -471,6 +490,12 @@ class TaskQueueService:
             
             logger.info(f"图片 {task.image_id} 处理完成")
             
+            # 触发回调（如果有）
+            if task.callback_url:
+                asyncio.create_task(
+                    self._send_callback(task, success=True)
+                )
+            
         except Exception as e:
             logger.error(f"处理图片 {task.image_id} 失败: {str(e)}")
             task.status = TaskStatus.FAILED
@@ -489,6 +514,49 @@ class TaskQueueService:
                 if task.image_id in self._processing:
                     del self._processing[task.image_id]
                 self._completed.append(task)
+            
+            # 触发回调（如果有）
+            if task.callback_url:
+                asyncio.create_task(
+                    self._send_callback(task, success=False)
+                )
+    
+    async def _send_callback(self, task: AnalysisTask, success: bool):
+        """发送回调请求"""
+        import httpx
+        from imgtag.services.storage_service import storage_service
+        
+        try:
+            async with async_session_maker() as session:
+                image = await image_repository.get_with_tags(session, task.image_id)
+                if not image:
+                    return
+                
+                # 获取图片URL
+                image_url = await storage_service.get_read_url(image) or ""
+                
+                # 构建回调数据
+                callback_data = {
+                    "image_id": task.image_id,
+                    "task_id": task.id,
+                    "success": success,
+                    "image_url": image_url,
+                    "tags": [t.name for t in image.tags] if image.tags else [],
+                    "description": image.description or "",
+                    "width": image.width,
+                    "height": image.height,
+                    "error": task.error if not success else None,
+                }
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    task.callback_url,
+                    json=callback_data,
+                    headers={"Content-Type": "application/json"},
+                )
+                logger.info(f"回调 {task.callback_url} 完成: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"回调 {task.callback_url} 失败: {e}")
 
 
 # 全局实例

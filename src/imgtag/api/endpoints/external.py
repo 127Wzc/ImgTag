@@ -42,7 +42,10 @@ class ExternalImageCreate(BaseModel):
     image_url: str
     tags: list[str] = []
     description: str = ""
+    category_id: int | None = None  # 主分类ID
+    endpoint_id: int | None = None  # 存储端点ID（不可选备份端点）
     auto_analyze: bool = True
+    callback_url: str | None = None  # 分析完成后的回调URL
 
 
 
@@ -103,7 +106,7 @@ async def analyze_image_from_url(
 ):
     """Add and analyze image from URL.
 
-    Downloads image, saves locally, queues for analysis.
+    Downloads image, saves to specified endpoint (or local), queues for analysis.
 
     Args:
         request: Image URL and options.
@@ -111,13 +114,31 @@ async def analyze_image_from_url(
         session: Database session.
 
     Returns:
-        Created image info.
+        Created image info. If wait_for_result=True, includes AI-generated tags and description.
     """
+    from imgtag.core.storage_constants import EndpointRole
+    from imgtag.db.repositories import tag_repository
+    
     start_time = time.time()
     username = api_user.get("username")
     logger.info(f"[外部API] 添加图片: {request.image_url}, user={username}")
 
     try:
+        # 获取目标端点
+        if request.endpoint_id:
+            target_endpoint = await storage_endpoint_repository.get_by_id(session, request.endpoint_id)
+            if not target_endpoint or not target_endpoint.is_enabled:
+                raise HTTPException(400, f"存储端点 {request.endpoint_id} 不可用")
+            # 禁止上传到备份端点
+            if target_endpoint.role == EndpointRole.BACKUP.value:
+                raise HTTPException(400, "不能直接上传到备份端点")
+        else:
+            # 默认使用系统设置的默认上传端点
+            target_endpoint = await storage_endpoint_repository.get_default_upload(session)
+        
+        if not target_endpoint:
+            raise HTTPException(500, "未找到可用的存储端点，请先在系统设置中配置默认上传端点")
+        
         # Download and save image
         file_path, local_url, content = await upload_service.save_remote_image(
             request.image_url
@@ -126,34 +147,54 @@ async def analyze_image_from_url(
         # Calculate hash and size
         file_hash = await asyncio.to_thread(lambda: hashlib.md5(content).hexdigest())
         file_size = round(len(content) / (1024 * 1024), 2)
+        
+        # 提取图片尺寸
+        width, height = upload_service.extract_image_dimensions(content)
+        file_type = file_path.split(".")[-1] if "." in file_path else "jpg"
 
-        # Create image record (without legacy fields)
+        # Create image record
         new_image = await image_repository.create_image(
             session,
             file_hash=file_hash,
+            file_type=file_type,
             file_size=file_size,
+            width=width,
+            height=height,
             description=request.description,
             original_url=request.image_url,
             embedding=None,
             uploaded_by=api_user.get("id"),
         )
         
-        # Create local ImageLocation record
-        local_endpoint = await storage_endpoint_repository.get_by_name(session, StorageProvider.LOCAL)
-        if local_endpoint:
-            local_object_key = file_path.replace("\\", "/").lstrip("/")
-            if local_object_key.startswith("uploads/"):
-                local_object_key = local_object_key[8:]
-            
-            await image_location_repository.create(
-                session,
-                image_id=new_image.id,
-                endpoint_id=local_endpoint.id,
-                object_key=local_object_key,
-                is_primary=True,
-                sync_status="synced",
-                synced_at=datetime.now(tz),
-            )
+        # 生成统一的 object_key
+        object_key = storage_service.generate_object_key(file_hash, file_type)
+        
+        # 获取分类代码（如果指定了分类）
+        category_code = None
+        if request.category_id:
+            from imgtag.core.category_cache import get_category_code_cached
+            category_code = await get_category_code_cached(session, request.category_id)
+        
+        full_object_key = storage_service.get_full_object_key(object_key, category_code)
+        
+        # 上传到目标端点
+        upload_success = await storage_service.upload_to_endpoint(
+            content, full_object_key, target_endpoint
+        )
+        if not upload_success:
+            raise HTTPException(500, f"上传到端点 {target_endpoint.name} 失败")
+        
+        # 创建 ImageLocation 记录
+        await image_location_repository.create(
+            session,
+            image_id=new_image.id,
+            endpoint_id=target_endpoint.id,
+            object_key=full_object_key,
+            category_code=category_code,
+            is_primary=True,
+            sync_status="synced",
+            synced_at=datetime.now(tz.utc),
+        )
 
         # Set tags if provided
         if request.tags:
@@ -164,22 +205,59 @@ async def analyze_image_from_url(
                 source="user",
                 added_by=api_user.get("id"),
             )
+        
+        # Set category tag if provided
+        if request.category_id:
+            await image_tag_repository.add_tag_to_image(
+                session,
+                new_image.id,
+                request.category_id,
+                source="user",
+                sort_order=0,
+                added_by=api_user.get("id"),
+            )
+        
+        # Set resolution tag
+        if width and height:
+            resolution_name = upload_service.get_resolution_level(width, height)
+            if resolution_name != "unknown":
+                resolution_tag = await tag_repository.get_or_create(
+                    session, resolution_name, source="system", level=1
+                )
+                await image_tag_repository.add_tag_to_image(
+                    session, new_image.id, resolution_tag.id, source="system", sort_order=1
+                )
+        
+        await session.commit()
+        
+        # 触发自动备份到备份端点（必须在 commit 之后）
+        from imgtag.services.backup_service import trigger_backup_for_image
+        asyncio.create_task(
+            trigger_backup_for_image(new_image.id, target_endpoint.id)
+        )
 
         # Queue for analysis if requested
         if request.auto_analyze:
-            await task_queue.add_tasks([new_image.id])
+            await task_queue.add_tasks(
+                [new_image.id], 
+                callback_url=request.callback_url,
+            )
 
         process_time = time.time() - start_time
         
-        # Get display URL from storage service
         display_url = await storage_service.get_read_url(new_image) or ""
+        
+        # 获取当前标签（用户标签 + 分类 + 分辨率）
+        final_tags = await image_repository.get_image_tags_with_source(session, new_image.id)
 
         return {
             "id": new_image.id,
             "image_url": display_url,
             "original_url": request.image_url,
-            "tags": request.tags,
-            "description": request.description,
+            "tags": final_tags,
+            "description": new_image.description or request.description,
+            "width": width,
+            "height": height,
             "process_time": f"{process_time:.4f}秒",
         }
     except HTTPException:
