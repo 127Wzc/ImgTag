@@ -131,11 +131,28 @@ class StorageService:
             return f"{category_code}/{object_key}"
         return object_key
 
+    @staticmethod
+    def _apply_path_prefix(object_key: str, path_prefix: str | None) -> str:
+        """Apply path_prefix to object_key if configured.
+        
+        Unified method for both local and S3 storage.
+        
+        Args:
+            object_key: Base object key.
+            path_prefix: Optional path prefix from endpoint config.
+            
+        Returns:
+            "{path_prefix}/{object_key}" if prefix exists, else "{object_key}".
+        """
+        if path_prefix:
+            return f"{path_prefix.strip('/')}/{object_key}"
+        return object_key
+
     def _resolve_local_path(self, endpoint: StorageEndpoint) -> str:
         """Resolve bucket_name to absolute physical path for local storage.
         
-        For local endpoints, bucket_name serves as the directory name relative
-        to the project root (e.g., 'uploads' -> /project/uploads).
+        All local storage buckets are under the DATA_DIR directory.
+        For example, bucket_name='uploads' -> /project/data/uploads
         
         Args:
             endpoint: Storage endpoint with bucket_name.
@@ -149,9 +166,9 @@ class StorageService:
         if os.path.isabs(bucket):
             return bucket
         
-        # Relative path - resolve relative to project root
-        project_root = settings.get_upload_path().parent
-        return str(project_root / bucket)
+        # Relative path - resolve relative to DATA_DIR
+        data_path = settings.get_data_path()
+        return str(data_path / bucket)
 
     async def get_default_upload_endpoint(self) -> Optional[StorageEndpoint]:
         """Get the default endpoint for uploads."""
@@ -232,7 +249,8 @@ class StorageService:
             for loc in locations:
                 if loc.endpoint_id == local_endpoint.id:
                     base_path = self._resolve_local_path(local_endpoint)
-                    return os.path.join(base_path, loc.object_key)
+                    full_key = self._apply_path_prefix(loc.object_key, local_endpoint.path_prefix)
+                    return os.path.join(base_path, full_key)
             
             return None
 
@@ -269,7 +287,8 @@ class StorageService:
                 for loc in locations:
                     if loc.endpoint_id == local_endpoint.id:
                         base_path = self._resolve_local_path(local_endpoint)
-                        local_path = os.path.join(base_path, loc.object_key)
+                        full_key = self._apply_path_prefix(loc.object_key, local_endpoint.path_prefix)
+                        local_path = os.path.join(base_path, full_key)
                         if os.path.exists(local_path):
                             def _read():
                                 with open(local_path, "rb") as f:
@@ -420,10 +439,10 @@ class StorageService:
             return f"{prefix}/{bucket}/{object_key}"
         
         if endpoint.provider == StorageProvider.LOCAL:
-            # Local files served through /{bucket_name}/...
+            # Local files served through /data/{bucket}/... (dynamic route)
             if path_prefix:
-                return f"/{bucket}/{path_prefix}/{object_key}"
-            return f"/{bucket}/{object_key}"
+                return f"/data/{bucket}/{path_prefix}/{object_key}"
+            return f"/data/{bucket}/{object_key}"
         
         if endpoint.endpoint_url and bucket:
             # Direct S3 URL
@@ -466,10 +485,9 @@ class StorageService:
         endpoint: StorageEndpoint,
     ) -> bool:
         """Upload to local filesystem."""
-        
-        
         base_path = self._resolve_local_path(endpoint)
-        full_path = os.path.join(base_path, object_key)
+        full_key = self._apply_path_prefix(object_key, endpoint.path_prefix)
+        full_path = os.path.join(base_path, full_key)
         
         # Create directories
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -490,6 +508,7 @@ class StorageService:
         endpoint: StorageEndpoint,
     ) -> bool:
         """Upload to S3-compatible storage."""
+        full_key = self._apply_path_prefix(object_key, endpoint.path_prefix)
         
         def _do_upload():
             # Use path style or virtual-hosted based on endpoint config
@@ -507,10 +526,6 @@ class StorageService:
                 region_name=endpoint.region or "auto",
                 config=config,
             )
-            
-            full_key = object_key
-            if endpoint.path_prefix:
-                full_key = f"{endpoint.path_prefix.strip('/')}/{object_key}"
             
             client.put_object(
                 Bucket=endpoint.bucket_name,
@@ -551,10 +566,9 @@ class StorageService:
         endpoint: StorageEndpoint,
     ) -> Optional[bytes]:
         """Download from local filesystem."""
-        
-        
         base_path = self._resolve_local_path(endpoint)
-        full_path = os.path.join(base_path, object_key)
+        full_key = self._apply_path_prefix(object_key, endpoint.path_prefix)
+        full_path = os.path.join(base_path, full_key)
         
         if not os.path.exists(full_path):
             return None
@@ -571,6 +585,7 @@ class StorageService:
         endpoint: StorageEndpoint,
     ) -> Optional[bytes]:
         """Download from S3-compatible storage."""
+        full_key = self._apply_path_prefix(object_key, endpoint.path_prefix)
         
         def _do_download():
             addressing_style = "path" if endpoint.path_style else "virtual"
@@ -587,10 +602,6 @@ class StorageService:
                 region_name=endpoint.region or "auto",
                 config=config,
             )
-            
-            full_key = object_key
-            if endpoint.path_prefix:
-                full_key = f"{endpoint.path_prefix.strip('/')}/{object_key}"
             
             buffer = io.BytesIO()
             client.download_fileobj(endpoint.bucket_name, full_key, buffer)
@@ -614,9 +625,9 @@ class StorageService:
         """
         try:
             if endpoint.provider == StorageProvider.LOCAL:
-                
                 base_path = self._resolve_local_path(endpoint)
-                full_path = os.path.join(base_path, object_key)
+                full_key = self._apply_path_prefix(object_key, endpoint.path_prefix)
+                full_path = os.path.join(base_path, full_key)
                 return os.path.exists(full_path)
             else:
                 return await self._s3_file_exists(object_key, endpoint)
@@ -629,6 +640,7 @@ class StorageService:
         endpoint: StorageEndpoint,
     ) -> bool:
         """Check if file exists in S3."""
+        full_key = self._apply_path_prefix(object_key, endpoint.path_prefix)
         
         def _check():
             addressing_style = "path" if endpoint.path_style else "virtual"
@@ -645,10 +657,6 @@ class StorageService:
                 region_name=endpoint.region or "auto",
                 config=config,
             )
-            
-            full_key = object_key
-            if endpoint.path_prefix:
-                full_key = f"{endpoint.path_prefix.strip('/')}/{object_key}"
             
             try:
                 client.head_object(Bucket=endpoint.bucket_name, Key=full_key)
@@ -674,9 +682,9 @@ class StorageService:
         """
         try:
             if endpoint.provider == StorageProvider.LOCAL:
-                
                 base_path = self._resolve_local_path(endpoint)
-                full_path = os.path.join(base_path, object_key)
+                full_key = self._apply_path_prefix(object_key, endpoint.path_prefix)
+                full_path = os.path.join(base_path, full_key)
                 if os.path.exists(full_path):
                     os.remove(full_path)
                 return True
@@ -692,6 +700,7 @@ class StorageService:
         endpoint: StorageEndpoint,
     ) -> bool:
         """Delete from S3-compatible storage."""
+        full_key = self._apply_path_prefix(object_key, endpoint.path_prefix)
         
         def _do_delete():
             addressing_style = "path" if endpoint.path_style else "virtual"
@@ -708,10 +717,6 @@ class StorageService:
                 region_name=endpoint.region or "auto",
                 config=config,
             )
-            
-            full_key = object_key
-            if endpoint.path_prefix:
-                full_key = f"{endpoint.path_prefix.strip('/')}/{object_key}"
             
             client.delete_object(Bucket=endpoint.bucket_name, Key=full_key)
         

@@ -68,6 +68,7 @@ curl -H "api_key: YOUR_API_KEY" "http://your-domain/api/v1/external/images/rando
 | `endpoint_id` | int | 否 | 存储端点 ID（默认使用系统默认端点） |
 | `auto_analyze` | bool | 否 | 是否自动 AI 分析，默认 true |
 | `callback_url` | string | 否 | 分析完成后的回调 URL |
+| `is_public` | bool | 否 | 是否公开可见，默认 true |
 
 > **智能跳过 AI 分析**：当同时提供 `tags` 和 `description` 时，系统会跳过 AI 视觉分析（只生成向量），仍可使用回调机制通知完成。
 

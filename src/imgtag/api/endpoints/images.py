@@ -30,7 +30,7 @@ from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from imgtag.api.endpoints.auth import get_current_user, require_admin
+from imgtag.api.endpoints.auth import get_current_user, get_current_user_optional, require_admin
 from imgtag.core.logging_config import get_logger, get_perf_logger
 from imgtag.core.storage_constants import (
     StorageProvider,
@@ -845,12 +845,16 @@ async def get_image(
 async def search_images(
     request: ImageSearchRequest,
     session: AsyncSession = Depends(get_async_session),
+    current_user: dict | None = Depends(get_current_user_optional),
 ):
     """Advanced image search.
+
+    Public images are always visible. If logged in, user's own images are also visible.
 
     Args:
         request: Search filters.
         session: Database session.
+        current_user: Current user (optional).
 
     Returns:
         ImageSearchResponse with results.
@@ -859,12 +863,22 @@ async def search_images(
     logger.info(f"高级图像搜索: {request.model_dump()}")
 
     try:
+        # Visibility filter:
+        # - Admin: skip_visibility_filter=True (see all)
+        # - Logged in user: visible_to_user_id=user_id (see public + own)
+        # - Anonymous: visible_to_user_id=None, skip=False (see public only)
+        is_admin = current_user.get("role") == "admin" if current_user else False
+        skip_visibility_filter = is_admin
+        visible_to_user_id = current_user.get("id") if current_user and not is_admin else None
+        
         results = await image_repository.search_images(
             session,
             tags=request.tags,
             keyword=request.keyword,
             category_id=request.category_id,
             resolution_id=request.resolution_id,
+            visible_to_user_id=visible_to_user_id,
+            skip_visibility_filter=skip_visibility_filter,
             pending_only=request.pending_only,
             duplicates_only=request.duplicates_only,
             limit=request.limit,
@@ -902,14 +916,17 @@ async def search_images(
 async def smart_search(
     request: SimilarSearchRequest,
     session: AsyncSession = Depends(get_async_session),
+    current_user: dict | None = Depends(get_current_user_optional),
 ):
     """Smart vector search with similarity scores.
 
     Uses hybrid search combining vector similarity and tag matching.
+    Public images are always visible. If logged in, user's own images are also visible.
 
     Args:
         request: Search parameters with text query.
         session: Database session.
+        current_user: Current user (optional).
 
     Returns:
         SimilarSearchResponse with similarity scores.
@@ -918,6 +935,14 @@ async def smart_search(
     logger.info(f"智能向量搜索: '{request.text[:50] if request.text else ''}...'")
 
     try:
+        # Visibility filter:
+        # - Admin: skip_visibility_filter=True (see all)
+        # - Logged in user: visible_to_user_id=user_id (see public + own)
+        # - Anonymous: visible_to_user_id=None, skip=False (see public only)
+        is_admin = current_user.get("role") == "admin" if current_user else False
+        skip_visibility_filter = is_admin
+        visible_to_user_id = current_user.get("id") if current_user and not is_admin else None
+        
         # Generate query vector
         if request.tags:
             query_vector = await embedding_service.get_embedding_combined(
@@ -938,6 +963,8 @@ async def smart_search(
             tag_weight=request.tag_weight,
             category_id=request.category_id,
             resolution_id=request.resolution_id,
+            visible_to_user_id=visible_to_user_id,
+            skip_visibility_filter=skip_visibility_filter,
         )
 
         # Convert to response model

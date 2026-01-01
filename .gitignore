@@ -20,7 +20,7 @@ logs/
 *.log
 
 # 上传文件
-uploads/
+data/
 
 # IDE配置
 .vscode/

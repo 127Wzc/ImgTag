@@ -68,10 +68,14 @@ class Settings(BaseSettings):
         description="嵌入向量维度"
     )
     
-    # 文件上传配置
+    # 文件存储配置
+    DATA_DIR: Path = Field(
+        default=Path("data"),
+        description="统一数据存储目录（所有本地 bucket 的基础目录）"
+    )
     UPLOAD_DIR: Path = Field(
         default=Path("uploads"),
-        description="上传文件存储目录"
+        description="默认上传目录（相对于 DATA_DIR）"
     )
     MAX_UPLOAD_SIZE: int = Field(
         default=10 * 1024 * 1024,  # 10MB
@@ -110,12 +114,24 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         case_sensitive = True
     
+    def get_data_path(self) -> Path:
+        """获取统一数据目录的绝对路径
+        
+        所有本地存储 bucket 都在此目录下，Docker 只需挂载此目录。
+        """
+        data_path = self.DATA_DIR
+        if not data_path.is_absolute():
+            # 相对于项目根目录
+            data_path = Path(__file__).parent.parent.parent.parent / data_path
+        data_path.mkdir(parents=True, exist_ok=True)
+        return data_path
+    
     def get_upload_path(self) -> Path:
-        """获取上传目录的绝对路径"""
-        upload_path = self.UPLOAD_DIR
-        if not upload_path.is_absolute():
-            # 相对于 backend 目录
-            upload_path = Path(__file__).parent.parent.parent.parent / upload_path
+        """获取默认上传目录的绝对路径
+        
+        默认上传目录位于 DATA_DIR/UPLOAD_DIR 下。
+        """
+        upload_path = self.get_data_path() / self.UPLOAD_DIR
         upload_path.mkdir(parents=True, exist_ok=True)
         return upload_path
 

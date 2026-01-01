@@ -282,6 +282,8 @@ class ImageRepository(BaseRepository[Image]):
         category_id: Optional[int] = None,
         resolution_id: Optional[int] = None,
         user_id: Optional[int] = None,
+        visible_to_user_id: Optional[int] = None,
+        skip_visibility_filter: bool = False,
         pending_only: bool = False,
         duplicates_only: bool = False,
         limit: int = 20,
@@ -298,6 +300,7 @@ class ImageRepository(BaseRepository[Image]):
             category_id: Filter by category (level=0 tag).
             resolution_id: Filter by resolution (level=1 tag).
             user_id: Filter by uploader user ID.
+            visible_to_user_id: If set, only return public images or images uploaded by this user.
             pending_only: Only images without embeddings.
             duplicates_only: Only duplicated images (by hash).
             limit: Maximum results.
@@ -313,6 +316,19 @@ class ImageRepository(BaseRepository[Image]):
         count_stmt = select(func.count()).select_from(Image)
 
         conditions = []
+
+        # Visibility filter:
+        # - skip_visibility_filter=True: no filter (admin mode)
+        # - visible_to_user_id set: show public OR owned by user
+        # - visible_to_user_id=None: show only public (anonymous user)
+        if not skip_visibility_filter:
+            if visible_to_user_id is not None:
+                conditions.append(
+                    or_(Image.is_public == True, Image.uploaded_by == visible_to_user_id)
+                )
+            else:
+                # Anonymous user: only public images
+                conditions.append(Image.is_public == True)
 
         # User filter
         if user_id is not None:
@@ -532,6 +548,8 @@ class ImageRepository(BaseRepository[Image]):
         tag_weight: float = 0.3,
         category_id: Optional[int] = None,
         resolution_id: Optional[int] = None,
+        visible_to_user_id: Optional[int] = None,
+        skip_visibility_filter: bool = False,
     ) -> list[dict[str, Any]]:
         """Hybrid search: vector similarity + tag matching.
 
@@ -548,6 +566,7 @@ class ImageRepository(BaseRepository[Image]):
             tag_weight: Weight for tag score (0-1).
             category_id: Filter by category (level=0 tag).
             resolution_id: Filter by resolution (level=1 tag).
+            visible_to_user_id: If set, only return public images or images uploaded by this user.
 
         Returns:
             List of image dicts with similarity scores.
@@ -574,6 +593,16 @@ class ImageRepository(BaseRepository[Image]):
         if resolution_id:
             filter_sql += " AND i.id IN (SELECT image_id FROM image_tags WHERE tag_id = :resolution_id)"
             params["resolution_id"] = resolution_id
+        # Visibility filter:
+        # - skip_visibility_filter=True: no filter (admin mode)
+        # - visible_to_user_id set: show public OR owned by user
+        # - visible_to_user_id=None: show only public (anonymous user)
+        if not skip_visibility_filter:
+            if visible_to_user_id is not None:
+                filter_sql += " AND (i.is_public = true OR i.uploaded_by = :visible_to_user_id)"
+                params["visible_to_user_id"] = visible_to_user_id
+            else:
+                filter_sql += " AND i.is_public = true"
 
         query = text(f"""
             WITH tag_match AS (

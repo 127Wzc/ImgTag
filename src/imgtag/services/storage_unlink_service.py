@@ -140,23 +140,13 @@ class StorageUnlinkService(BaseStorageTaskService[UnlinkContext]):
             return (True, None)
         
         try:
-            import os
-            
-            full_key = storage_service.get_full_object_key(
-                item["object_key"], item.get("category_code")
+            # Use delete_from_endpoint for both local and S3 endpoints
+            # This method correctly handles path_prefix for all provider types
+            success = await storage_service.delete_from_endpoint(
+                item["object_key"], context.endpoint
             )
-            
-            if context.endpoint.provider != "local":
-                success = await storage_service.delete_from_endpoint(
-                    full_key, context.endpoint
-                )
-                if not success:
-                    return (False, f"Delete returned false for {full_key}")
-            else:
-                # Local file deletion
-                local_path = storage_service.get_local_path(item["object_key"])
-                if local_path and os.path.exists(local_path):
-                    os.remove(local_path)
+            if not success:
+                return (False, f"Delete returned false for {item['object_key']}")
             
             return (True, None)
         except Exception as e:

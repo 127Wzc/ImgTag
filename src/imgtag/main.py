@@ -11,20 +11,25 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 import uvicorn
 
 from imgtag.api import api_router
 from imgtag.core.config import settings
 from imgtag.core.config_cache import config_cache
+from imgtag.core.exceptions import APIError
 from imgtag.core.logging_config import get_logger
+from imgtag.core.storage_constants import get_mime_type, StorageProvider
 from imgtag.db.database import close_db, async_session_maker
-from imgtag.db.repositories import task_repository, config_repository
+from imgtag.db.repositories import task_repository, config_repository, storage_endpoint_repository
 from imgtag.services.task_queue import task_queue, AnalysisTask
 from imgtag.services.auth_service import init_default_admin
+from imgtag.services.backup_service import schedule_daily_backup
+from imgtag.services.storage_sync_service import storage_sync_service
+from imgtag.services.upload_service import upload_service
 
 logger = get_logger(__name__)
 
@@ -95,7 +100,6 @@ async def lifespan(app: FastAPI):
     
     # 清理残留的临时文件（远程上传解析用）
     try:
-        from imgtag.services.upload_service import upload_service
         cleaned = upload_service.cleanup_temp_dir(max_age_hours=1)  # 清理1小时前的临时文件
         if cleaned > 0:
             logger.info(f"启动时清理了 {cleaned} 个残留临时文件")
@@ -143,7 +147,6 @@ async def lifespan(app: FastAPI):
                 
                 # Handle storage_sync tasks separately
                 if task_data.type == "storage_sync":
-                    from imgtag.services.storage_sync_service import storage_sync_service
                     asyncio.create_task(storage_sync_service._process_sync_task(task_data.id))
                     sync_restored += 1
                     continue
@@ -170,7 +173,6 @@ async def lifespan(app: FastAPI):
     
     # 启动每日备份定时任务
     try:
-        from imgtag.services.backup_service import schedule_daily_backup
         asyncio.create_task(schedule_daily_backup())
         logger.info("已启动每日备份定时任务（凌晨1点执行）")
     except Exception as e:
@@ -204,9 +206,6 @@ app.add_middleware(
 )
 
 # ============= 全局异常处理器 =============
-from fastapi import HTTPException
-from fastapi.responses import JSONResponse
-from imgtag.core.exceptions import APIError
 
 @app.exception_handler(APIError)
 async def api_error_handler(request: Request, exc: APIError):
@@ -233,9 +232,76 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 # 注册 API 路由
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
-# 挂载静态文件目录 (上传的图片)
-upload_path = settings.get_upload_path()
-app.mount("/uploads", StaticFiles(directory=str(upload_path)), name="uploads")
+
+# ============= 动态本地文件服务 =============
+# 统一的文件服务路由，支持任意 bucket 名称，无需重启
+# 安全特性：只服务已注册的本地端点，防止目录遍历攻击
+
+@app.get("/data/{bucket}/{file_path:path}")
+async def serve_local_file(bucket: str, file_path: str):
+    """动态服务本地存储端点的文件。
+    
+    优点：
+    - 无需重启：新建端点立即可用
+    - 安全：只服务数据库中注册的 bucket
+    - 防止目录遍历攻击
+    
+    Args:
+        bucket: 存储桶名称（对应端点的 bucket_name）
+        file_path: 文件路径
+    """
+    # 规范化路径，防止目录遍历攻击
+    # 移除 .. 和多余的 /
+    normalized_path = os.path.normpath(file_path).lstrip("/")
+    if ".." in normalized_path or normalized_path.startswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    
+    # 查询数据库验证 bucket 是否为注册的本地端点
+    async with async_session_maker() as session:
+        endpoints = await storage_endpoint_repository.get_all(session)
+        
+        # 查找匹配的本地端点
+        target_endpoint = None
+        for ep in endpoints:
+            if ep.provider == StorageProvider.LOCAL and ep.bucket_name == bucket:
+                target_endpoint = ep
+                break
+        
+        if not target_endpoint:
+            raise HTTPException(status_code=404, detail="Storage bucket not found")
+        
+        # 解析物理路径（所有 bucket 都在 DATA_DIR 下）
+        data_path = settings.get_data_path()
+        if os.path.isabs(bucket):
+            base_path = Path(bucket)
+        else:
+            base_path = data_path / bucket
+        
+        full_path = base_path / normalized_path
+        
+        # 安全检查：确保路径在 base_path 内（防止符号链接逃逸）
+        try:
+            full_path = full_path.resolve()
+            base_path = base_path.resolve()
+            if not str(full_path).startswith(str(base_path)):
+                raise HTTPException(status_code=403, detail="Access denied")
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid path")
+        
+        # 检查文件是否存在
+        if not full_path.exists() or not full_path.is_file():
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # 返回文件
+        return FileResponse(
+            str(full_path),
+            media_type=_get_media_type(full_path.suffix),
+        )
+
+
+def _get_media_type(suffix: str) -> str:
+    """根据文件扩展名返回 MIME 类型。"""
+    return get_mime_type(suffix)
 
 # 如果存在前端静态文件目录，则托管前端
 if STATIC_DIR and Path(STATIC_DIR).exists():

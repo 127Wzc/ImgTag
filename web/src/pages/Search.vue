@@ -12,8 +12,9 @@ import { useUserStore } from '@/stores'
 import type { ImageResponse, ImageWithSimilarity, SimilarSearchRequest, ImageSearchRequest, Tag } from '@/types'
 import { 
   Search as SearchIcon, X, Image as ImageIcon, Loader2, Sparkles, 
-  ChevronDown, Tag as TagIcon, Check, FolderOpen, Filter 
+  ChevronDown, Tag as TagIcon, Check, FolderOpen, Filter, SlidersHorizontal 
 } from 'lucide-vue-next'
+import { toast } from 'vue-sonner'
 
 const route = useRoute()
 const router = useRouter()
@@ -38,9 +39,9 @@ function switchMode(mode: SearchMode) {
 // ==================== 图库浏览模式 ====================
 const galleryFilters = ref({ category: 'all', resolution: 'all', keyword: '' })
 const showGalleryFilters = ref(false)
-const galleryPageSize = ref(40)
+const galleryPageSize = ref(20)
 const galleryCurrentPage = ref(1)
-const gallerySearchParams = ref<ImageSearchRequest>({ limit: 40, offset: 0, sort_by: 'id', sort_desc: true })
+const gallerySearchParams = ref<ImageSearchRequest>({ limit: 20, offset: 0, sort_by: 'id', sort_desc: true })
 
 const { data: galleryData, isLoading: galleryLoading, isError: galleryError, refetch: galleryRefetch } = useImages(gallerySearchParams)
 const galleryImages = computed(() => galleryData.value?.images || [])
@@ -85,6 +86,11 @@ const selectedCategoryId = ref<number | null>(null)
 const selectedResolutionId = ref<number | null>(null)
 const tagSearchKeyword = ref('')
 const showTagDropdown = ref(false)
+const similarityThreshold = ref([0.15])  // 相似度阈值，范围 0.05 - 0.50
+
+// 未登录用户限流
+const RATE_LIMIT_KEY = 'imgtag_smart_search_last_time'
+const RATE_LIMIT_SECONDS = 30
 
 const { data: tagsData } = useTags(200)
 const { data: categoriesData } = useCategories()
@@ -131,6 +137,21 @@ function removeTag(tagId: number) {
 
 function handleSmartSearch() {
   if (!hasAnySmartFilter.value) return
+  
+  // 未登录用户限流检查
+  if (!isLoggedIn.value) {
+    const lastTime = localStorage.getItem(RATE_LIMIT_KEY)
+    if (lastTime) {
+      const elapsed = (Date.now() - parseInt(lastTime)) / 1000
+      if (elapsed < RATE_LIMIT_SECONDS) {
+        const remaining = Math.ceil(RATE_LIMIT_SECONDS - elapsed)
+        toast.warning(`请等待 ${remaining} 秒后再次搜索`)
+        return
+      }
+    }
+    localStorage.setItem(RATE_LIMIT_KEY, String(Date.now()))
+  }
+  
   const tagNames = selectedTags.value.map(t => t.name)
   smartSearchParams.value = {
     text: smartQuery.value || '',
@@ -138,7 +159,7 @@ function handleSmartSearch() {
     category_id: selectedCategoryId.value || undefined,
     resolution_id: selectedResolutionId.value || undefined,
     limit: 50,
-    threshold: 0.15,
+    threshold: similarityThreshold.value[0],
     vector_weight: 0.7,
     tag_weight: 0.3,
   }
@@ -150,6 +171,7 @@ function clearSmartSearch() {
   selectedCategoryId.value = null
   selectedResolutionId.value = null
   tagSearchKeyword.value = ''
+  similarityThreshold.value = [0.15]
   smartSearchParams.value = null
 }
 
@@ -412,6 +434,37 @@ const currentImageList = computed(() => activeMode.value === 'gallery' ? gallery
                 <button @click="removeTag(tag.id)" class="hover:bg-primary/20 rounded-full">
                   <X class="w-3 h-3" />
                 </button>
+              </div>
+            </div>
+
+            <!-- 相似度阈值滑块 -->
+            <div class="mb-4">
+              <div class="flex items-center justify-between mb-2">
+                <div class="flex items-center gap-1.5">
+                  <SlidersHorizontal class="w-3.5 h-3.5 text-muted-foreground" />
+                  <span class="text-xs text-muted-foreground">匹配程度</span>
+                </div>
+                <span class="text-xs font-medium" :class="similarityThreshold[0] <= 0.15 ? 'text-green-500' : similarityThreshold[0] >= 0.35 ? 'text-amber-500' : 'text-blue-500'">
+                  {{ similarityThreshold[0] <= 0.15 ? '宽松' : similarityThreshold[0] >= 0.35 ? '精确' : '标准' }}
+                  ({{ Math.round(similarityThreshold[0] * 100) }}%)
+                </span>
+              </div>
+              <input
+                type="range"
+                v-model.number="similarityThreshold[0]"
+                min="0.05"
+                max="0.50"
+                step="0.05"
+                class="w-full h-2 bg-muted rounded-full appearance-none cursor-pointer
+                  [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 
+                  [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-primary [&::-webkit-slider-thumb]:cursor-pointer
+                  [&::-webkit-slider-thumb]:shadow-md [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-background
+                  [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:rounded-full 
+                  [&::-moz-range-thumb]:bg-primary [&::-moz-range-thumb]:cursor-pointer [&::-moz-range-thumb]:border-0"
+              />
+              <div class="flex justify-between text-[10px] text-muted-foreground mt-1">
+                <span>更多结果</span>
+                <span>更精确</span>
               </div>
             </div>
 

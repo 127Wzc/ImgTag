@@ -18,6 +18,8 @@ import {
   Folder,
   Sparkles,
   HardDrive,
+  Globe,
+  Lock,
 } from 'lucide-vue-next'
 
 const userStore = useUserStore()
@@ -31,6 +33,7 @@ const uploadMode = ref<UploadMode>('file')
 const autoAnalyze = ref(true)  // 管理员可选
 const selectedCategoryId = ref<number | null>(null)
 const selectedEndpointId = ref<number | null>(null)  // 目标存储端点
+const isPublic = ref(true)  // 是否公开，默认公开
 
 // 获取主分类列表
 const { data: categories } = useCategories()
@@ -174,6 +177,7 @@ async function uploadSingle(item: FileItem) {
         skipAnalyze: !shouldAnalyze.value,
         categoryId: selectedCategoryId.value ?? undefined,
         endpointId: selectedEndpointId.value ?? undefined,
+        isPublic: isPublic.value,
       })
       clearInterval(progressInterval)
       item.progress = 100
@@ -290,6 +294,25 @@ const pendingCount = computed(() => files.value.filter(f => f.status === 'pendin
               {{ ep.name }} ({{ ep.provider === 'local' ? '本地' : 'S3' }})
             </option>
           </select>
+        </div>
+
+        <!-- 公开/私有选择 -->
+        <div class="flex items-center gap-2">
+          <component :is="isPublic ? Globe : Lock" class="w-4 h-4 text-muted-foreground" />
+          <span class="text-sm text-muted-foreground">可见性</span>
+          <button
+            @click="isPublic = !isPublic"
+            class="relative w-10 h-5 rounded-full transition-colors"
+            :class="isPublic ? 'bg-green-500' : 'bg-amber-500'"
+          >
+            <span 
+              class="absolute top-0.5 w-4 h-4 bg-white rounded-full transition-all shadow"
+              :class="isPublic ? 'left-5' : 'left-0.5'"
+            />
+          </button>
+          <span class="text-xs" :class="isPublic ? 'text-green-500' : 'text-amber-500'">
+            {{ isPublic ? '公开' : '私有' }}
+          </span>
         </div>
 
         <!-- AI 分析开关（仅管理员） -->

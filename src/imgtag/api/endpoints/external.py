@@ -46,6 +46,7 @@ class ExternalImageCreate(BaseModel):
     endpoint_id: int | None = None  # 存储端点ID（不可选备份端点）
     auto_analyze: bool = True
     callback_url: str | None = None  # 分析完成后的回调URL
+    is_public: bool = True  # 是否公开可见，默认公开
 
 
 
@@ -143,7 +144,6 @@ async def analyze_image_from_url(
         width, height = upload_service.extract_image_dimensions(content)
         file_type = file_path.split(".")[-1] if "." in file_path else "jpg"
 
-        # Create image record
         new_image = await image_repository.create_image(
             session,
             file_hash=file_hash,
@@ -155,6 +155,7 @@ async def analyze_image_from_url(
             original_url=request.image_url,
             embedding=None,
             uploaded_by=api_user.get("id"),
+            is_public=request.is_public,
         )
         
         # 生成统一的 object_key
@@ -308,6 +309,7 @@ async def search_images(
     tags: list[str] = Query([], description="标签筛选"),
     limit: int = Query(20, ge=1, le=100, description="返回数量"),
     offset: int = Query(0, ge=0, description="偏移量"),
+    threshold: float = Query(0.7, ge=0.0, le=1.0, description="相似度阈值（用于向量搜索）"),
     api_user: dict = Depends(require_api_key),
     session: AsyncSession = Depends(get_async_session),
 ):

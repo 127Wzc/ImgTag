@@ -25,10 +25,11 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           changeOrigin: true,
         },
-        '/uploads': {
+        // Dynamic local file serving (all buckets through /data/)
+        '/data': {
           target: apiTarget,
           changeOrigin: true,
-        }
+        },
       }
     }
   }

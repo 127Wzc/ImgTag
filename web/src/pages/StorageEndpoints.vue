@@ -712,9 +712,13 @@ onUnmounted(() => {
                     <input 
                       v-model="form.path_prefix"
                       type="text"
-                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
                       placeholder="images/"
+                      :disabled="!!(editingEndpoint && editingEndpoint.location_count > 0)"
                     />
+                    <p v-if="editingEndpoint && editingEndpoint.location_count > 0" class="text-xs text-amber-500">
+                      ⚠ 有 {{ editingEndpoint.location_count }} 张关联图片，无法修改
+                    </p>
                   </div>
                 </div>
 

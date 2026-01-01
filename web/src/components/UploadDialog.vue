@@ -3,7 +3,7 @@
  * UploadDialog - 上传图片弹框
  * 支持拖拽上传、ZIP 压缩包、URL 添加
  */
-import { ref, computed, watch, watchEffect, onMounted } from 'vue'
+import { ref, computed, watch, watchEffect } from 'vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useUploadImage, useUploadZip, useUploadFromUrl, useCategories } from '@/api/queries'
@@ -22,6 +22,8 @@ import {
   Folder,
   Sparkles,
   HardDrive,
+  Globe,
+  Lock,
 } from 'lucide-vue-next'
 
 const props = defineProps<{
@@ -42,6 +44,7 @@ const uploadMode = ref<UploadMode>('file')
 // 上传选项
 const autoAnalyze = ref(false)
 const selectedCategoryId = ref<number | null>(null)
+const isPublic = ref(true)  // 是否公开，默认公开
 
 // 获取主分类列表
 const { data: categories } = useCategories()
@@ -82,9 +85,17 @@ async function fetchEndpoints() {
   }
 }
 
-onMounted(() => {
-  if (isAdmin.value) {
-    fetchEndpoints()
+// 当 dialog 打开时获取端点列表（管理员）
+watch(() => props.open, async (isOpen) => {
+  if (isOpen && isAdmin.value && endpoints.value.length === 0) {
+    await fetchEndpoints()
+  }
+}, { immediate: true })
+
+// 当用户登录状态变化时（例如从未登录变为管理员）
+watch(isAdmin, async (admin) => {
+  if (admin && props.open && endpoints.value.length === 0) {
+    await fetchEndpoints()
   }
 })
 
@@ -202,6 +213,7 @@ async function uploadSingle(item: FileItem) {
         skipAnalyze: !shouldAnalyze.value,
         categoryId: selectedCategoryId.value ?? undefined,
         endpointId: selectedEndpointId.value ?? undefined,
+        isPublic: isPublic.value,
       })
       clearInterval(progressInterval)
       item.progress = 100
@@ -310,7 +322,7 @@ const pendingCount = computed(() => files.value.filter(f => f.status === 'pendin
               <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
             </select>
           </div>
-          <!-- 存储端点选择（仅管理员） -->
+          <!-- 存储端点选择（仅管理员且有多个端点） -->
           <div v-if="isAdmin && endpoints.length > 1" class="flex items-center gap-2">
             <HardDrive class="w-4 h-4 text-muted-foreground" />
             <select
@@ -321,6 +333,24 @@ const pendingCount = computed(() => files.value.filter(f => f.status === 'pendin
                 {{ ep.name }}{{ ep.is_default_upload ? ' (默认)' : '' }}
               </option>
             </select>
+          </div>
+          <!-- 公开/私有选择 -->
+          <div class="flex items-center gap-2">
+            <component :is="isPublic ? Globe : Lock" class="w-4 h-4 text-muted-foreground" />
+            <span class="text-muted-foreground">可见性</span>
+            <button
+              @click="isPublic = !isPublic"
+              class="relative w-9 h-5 rounded-full transition-colors"
+              :class="isPublic ? 'bg-green-500' : 'bg-amber-500'"
+            >
+              <span 
+                class="absolute top-0.5 w-4 h-4 bg-white rounded-full transition-all shadow"
+                :class="isPublic ? 'left-[18px]' : 'left-0.5'"
+              />
+            </button>
+            <span class="text-xs" :class="isPublic ? 'text-green-500' : 'text-amber-500'">
+              {{ isPublic ? '公开' : '私有' }}
+            </span>
           </div>
           <div v-if="isAdmin" class="flex items-center gap-2">
             <Sparkles class="w-4 h-4 text-muted-foreground" />

@@ -366,14 +366,24 @@ async def update_endpoint(
     # Update fields
     update_data = data.model_dump(exclude_unset=True)
     
-    # Check if trying to modify bucket_name when endpoint has images
+    # Check if trying to modify bucket_name or path_prefix when endpoint has images
+    # These fields affect file paths, so changing them would break existing images
+    location_count = await image_location_repository.count_by_endpoint(session, endpoint_id)
+    
     new_bucket = update_data.get("bucket_name")
-    if new_bucket and new_bucket != endpoint.bucket_name:
-        location_count = await image_location_repository.count_by_endpoint(session, endpoint_id)
+    if new_bucket is not None and new_bucket != endpoint.bucket_name:
         if location_count > 0:
             raise HTTPException(
                 400,
                 f"无法修改存储目录：该端点有 {location_count} 张关联图片。请先解绑或迁移图片。"
+            )
+    
+    new_path_prefix = update_data.get("path_prefix")
+    if new_path_prefix is not None and new_path_prefix != endpoint.path_prefix:
+        if location_count > 0:
+            raise HTTPException(
+                400,
+                f"无法修改路径前缀：该端点有 {location_count} 张关联图片。请先解绑或迁移图片。"
             )
     
     # Restrict default local endpoint (id=1) to storage and read strategy fields
