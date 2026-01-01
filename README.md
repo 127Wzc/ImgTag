@@ -64,9 +64,13 @@ docker-compose up -d
 ## 🚀 本地开发
 
 ```bash
-# 后端
+# 后端（默认使用在线 API，无需额外依赖）
 cp .env.example .env && vim .env  # 配置数据库
-uv sync && uv run uvicorn imgtag.main:app --reload --port 8000
+uv sync
+uv run python -m uvicorn imgtag.main:app --reload --port 8000
+
+# 如需本地嵌入模型，安装可选依赖
+uv sync --extra local
 
 # 前端
 cd web && pnpm install && pnpm dev
