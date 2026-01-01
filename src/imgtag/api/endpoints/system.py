@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import httpx
@@ -105,8 +106,8 @@ async def get_dashboard_stats(
         pending_images = await image_repository.count_pending_images(session)
         analyzed_images = total_images - pending_images
 
-        # Today stats - pass date object directly
-        today = date.today()
+        # Today stats - 使用 Asia/Shanghai 时区获取"今日"日期
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
         today_uploaded = await image_repository.count_by_date(
             session, today, "uploaded"
         )

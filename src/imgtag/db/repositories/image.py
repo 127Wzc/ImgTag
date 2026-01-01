@@ -945,8 +945,9 @@ class ImageRepository(BaseRepository[Image]):
             Count of images.
         """
         col_name = "created_at" if count_type == "uploaded" else "updated_at"
+        # 使用 Asia/Shanghai 时区转换后再提取日期，确保"今日"统计正确
         result = await session.execute(
-            text(f"SELECT count(*) FROM images WHERE {col_name}::date = :dt"),
+            text(f"SELECT count(*) FROM images WHERE ({col_name} AT TIME ZONE 'Asia/Shanghai')::date = :dt"),
             {"dt": target_date},
         )
         return result.scalar() or 0
