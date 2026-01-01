@@ -312,11 +312,17 @@ if STATIC_DIR and Path(STATIC_DIR).exists():
     
     @app.get("/{full_path:path}")
     async def serve_spa(request: Request, full_path: str):
-        """SPA 路由：所有非 API 请求返回 index.html"""
+        """SPA 路由：优先返回静态文件，否则返回 index.html"""
         # 排除 API 和已挂载的路径
-        if full_path.startswith(("api/", "uploads/", "assets/", "docs", "redoc", "openapi.json")):
+        if full_path.startswith(("api/", "uploads/", "data/", "assets/", "docs", "redoc", "openapi.json")):
             return None
         
+        # 检查是否为静态文件（logo.png, vite.svg 等）
+        static_file = Path(STATIC_DIR) / full_path
+        if static_file.exists() and static_file.is_file():
+            return FileResponse(str(static_file))
+        
+        # 其他路径返回 index.html（SPA 前端路由）
         index_path = Path(STATIC_DIR) / "index.html"
         if index_path.exists():
             return FileResponse(str(index_path))

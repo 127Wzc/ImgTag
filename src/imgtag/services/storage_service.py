@@ -420,6 +420,11 @@ class StorageService:
     def _build_url(self, endpoint: StorageEndpoint, object_key: str) -> str:
         """Build public URL for an object.
         
+        URL 构建优先级：
+        1. public_url_prefix - 用于 CDN 或自定义域名
+        2. 本地端点 - 使用 /data/{bucket}/... 格式
+        3. S3 端点 - 使用 endpoint_url/{bucket}/... 格式
+        
         Args:
             endpoint: Storage endpoint configuration.
             object_key: Object key/path.
@@ -430,26 +435,26 @@ class StorageService:
         bucket = endpoint.bucket_name or "uploads"
         path_prefix = (endpoint.path_prefix or "").strip("/")
         
-        # Check public_url_prefix first (works for all endpoint types)
+        # 构建完整路径（path_prefix + object_key）
+        full_path = f"{path_prefix}/{object_key}" if path_prefix else object_key
+        
+        # 1. 优先使用 public_url_prefix（CDN 或自定义域名）
         if endpoint.public_url_prefix:
-            # CDN or custom domain
             prefix = endpoint.public_url_prefix.rstrip("/")
-            if path_prefix:
-                return f"{prefix}/{bucket}/{path_prefix}/{object_key}"
-            return f"{prefix}/{bucket}/{object_key}"
+            if endpoint.provider == StorageProvider.LOCAL:
+                # 本地端点需要 /data/ 路由前缀
+                return f"{prefix}/data/{bucket}/{full_path}"
+            # S3 等远程端点直接拼接
+            return f"{prefix}/{bucket}/{full_path}"
         
+        # 2. 本地端点使用动态路由
         if endpoint.provider == StorageProvider.LOCAL:
-            # Local files served through /data/{bucket}/... (dynamic route)
-            if path_prefix:
-                return f"/data/{bucket}/{path_prefix}/{object_key}"
-            return f"/data/{bucket}/{object_key}"
+            return f"/data/{bucket}/{full_path}"
         
+        # 3. S3 端点使用 endpoint_url
         if endpoint.endpoint_url and bucket:
-            # Direct S3 URL
             base = endpoint.endpoint_url.rstrip("/")
-            if path_prefix:
-                return f"{base}/{bucket}/{path_prefix}/{object_key}"
-            return f"{base}/{bucket}/{object_key}"
+            return f"{base}/{bucket}/{full_path}"
         
         return ""
 
