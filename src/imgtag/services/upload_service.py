@@ -19,6 +19,7 @@ import os
 
 from imgtag.core.config import settings
 from imgtag.core.logging_config import get_logger, get_perf_logger
+from imgtag.core.storage_constants import get_extension_from_mime
 
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
@@ -342,15 +343,8 @@ class UploadService:
             # 获取远程图片
             content, mime_type = await self.fetch_remote_image(url)
             
-            # 根据 MIME 类型确定扩展名
-            ext_map = {
-                "image/jpeg": "jpg",
-                "image/png": "png",
-                "image/gif": "gif",
-                "image/webp": "webp",
-                "image/bmp": "bmp",
-            }
-            extension = ext_map.get(mime_type, "jpg")
+            # 根据 MIME 类型确定扩展名（使用统一常量）
+            extension = get_extension_from_mime(mime_type)
             
             # 验证扩展名
             if not self._validate_extension(extension):

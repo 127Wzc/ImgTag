@@ -27,6 +27,8 @@ class ImageCreateByUrl(BaseModel):
     tags: Optional[List[str]] = Field(default=None, description="手动指定的标签")
     description: Optional[str] = Field(default=None, description="手动指定的描述")
     category_id: Optional[int] = Field(default=None, description="主分类ID (level=0)")
+    endpoint_id: Optional[int] = Field(default=None, description="目标存储端点ID (默认使用系统默认端点)")
+    is_public: bool = Field(default=True, description="是否公开可见")
 
 
 class ImageCreateManual(BaseModel):

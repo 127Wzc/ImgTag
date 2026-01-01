@@ -83,10 +83,6 @@ class Settings(BaseSettings):
     )
     
     # 应用配置
-    BASE_URL: str = Field(
-        default="http://localhost:8000",
-        description="应用基础 URL，用于生成完整的图片访问链接"
-    )
     DEFAULT_SEARCH_LIMIT: int = 10
     DEFAULT_SIMILARITY_THRESHOLD: float = 0.3  # BGE-small 中文模型相似度通常较低
     

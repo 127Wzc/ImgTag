@@ -15,8 +15,6 @@ services:
     environment:
       # 必填：PostgreSQL 连接字符串
       - PG_CONNECTION_STRING=postgresql://user:password@host:5432/imgtag
-      # 可选：服务基础地址（用于生成图片链接等）
-      - BASE_URL=http://localhost:5173
     volumes:
       # 图片存储目录
       - ./uploads:/app/uploads

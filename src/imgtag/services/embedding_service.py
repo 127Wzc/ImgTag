@@ -11,7 +11,6 @@ from typing import List, Optional, TYPE_CHECKING
 from pathlib import Path
 
 import httpx
-import requests
 import asyncio
 
 
@@ -41,7 +40,11 @@ TOKENIZER_FILES = [
 
 def _download_file(url: str, dest_path: Path, timeout: int = 300, stream: bool = False) -> bool:
     """
-    下载单个文件到指定路径
+    下载单个文件到指定路径（同步版本）
+    
+    注意:
+        此函数用于 ONNX 模型加载阶段，该阶段是同步的（transformers 的 AutoTokenizer）。
+        使用 httpx.Client 同步客户端，保持 API 与 httpx.AsyncClient 一致。
     
     Args:
         url: 下载地址
@@ -55,34 +58,40 @@ def _download_file(url: str, dest_path: Path, timeout: int = 300, stream: bool =
     try:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         
-        response = requests.get(url, stream=stream, timeout=timeout)
-        response.raise_for_status()
-        
-        if stream:
-            # 流式下载大文件，带进度显示
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded = 0
-            
-            with open(dest_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        # 每 10MB 打印一次进度
-                        if total_size > 0 and downloaded % (10 * 1024 * 1024) < 8192:
-                            percent = downloaded * 100 / total_size
-                            logger.info(f"  下载进度: {percent:.1f}%")
-        else:
-            # 直接下载小文件
-            dest_path.write_bytes(response.content)
+        # 使用 httpx 同步客户端，支持 HTTP/2 和更好的超时控制
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            if stream:
+                # 流式下载大文件，带进度显示
+                with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    total_size = int(response.headers.get('content-length', 0))
+                    downloaded = 0
+                    
+                    with open(dest_path, 'wb') as f:
+                        for chunk in response.iter_bytes(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                # 每 10MB 打印一次进度
+                                if total_size > 0 and downloaded % (10 * 1024 * 1024) < 8192:
+                                    percent = downloaded * 100 / total_size
+                                    logger.info(f"  下载进度: {percent:.1f}%")
+            else:
+                # 直接下载小文件
+                response = client.get(url)
+                response.raise_for_status()
+                dest_path.write_bytes(response.content)
         
         return True
         
-    except requests.exceptions.Timeout:
+    except httpx.TimeoutException:
         logger.warning(f"下载超时: {url}")
         return False
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"下载失败: {url} - {e}")
+    except httpx.HTTPStatusError as e:
+        logger.warning(f"下载失败 (HTTP {e.response.status_code}): {url}")
+        return False
+    except httpx.RequestError as e:
+        logger.warning(f"下载请求错误: {url} - {e}")
         return False
 
 
@@ -174,7 +183,7 @@ class ONNXEmbeddingModel:
                 logger.warning(f"本地 tokenizer 加载失败: {e}")
         
         if not tokenizer_loaded:
-            # 使用 requests 下载 tokenizer 文件到本地目录
+            # 使用 httpx 下载 tokenizer 文件到本地目录
             logger.info(f"使用镜像站下载 tokenizer: {self.hf_endpoint}/{self.onnx_repo}")
             
             local_model_dir.mkdir(parents=True, exist_ok=True)

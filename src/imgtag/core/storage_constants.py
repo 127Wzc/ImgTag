@@ -125,3 +125,33 @@ def get_mime_type(extension: str) -> str:
     """
     ext = extension.lower().lstrip(".")
     return EXTENSION_TO_MIME.get(ext, DEFAULT_MIME_TYPE)
+
+
+# MIME type to extension mapping (reverse of EXTENSION_TO_MIME)
+MIME_TO_EXTENSION: dict[str, str] = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/bmp": "bmp",
+    "image/svg+xml": "svg",
+    "image/x-icon": "ico",
+    "image/tiff": "tiff",
+}
+
+# Default extension when MIME type is unknown
+DEFAULT_EXTENSION = "jpg"
+
+
+def get_extension_from_mime(mime_type: str) -> str:
+    """Get file extension from MIME type.
+    
+    Args:
+        mime_type: MIME type string (e.g., "image/jpeg").
+        
+    Returns:
+        File extension without leading dot (e.g., "jpg").
+    """
+    # Handle MIME type with charset or other parameters (e.g., "image/jpeg; charset=utf-8")
+    base_mime = mime_type.split(";")[0].strip().lower()
+    return MIME_TO_EXTENSION.get(base_mime, DEFAULT_EXTENSION)

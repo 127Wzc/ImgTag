@@ -400,7 +400,7 @@ onUnmounted(() => {
       <div class="flex items-center justify-between mb-8">
         <div>
           <h1 class="text-2xl font-bold text-foreground">存储端点管理</h1>
-          <p class="text-muted-foreground mt-1">管理多个存储后端，支持 S3/R2/MinIO 等</p>
+          <p class="text-muted-foreground mt-1">管理多个存储后端，支持 S3 兼容存储</p>
         </div>
         <div class="flex gap-2">
           <Button variant="outline" @click="openSyncDialog" :disabled="endpoints.length < 2">
@@ -679,7 +679,7 @@ onUnmounted(() => {
                   />
                   <div>
                     <span class="text-sm">使用路径风格 (Path Style)</span>
-                    <p class="text-xs text-muted-foreground">MinIO/R2/OSS 等推荐开启</p>
+                    <p class="text-xs text-muted-foreground">S3 兼容存储推荐开启</p>
                   </div>
                 </label>
               </template>

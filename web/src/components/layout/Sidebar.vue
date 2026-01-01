@@ -17,7 +17,6 @@ import {
   Menu,
   X,
   Sparkles,
-  Image,
   ChevronUp,
   Activity,
   HardDrive,
@@ -127,9 +126,7 @@ function handleNavClick() {
       <!-- Logo -->
       <div class="h-14 flex items-center justify-between px-3 border-b border-sidebar-border">
         <RouterLink to="/" class="flex items-center gap-2">
-          <div class="w-8 h-8 bg-gradient-to-br from-primary to-violet-600 rounded-lg flex items-center justify-center shadow-lg shadow-primary/25">
-            <Image class="w-4 h-4 text-white" />
-          </div>
+          <img src="/logo.png" alt="ImgTag" class="w-8 h-8 rounded-lg" />
           <span 
             v-if="!themeStore.sidebarCollapsed" 
             class="text-base font-bold text-sidebar-foreground"
@@ -284,9 +281,7 @@ function handleNavClick() {
   <!-- 移动端顶部栏 -->
   <header class="fixed top-0 left-0 right-0 z-50 h-14 bg-sidebar border-b border-sidebar-border flex items-center justify-between px-4 lg:hidden">
     <RouterLink to="/" class="flex items-center gap-2">
-      <div class="w-8 h-8 bg-gradient-to-br from-primary to-violet-600 rounded-lg flex items-center justify-center">
-        <Image class="w-4 h-4 text-white" />
-      </div>
+        <img src="/logo.png" alt="ImgTag" class="w-8 h-8 rounded-lg" />
       <span class="text-base font-bold text-sidebar-foreground">ImgTag</span>
     </RouterLink>
     <Button

@@ -49,7 +49,7 @@ class ExternalImageCreate(BaseModel):
 
 
 
-@router.get("/random")
+@router.get("/images/random")
 async def random_images(
     tags: list[str] = Query([], description="标签列表（AND 关系）"),
     count: int = Query(1, ge=1, le=50, description="返回数量"),
@@ -98,7 +98,7 @@ async def random_images(
         raise HTTPException(status_code=500, detail=f"查询失败: {e}")
 
 
-@router.post("/add-image")
+@router.post("/images")
 async def analyze_image_from_url(
     request: ExternalImageCreate,
     api_user: dict = Depends(require_api_key),
@@ -116,7 +116,6 @@ async def analyze_image_from_url(
     Returns:
         Created image info. If wait_for_result=True, includes AI-generated tags and description.
     """
-    from imgtag.core.storage_constants import EndpointRole
     from imgtag.db.repositories import tag_repository
     
     start_time = time.time()
@@ -125,19 +124,11 @@ async def analyze_image_from_url(
 
     try:
         # 获取目标端点
-        if request.endpoint_id:
-            target_endpoint = await storage_endpoint_repository.get_by_id(session, request.endpoint_id)
-            if not target_endpoint or not target_endpoint.is_enabled:
-                raise HTTPException(400, f"存储端点 {request.endpoint_id} 不可用")
-            # 禁止上传到备份端点
-            if target_endpoint.role == EndpointRole.BACKUP.value:
-                raise HTTPException(400, "不能直接上传到备份端点")
-        else:
-            # 默认使用系统设置的默认上传端点
-            target_endpoint = await storage_endpoint_repository.get_default_upload(session)
-        
-        if not target_endpoint:
-            raise HTTPException(500, "未找到可用的存储端点，请先在系统设置中配置默认上传端点")
+        target_endpoint, err = await storage_endpoint_repository.resolve_upload_endpoint(
+            session, request.endpoint_id
+        )
+        if err:
+            raise HTTPException(400, err)
         
         # Download and save image
         file_path, local_url, content = await upload_service.save_remote_image(
@@ -236,8 +227,16 @@ async def analyze_image_from_url(
             trigger_backup_for_image(new_image.id, target_endpoint.id)
         )
 
-        # Queue for analysis if requested
-        if request.auto_analyze:
+        # 判断是否跳过 AI 分析
+        # 注意：即使用户提供了 tags 和 description，也可以进入队列
+        # 队列会自动识别并跳过 AI 分析，只生成向量（参见 task_queue._process_task）
+        user_provided_content = bool(request.tags and request.description)
+        skip_analyze = not request.auto_analyze
+        
+        if request.auto_analyze or user_provided_content:
+            # 加入任务队列
+            # - 如果用户提供了完整内容，队列会跳过 AI 分析，只生成向量
+            # - 如果需要 AI 分析，队列会执行完整流程
             await task_queue.add_tasks(
                 [new_image.id], 
                 callback_url=request.callback_url,
@@ -258,6 +257,7 @@ async def analyze_image_from_url(
             "description": new_image.description or request.description,
             "width": width,
             "height": height,
+            "skip_analyze": skip_analyze,
             "process_time": f"{process_time:.4f}秒",
         }
     except HTTPException:
@@ -267,7 +267,7 @@ async def analyze_image_from_url(
         raise HTTPException(status_code=500, detail=f"添加失败: {e}")
 
 
-@router.get("/image/{image_id}")
+@router.get("/images/{image_id}")
 async def get_image_info(
     image_id: int,
     api_user: dict = Depends(require_api_key),
@@ -302,7 +302,7 @@ async def get_image_info(
     }
 
 
-@router.get("/search")
+@router.get("/images/search")
 async def search_images(
     keyword: str = Query(None, description="关键词搜索"),
     tags: list[str] = Query([], description="标签筛选"),

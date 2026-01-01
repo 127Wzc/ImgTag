@@ -102,7 +102,7 @@ api_router.include_router(
 from imgtag.api.endpoints import external
 api_router.include_router(
     external.router, 
-    prefix="", 
+    prefix="/external", 
     tags=["外部API"]
 )
 

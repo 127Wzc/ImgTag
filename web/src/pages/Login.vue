@@ -94,6 +94,7 @@ async function handleRegister() {
     <div class="w-full max-w-md space-y-8">
       <!-- Logo -->
       <div class="text-center">
+        <img src="/logo.png" alt="ImgTag" class="w-16 h-16 mx-auto rounded-2xl mb-4" />
         <h1 class="text-4xl font-bold text-primary">ImgTag</h1>
         <p class="mt-2 text-muted-foreground">智能图片标签图床</p>
       </div>

@@ -45,7 +45,7 @@ def upgrade() -> None:
         "storage_endpoints",
         sa.Column("id", sa.Integer(), primary_key=True, comment="主键ID"),
         sa.Column("name", sa.String(50), unique=True, nullable=False, comment="端点名称"),
-        sa.Column("provider", sa.String(20), nullable=False, comment="提供商: local/s3/r2/oss/cos/minio"),
+        sa.Column("provider", sa.String(20), nullable=False, comment="提供商: local/s3"),
         # S3 configuration
         sa.Column("endpoint_url", sa.Text(), nullable=True, comment="端点URL"),
         sa.Column("region", sa.String(50), server_default="auto", nullable=True, comment="区域"),

@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { useUserStore, useThemeStore } from '@/stores'
 import { Button } from '@/components/ui/button'
-import { Image, Moon, Sun, LogIn, ArrowLeft, Menu, X, FolderOpen, Sparkles } from 'lucide-vue-next'
+import { Moon, Sun, LogIn, ArrowLeft, Menu, X, FolderOpen, Sparkles } from 'lucide-vue-next'
 
 defineProps<{
   showBack?: boolean
@@ -29,9 +29,7 @@ const mobileMenuOpen = ref(false)
             </Button>
           </RouterLink>
           <RouterLink to="/" class="flex items-center gap-2">
-            <div class="w-8 h-8 sm:w-9 sm:h-9 bg-gradient-to-br from-primary to-purple-600 rounded-xl flex items-center justify-center shadow-lg shadow-primary/25">
-              <Image class="w-4 h-4 sm:w-5 sm:h-5 text-white" />
-            </div>
+            <img src="/logo.png" alt="ImgTag" class="w-8 h-8 sm:w-9 sm:h-9 rounded-xl" />
             <span class="text-lg sm:text-xl font-bold bg-gradient-to-r from-foreground to-muted-foreground bg-clip-text text-transparent">
               ImgTag
             </span>

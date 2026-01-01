@@ -7,7 +7,7 @@ import { RouterLink } from 'vue-router'
 import { useUserStore } from '@/stores'
 import { Button } from '@/components/ui/button'
 import { 
-  Image, Sparkles, Tags, Search, Shield, Zap, 
+  Sparkles, Tags, Search, Shield, Zap, 
   ArrowRight, Github, FolderOpen 
 } from 'lucide-vue-next'
 
@@ -59,9 +59,7 @@ const features = [
     <header class="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-lg border-b border-border">
       <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
         <RouterLink to="/" class="flex items-center gap-2">
-          <div class="w-8 h-8 bg-gradient-to-br from-violet-500 to-purple-600 rounded-lg flex items-center justify-center">
-            <Image class="w-4 h-4 text-white" />
-          </div>
+          <img src="/logo.png" alt="ImgTag" class="w-8 h-8 rounded-lg" />
           <span class="font-bold text-foreground">ImgTag</span>
         </RouterLink>
         
@@ -104,9 +102,7 @@ const features = [
       <div class="relative max-w-6xl mx-auto px-6 py-20 lg:py-32">
         <div class="text-center">
           <!-- Logo -->
-          <div class="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-violet-500 to-purple-600 rounded-2xl shadow-xl mb-8">
-            <Image class="w-10 h-10 text-white" />
-          </div>
+          <img src="/logo.png" alt="ImgTag" class="w-20 h-20 rounded-2xl shadow-xl mb-8" />
           
           <!-- Title -->
           <h1 class="text-4xl lg:text-6xl font-bold text-foreground mb-6">

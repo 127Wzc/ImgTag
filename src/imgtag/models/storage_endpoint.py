@@ -1,6 +1,6 @@
 """Storage endpoint model for multi-endpoint storage support.
 
-Supports multiple S3-compatible endpoints (AWS S3, Cloudflare R2, MinIO, etc.)
+Supports multiple S3-compatible storage endpoints.
 with encryption for sensitive credentials.
 """
 
@@ -24,7 +24,7 @@ class StorageEndpoint(Base, TimestampMixin):
     Attributes:
         id: Primary key.
         name: Unique endpoint name for identification.
-        provider: Storage provider type (local/s3/r2/oss/cos/minio).
+        provider: Storage provider type (local/s3).
         endpoint_url: S3-compatible endpoint URL.
         region: AWS region or equivalent.
         bucket_name: Target bucket name (also used as URL path for local provider).
@@ -53,7 +53,7 @@ class StorageEndpoint(Base, TimestampMixin):
         String(50), unique=True, nullable=False, comment="端点名称"
     )
     provider: Mapped[str] = mapped_column(
-        String(20), nullable=False, comment="提供商: local/s3/r2/oss/cos/minio"
+        String(20), nullable=False, comment="提供商: local/s3"
     )
 
     # S3-compatible configuration (stored encrypted)

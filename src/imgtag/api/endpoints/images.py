@@ -32,7 +32,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import get_current_user, require_admin
 from imgtag.core.logging_config import get_logger, get_perf_logger
-from imgtag.core.storage_constants import StorageProvider
+from imgtag.core.storage_constants import (
+    StorageProvider,
+    get_extension_from_mime,
+    SUPPORTED_IMAGE_EXTENSIONS,
+)
 from imgtag.db import get_async_session
 from imgtag.db.repositories import (
     image_location_repository,
@@ -251,8 +255,11 @@ async def analyze_and_create_from_url(
 ):
     """Analyze and create image from URL (requires login).
 
+    Supports specifying target storage endpoint or using system default.
+    Category subdirectory is automatically applied if category_id is provided.
+
     Args:
-        request: URL and analysis options.
+        request: URL and upload options.
         background_tasks: FastAPI background tasks.
         user: Current user.
         session: Database session.
@@ -261,93 +268,128 @@ async def analyze_and_create_from_url(
         Created image response.
     """
     start_time = time.time()
-    logger.info(f"添加远程图像任务: {request.image_url}")
+    logger.info(
+        f"添加远程图像: {request.image_url}, endpoint_id={request.endpoint_id}, "
+        f"category_id={request.category_id}, is_public={request.is_public}"
+    )
 
     try:
         tags = request.tags or []
         description = request.description or ""
 
-        # 下载远程图片到本地
-        file_path, access_url, file_content = await upload_service.save_remote_image(request.image_url)
-        
-        # 提取图片尺寸
-        width, height = upload_service.extract_image_dimensions(file_content)
+        # 下载远程图片（流式获取内容，不保存中间文件）
+        file_content, mime_type = await upload_service.fetch_remote_image(request.image_url)
         
         # 计算文件哈希和大小 (线程池执行避免阻塞)
         file_hash = await asyncio.to_thread(lambda: hashlib.md5(file_content).hexdigest())
         file_size = round(len(file_content) / (1024 * 1024), 2)
         
-        # 获取文件类型
-        file_type = file_path.split(".")[-1] if "." in file_path else "jpg"
+        # 根据 MIME 类型确定扩展名（使用统一常量）
+        file_type = get_extension_from_mime(mime_type)
+        
+        # 提取图片尺寸
+        width, height = upload_service.extract_image_dimensions(file_content)
 
-        # Create initial record (without legacy storage fields)
+        # Get target endpoint (use specified or default)
+        target_endpoint, err = await storage_endpoint_repository.resolve_upload_endpoint(
+            session, request.endpoint_id
+        )
+        if err:
+            raise HTTPException(400, err)
+
+        # Get category code for subdirectory (if category specified)
+        category_code = None
+        if request.category_id:
+            from imgtag.core.category_cache import get_category_code_cached
+            category_code = await get_category_code_cached(session, request.category_id)
+        
+        # Generate object key (hash-based path)
+        object_key = storage_service.generate_object_key(file_hash, file_type)
+        full_object_key = storage_service.get_full_object_key(object_key, category_code)
+        
+        # Upload to target endpoint
+        upload_success = await storage_service.upload_to_endpoint(
+            file_content, full_object_key, target_endpoint
+        )
+        
+        # Fallback to local if remote upload fails
+        if not upload_success:
+            logger.warning(f"上传到端点 {target_endpoint.name} 失败，尝试本地存储")
+            local_endpoint = await storage_endpoint_repository.get_by_name(session, StorageProvider.LOCAL)
+            if local_endpoint:
+                target_endpoint = local_endpoint
+                upload_success = await storage_service.upload_to_endpoint(
+                    file_content, full_object_key, target_endpoint
+                )
+        
+        if not upload_success:
+            raise HTTPException(status_code=500, detail="文件保存失败")
+        
+        # Build access URL (only for local endpoints)
+        access_url = None
+        if target_endpoint.provider == StorageProvider.LOCAL:
+            access_url = f"/uploads/{full_object_key}"
+
+        # Create image record
         new_image = await image_repository.create_image(
             session,
-            original_url=request.image_url,  # 原始 URL
+            original_url=request.image_url,
             file_hash=file_hash,
             file_type=file_type,
             file_size=file_size,
             width=width,
             height=height,
             description=description,
-            embedding=None,  # Pending analysis
+            embedding=None,
             uploaded_by=user.get("id"),
+            is_public=request.is_public,
         )
         
-        # Create local ImageLocation record
-        local_endpoint = await storage_endpoint_repository.get_by_name(session, StorageProvider.LOCAL)
-        if local_endpoint:
-            local_object_key = file_path.replace("\\", "/").lstrip("/")
-            if local_object_key.startswith("uploads/"):
-                local_object_key = local_object_key[8:]
-            
-            await image_location_repository.create(
-                session,
+        # Create ImageLocation record
+        await image_location_repository.create(
+            session,
+            image_id=new_image.id,
+            endpoint_id=target_endpoint.id,
+            object_key=full_object_key,
+            category_code=category_code,
+            is_primary=True,
+            sync_status="synced",
+            synced_at=datetime.now(timezone.utc),
+        )
+
+        # Commit core data
+        await session.commit()
+
+        # Background: set tags and queue for analysis
+        asyncio.create_task(
+            _post_upload_process(
                 image_id=new_image.id,
-                endpoint_id=local_endpoint.id,
-                object_key=local_object_key,
-                is_primary=True,
-                sync_status="synced",
-                synced_at=datetime.now(timezone.utc),
+                user_id=user.get("id"),
+                tags=tags,
+                category_id=request.category_id,
+                width=width,
+                height=height,
+                auto_analyze=request.auto_analyze,
+                log=logger,
             )
-
-        # Set initial tags
-        if tags:
-            await image_tag_repository.set_image_tags(
-                session,
-                new_image.id,
-                tags,
-                source="user",
-                added_by=user.get("id"),
-            )
-
-        # Set category if provided (与手动上传保持一致)
-        if request.category_id:
-            await image_tag_repository.add_tag_to_image(
-                session,
-                new_image.id,
-                request.category_id,
-                source="user",
-                sort_order=0,
-                added_by=user.get("id"),
-            )
-
-        # Queue for analysis
-        if request.auto_analyze:
-            await task_queue.add_tasks([new_image.id])
-            if not task_queue._running:
-                background_tasks.add_task(task_queue.start_processing)
+        )
+        
+        # Trigger backup to backup endpoints
+        from imgtag.services.backup_service import trigger_backup_for_image
+        asyncio.create_task(trigger_backup_for_image(new_image.id, target_endpoint.id))
 
         total_time = time.time() - start_time
-        perf_logger.info(f"URL 图像添加任务耗时: {total_time:.4f}秒")
+        perf_logger.info(f"URL 图像上传耗时: {total_time:.4f}秒")
 
         return UploadAnalyzeResponse(
             id=new_image.id,
-            image_url=access_url,  # 返回本地路径
+            image_url=access_url,
             tags=tags,
             description=description,
             process_time=f"{total_time:.4f}秒",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"添加图像任务失败: {e}")
         raise HTTPException(status_code=500, detail=f"添加任务失败: {e}")
@@ -478,16 +520,11 @@ async def upload_and_analyze(
         ext = file.filename.split(".")[-1].lower() if "." in file.filename else "jpg"
 
         # Get target endpoint (use specified or default)
-        if endpoint_id:
-            target_endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
-            if not target_endpoint or not target_endpoint.is_enabled:
-                raise HTTPException(400, f"存储端点 {endpoint_id} 不可用")
-            # Check if backup endpoint (not allowed for direct upload)
-            from imgtag.core.storage_constants import EndpointRole
-            if target_endpoint.role == EndpointRole.BACKUP.value:
-                raise HTTPException(400, "不能直接上传到备份端点")
-        else:
-            target_endpoint = await storage_endpoint_repository.get_default_upload(session)
+        target_endpoint, err = await storage_endpoint_repository.resolve_upload_endpoint(
+            session, endpoint_id
+        )
+        if err:
+            raise HTTPException(400, err)
         
         # Get category code for subdirectory (if category specified)
         category_code = None
@@ -625,14 +662,18 @@ async def upload_and_analyze(
 async def upload_zip(
     file: UploadFile = File(..., description="ZIP 压缩包"),
     category_id: Optional[int] = Form(default=None, description="主分类ID"),
+    endpoint_id: Optional[int] = Form(default=None, description="目标存储端点ID (默认使用系统默认端点)"),
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Upload ZIP file with images (requires login).
 
+    Supports specifying target storage endpoint or using system default.
+
     Args:
         file: ZIP file.
         category_id: Category ID for all images.
+        endpoint_id: Target storage endpoint ID.
         user: Current user.
         session: Database session.
 
@@ -640,20 +681,29 @@ async def upload_zip(
         Upload results summary.
     """
     start_time = time.time()
-    logger.info(f"上传 ZIP 文件: {file.filename}, category_id={category_id}")
+    logger.info(f"上传 ZIP 文件: {file.filename}, category_id={category_id}, endpoint_id={endpoint_id}")
 
     if not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="只支持 .zip 格式文件")
 
     try:
         zip_content = await file.read()
-        image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 
         uploaded_ids = []
         failed_files = []
         
-        # Query local endpoint ONCE before the loop (optimization)
-        local_endpoint = await storage_endpoint_repository.get_by_name(session, StorageProvider.LOCAL)
+        # Get target endpoint (use specified or default)
+        target_endpoint, err = await storage_endpoint_repository.resolve_upload_endpoint(
+            session, endpoint_id
+        )
+        if err:
+            raise HTTPException(400, err)
+        
+        # Get category code for subdirectory
+        category_code = None
+        if category_id:
+            from imgtag.core.category_cache import get_category_code_cached
+            category_code = await get_category_code_cached(session, category_id)
 
         with zipfile.ZipFile(io.BytesIO(zip_content), "r") as zf:
             for zip_info in zf.infolist():
@@ -665,18 +715,28 @@ async def upload_zip(
                     continue
 
                 ext = os.path.splitext(filename)[1].lower()
-                if ext not in image_extensions:
+                if ext not in SUPPORTED_IMAGE_EXTENSIONS:
                     continue
 
                 try:
                     file_content = zf.read(zip_info.filename)
-
-                    file_path, access_url, file_type, width, height = (
-                        await upload_service.save_uploaded_file(file_content, filename)
-                    )
-
+                    
+                    # 计算哈希和大小
                     file_size = round(len(file_content) / (1024 * 1024), 2)
                     file_hash = await asyncio.to_thread(lambda c=file_content: hashlib.md5(c).hexdigest())
+                    
+                    # 提取图片尺寸和格式
+                    width, height = upload_service.extract_image_dimensions(file_content)
+                    file_type = ext.lstrip(".")
+                    
+                    # Generate object key with category prefix
+                    object_key = storage_service.generate_object_key(file_hash, file_type)
+                    full_object_key = storage_service.get_full_object_key(object_key, category_code)
+                    
+                    # Upload to target endpoint
+                    await storage_service.upload_to_endpoint(
+                        file_content, full_object_key, target_endpoint
+                    )
 
                     new_image = await image_repository.create_image(
                         session,
@@ -689,21 +749,17 @@ async def upload_zip(
                         uploaded_by=user.get("id"),
                     )
                     
-                    # Create local ImageLocation record (no DB query in loop)
-                    if local_endpoint:
-                        local_object_key = file_path.replace("\\", "/").lstrip("/")
-                        if local_object_key.startswith("uploads/"):
-                            local_object_key = local_object_key[8:]
-                        
-                        await image_location_repository.create(
-                            session,
-                            image_id=new_image.id,
-                            endpoint_id=local_endpoint.id,
-                            object_key=local_object_key,
-                            is_primary=True,
-                            sync_status="synced",
-                            synced_at=datetime.now(timezone.utc),
-                        )
+                    # Create ImageLocation record
+                    await image_location_repository.create(
+                        session,
+                        image_id=new_image.id,
+                        endpoint_id=target_endpoint.id,
+                        object_key=full_object_key,
+                        category_code=category_code,
+                        is_primary=True,
+                        sync_status="synced",
+                        synced_at=datetime.now(timezone.utc),
+                    )
 
                     if category_id:
                         await image_tag_repository.add_tag_to_image(
@@ -719,6 +775,9 @@ async def upload_zip(
                 except Exception as e:
                     logger.error(f"处理 ZIP 内文件 {filename} 失败: {e}")
                     failed_files.append(filename)
+
+        # Commit all in one transaction
+        await session.commit()
 
         total_time = time.time() - start_time
         perf_logger.info(
@@ -737,6 +796,8 @@ async def upload_zip(
         }
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="无效的 ZIP 文件")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"处理 ZIP 文件失败: {e}")
         raise HTTPException(status_code=500, detail=f"处理 ZIP 失败: {e}")

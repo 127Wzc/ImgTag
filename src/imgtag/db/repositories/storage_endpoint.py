@@ -3,11 +3,13 @@
 Provides CRUD and specialized queries for storage_endpoints table.
 """
 
+from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from imgtag.core.storage_constants import EndpointRole
 from imgtag.db.repositories.base import BaseRepository
 from imgtag.models.storage_endpoint import StorageEndpoint
 
@@ -70,7 +72,6 @@ class StorageEndpointRepository(BaseRepository[StorageEndpoint]):
         session: AsyncSession,
     ) -> Sequence[StorageEndpoint]:
         """获取所有启用的备份端点。"""
-        from imgtag.core.storage_constants import EndpointRole
         
         stmt = (
             select(self.model)
@@ -80,6 +81,41 @@ class StorageEndpointRepository(BaseRepository[StorageEndpoint]):
         )
         result = await session.execute(stmt)
         return result.scalars().all()
+
+    async def resolve_upload_endpoint(
+        self,
+        session: AsyncSession,
+        endpoint_id: Optional[int] = None,
+    ) -> tuple[Optional[StorageEndpoint], Optional[str]]:
+        """解析上传目标端点。
+        
+        如果 endpoint_id 为空，返回系统默认上传端点。
+        如果 endpoint_id 指定，验证该端点是否可用于上传：
+        - 必须存在且已启用
+        - 不能是备份端点
+        
+        Args:
+            session: 数据库会话
+            endpoint_id: 可选的目标端点 ID
+            
+        Returns:
+            tuple[endpoint, error_message]:
+            - 成功: (StorageEndpoint, None)
+            - 失败: (None, error_message)
+        """
+        
+        if endpoint_id:
+            endpoint = await self.get_by_id(session, endpoint_id)
+            if not endpoint or not endpoint.is_enabled:
+                return None, f"存储端点 {endpoint_id} 不可用"
+            if endpoint.role == EndpointRole.BACKUP.value:
+                return None, "不能直接上传到备份端点"
+            return endpoint, None
+        else:
+            endpoint = await self.get_default_upload(session)
+            if not endpoint:
+                return None, "未配置可用的存储端点"
+            return endpoint, None
 
     async def set_default_upload(
         self,
@@ -107,7 +143,6 @@ class StorageEndpointRepository(BaseRepository[StorageEndpoint]):
         error: Optional[str] = None,
     ) -> None:
         """Update endpoint health status."""
-        from datetime import datetime, timezone
 
         endpoint = await self.get_by_id(session, endpoint_id)
         if endpoint:
