@@ -16,7 +16,7 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime
-import threading
+
 
 import httpx
 
@@ -75,7 +75,7 @@ class TaskQueueService:
         self._queue: List[AnalysisTask] = []
         self._processing: Dict[int, AnalysisTask] = {}
         self._completed: List[AnalysisTask] = []
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
         self._running = False
         self._workers: List[asyncio.Task] = []
         self._initialized = True
@@ -131,7 +131,7 @@ class TaskQueueService:
         added = 0
         
         async with async_session_maker() as session:
-            with self._lock:
+            async with self._lock:
                 for image_id in image_ids:
                     # 检查是否已在队列中
                     if any(t.image_id == image_id for t in self._queue):
@@ -178,7 +178,7 @@ class TaskQueueService:
         max_workers = await self.get_max_workers()
         batch_interval = await self.get_batch_interval()
         
-        with self._lock:
+        async with self._lock:
             pending = [t for t in self._queue]
             processing = list(self._processing.values())
             recent_completed = self._completed[-50:]
@@ -224,15 +224,15 @@ class TaskQueueService:
         self._running = False
         logger.info("停止队列处理")
     
-    def clear_queue(self):
+    async def clear_queue(self):
         """清空待处理队列"""
-        with self._lock:
+        async with self._lock:
             self._queue.clear()
             logger.info("队列已清空")
     
-    def clear_completed(self):
+    async def clear_completed(self):
         """清空已完成列表"""
-        with self._lock:
+        async with self._lock:
             self._completed.clear()
             logger.info("已完成列表已清空")
     
@@ -241,7 +241,7 @@ class TaskQueueService:
         logger.info(f"Worker {worker_id} 启动")
         
         while self._running:
-            task = self._get_next_task()
+            task = await self._get_next_task()
             
             if task is None:
                 await asyncio.sleep(0.5)
@@ -263,7 +263,7 @@ class TaskQueueService:
                 except Exception as db_e:
                     logger.error(f"更新任务 {task.id} 状态失败: {str(db_e)}")
                 
-                with self._lock:
+                async with self._lock:
                     if task.image_id in self._processing:
                         del self._processing[task.image_id]
                     self._completed.append(task)
@@ -275,9 +275,9 @@ class TaskQueueService:
         
         logger.info(f"Worker {worker_id} 停止")
     
-    def _get_next_task(self) -> Optional[AnalysisTask]:
+    async def _get_next_task(self) -> Optional[AnalysisTask]:
         """获取下一个待处理任务"""
-        with self._lock:
+        async with self._lock:
             if not self._queue:
                 return None
             
@@ -483,7 +483,7 @@ class TaskQueueService:
             except Exception as e:
                 logger.error(f"更新任务 {task.id} 状态失败: {str(e)}")
             
-            with self._lock:
+            async with self._lock:
                 if task.image_id in self._processing:
                     del self._processing[task.image_id]
                 self._completed.append(task)
@@ -510,7 +510,7 @@ class TaskQueueService:
             except Exception as db_e:
                 logger.error(f"更新任务 {task.id} 状态失败: {str(db_e)}")
             
-            with self._lock:
+            async with self._lock:
                 if task.image_id in self._processing:
                     del self._processing[task.image_id]
                 self._completed.append(task)

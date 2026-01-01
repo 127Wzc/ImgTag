@@ -124,7 +124,7 @@ async def clear_queue(user: dict = Depends(get_current_user)):
     Returns:
         Clear message.
     """
-    task_queue.clear_queue()
+    await task_queue.clear_queue()
     return {"message": "队列已清空"}
 
 
@@ -138,7 +138,7 @@ async def clear_completed(user: dict = Depends(get_current_user)):
     Returns:
         Clear message.
     """
-    task_queue.clear_completed()
+    await task_queue.clear_completed()
     return {"message": "已完成列表已清空"}
 
 

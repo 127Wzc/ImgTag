@@ -275,40 +275,29 @@ class StorageService:
             endpoints = await storage_endpoint_repository.get_healthy_for_read(session)
             endpoint_map = {ep.id: ep for ep in endpoints}
             
-            # Find local endpoint from healthy list
-            local_endpoint = None
-            for ep in endpoints:
-                if ep.provider == StorageProvider.LOCAL:
-                    local_endpoint = ep
-                    break
+            # Use weighted selection to pick best location
+            selected = _select_by_weight(locations, endpoint_map)
+            if not selected:
+                return None
             
-            # Try local file first
-            if local_endpoint:
-                for loc in locations:
-                    if loc.endpoint_id == local_endpoint.id:
-                        base_path = self._resolve_local_path(local_endpoint)
-                        full_key = self._apply_path_prefix(loc.object_key, local_endpoint.path_prefix)
-                        local_path = os.path.join(base_path, full_key)
-                        if os.path.exists(local_path):
-                            def _read():
-                                with open(local_path, "rb") as f:
-                                    return f.read()
-                            return await asyncio.to_thread(_read)
-                        break
+            endpoint = endpoint_map.get(selected.endpoint_id)
+            if not endpoint:
+                return None
             
-            # Try remote endpoints with weighted selection (excluding local)
-            remote_locations = [
-                loc for loc in locations 
-                if loc.endpoint_id in endpoint_map 
-                and endpoint_map[loc.endpoint_id].provider != StorageProvider.LOCAL
-            ]
-            selected = _select_by_weight(remote_locations, endpoint_map)
-            if selected:
-                endpoint = endpoint_map.get(selected.endpoint_id)
-                if endpoint:
-                    content = await self.download_from_endpoint(selected.object_key, endpoint)
-                    if content:
-                        return content
+            # Read based on endpoint type
+            if endpoint.provider == StorageProvider.LOCAL:
+                base_path = self._resolve_local_path(endpoint)
+                full_key = self._apply_path_prefix(selected.object_key, endpoint.path_prefix)
+                local_path = os.path.join(base_path, full_key)
+                if os.path.exists(local_path):
+                    def _read():
+                        with open(local_path, "rb") as f:
+                            return f.read()
+                    return await asyncio.to_thread(_read)
+            else:
+                content = await self.download_from_endpoint(selected.object_key, endpoint)
+                if content:
+                    return content
         
         return None
 
