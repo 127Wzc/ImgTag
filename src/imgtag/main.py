@@ -25,7 +25,7 @@ from imgtag.core.logging_config import get_logger
 from imgtag.core.storage_constants import get_mime_type, StorageProvider
 from imgtag.db.database import close_db, async_session_maker
 from imgtag.db.repositories import task_repository, config_repository, storage_endpoint_repository
-from imgtag.services.task_queue import task_queue, AnalysisTask
+from imgtag.services.task_queue import task_queue, QUEUE_TASK_TYPES
 from imgtag.services.auth_service import init_default_admin
 from imgtag.services.backup_service import schedule_daily_backup
 from imgtag.services.storage_sync_service import storage_sync_service
@@ -131,41 +131,30 @@ async def lifespan(app: FastAPI):
     
     # 恢复未完成的任务
     try:
-        
         async with async_session_maker() as session:
             # 获取未完成的任务（pending 或 processing 状态）
             pending_tasks = await task_repository.get_pending_and_processing(session)
         
         if pending_tasks:
-            logger.info(f"恢复 {len(pending_tasks)} 个未完成的任务")
+            logger.info(f"发现 {len(pending_tasks)} 个未完成的任务")
             
-            # 直接添加到队列，不创建新的数据库记录
-            restored = 0
-            sync_restored = 0
+            # 统计各类型任务数量
+            analysis_count = sum(1 for t in pending_tasks if t.type in QUEUE_TASK_TYPES)
+            sync_count = sum(1 for t in pending_tasks if t.type == "storage_sync")
+            
+            # 处理 storage_sync 任务（单独的服务）
             for task_data in pending_tasks:
-                payload = task_data.payload or {}
-                
-                # Handle storage_sync tasks separately
                 if task_data.type == "storage_sync":
                     asyncio.create_task(storage_sync_service._process_sync_task(task_data.id))
-                    sync_restored += 1
-                    continue
-                
-                # Handle analyze_image/rebuild_vector tasks
-                image_id = payload.get("image_id")
-                if image_id:
-                    task = AnalysisTask(
-                        image_id=image_id,
-                        task_type=task_data.type or "analyze_image",
-                        id=task_data.id,
-                    )
-                    task_queue._queue.append(task)
-                    restored += 1
             
-            logger.info(f"成功恢复 {restored} 个分析任务, {sync_restored} 个同步任务到队列")
+            # PostgreSQL 队列的 start_processing 内置了恢复机制
+            # 会自动处理 analyze_image/rebuild_vector 类型的任务
+            if analysis_count > 0:
+                asyncio.create_task(task_queue.start_processing())
+                logger.info(f"启动队列处理，{analysis_count} 个分析任务待处理")
             
-            # 启动处理
-            asyncio.create_task(task_queue.start_processing())
+            if sync_count > 0:
+                logger.info(f"已启动 {sync_count} 个同步任务")
         else:
             logger.info(f"没有未完成的任务需要恢复")
     except Exception as e:

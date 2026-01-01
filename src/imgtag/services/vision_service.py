@@ -177,7 +177,7 @@ class VisionService:
         return await config_cache.get("vision_model", "gpt-4o-mini") or "gpt-4o-mini"
     
     async def _get_prompt(self, category_id: int | None = None) -> str:
-        """获取分析提示词（全局 + 分类专用组合）
+        """获取分析提示词（全局 + 分类专用 + 禁用标签）
         
         Args:
             category_id: 可选的分类 ID (level=0 的 Tag)
@@ -185,39 +185,77 @@ class VisionService:
         Returns:
             组合后的提示词字符串
         """
-        default_prompt = """请分析这张图片，并按以下格式返回JSON响应:
+        default_prompt = """# Role
+你是一位专业的图像内容分析师。请分析用户上传的图片，提取结构化信息。
+
+# Task
+请识别图片内容，提取以下信息：
+
+1. **description**: 用中文详细描述图片内容，包括主体、场景、构图、色调等要素
+2. **tags**: 提取 5-10 个关键标签，使用中文，标签应涵盖主题、风格、场景、元素等
+
+# Output Format
+请严格按以下 JSON 格式返回，不要包含 markdown 代码块标记：
 {
     "tags": ["标签1", "标签2", "标签3", ...],
     "description": "详细的图片描述文本"
-}
-
-要求：
-1. tags: 提取5-10个关键标签，使用中文
-2. description: 用中文详细描述图片内容
-
-请只返回JSON格式，不要添加任何其他文字。"""
+}"""
         
         # 获取全局提示词
         base_prompt = await config_cache.get("vision_prompt", default_prompt) or default_prompt
         
-        # 如果有分类 ID，尝试获取分类专用提示词
-        if category_id:
-            try:
-                from imgtag.db.database import async_session_maker
-                from imgtag.db.repositories import tag_repository
+        # 查询系统级标签和分类提示词（共用一个会话）
+        from imgtag.db.database import async_session_maker
+        from imgtag.db.repositories import tag_repository
+        
+        try:
+            async with async_session_maker() as session:
+                # 获取禁用标签（带缓存）
+                forbidden_tags = await self._get_forbidden_tags_cached(session)
+                if forbidden_tags:
+                    forbidden_section = f"\n\n# 禁用标签\n以下是系统保留的分类/分辨率标签，**禁止**在 tags 中使用：\n{', '.join(forbidden_tags)}"
+                    base_prompt += forbidden_section
                 
-                async with async_session_maker() as session:
+                # 获取分类专用提示词
+                if category_id:
                     category = await tag_repository.get_by_id(session, category_id)
                     if category and category.level == 0 and category.prompt:
-                        # 组合全局 + 分类提示词
                         logger.debug(f"使用分类专用提示词: {category.name}")
                         return f"{base_prompt}\n\n### 分类特定要求\n{category.prompt}"
-            except Exception as e:
-                logger.warning(f"获取分类提示词失败: {e}")
+        except Exception as e:
+            logger.warning(f"获取提示词失败: {e}")
         
         return base_prompt
     
-    async def analyze_image_url(self, image_url: str) -> ImageAnalysisResult:
+    # 禁用标签缓存
+    _forbidden_tags_cache: list[str] | None = None
+    _forbidden_tags_cache_time: float = 0
+    _CACHE_TTL = 300  # 5分钟缓存
+    
+    async def _get_forbidden_tags_cached(self, session) -> list[str]:
+        """获取系统级标签名称列表（带缓存，5分钟过期）"""
+        now = time.time()
+        if self._forbidden_tags_cache is not None and (now - self._forbidden_tags_cache_time) < self._CACHE_TTL:
+            return self._forbidden_tags_cache
+        
+        try:
+            from sqlalchemy import select
+            from imgtag.models.tag import Tag
+            
+            stmt = select(Tag.name).where(Tag.level.in_([0, 1]))
+            result = await session.execute(stmt)
+            self._forbidden_tags_cache = [row[0] for row in result.fetchall()]
+            self._forbidden_tags_cache_time = now
+            return self._forbidden_tags_cache
+        except Exception as e:
+            logger.warning(f"获取禁用标签列表失败: {e}")
+            return self._forbidden_tags_cache or []
+    
+    async def analyze_image_url(
+        self, 
+        image_url: str,
+        category_id: int | None = None,
+    ) -> ImageAnalysisResult:
         """Analyze a remote image by URL.
         
         Downloads the image first, then analyzes using base64 method.
@@ -225,6 +263,7 @@ class VisionService:
 
         Args:
             image_url: URL of the image to analyze.
+            category_id: 可选的分类 ID (level=0 的 Tag)，用于获取分类专用提示词
 
         Returns:
             ImageAnalysisResult with tags and description.
@@ -263,8 +302,8 @@ class VisionService:
                 
                 logger.debug(f"下载图片成功: {len(image_data)} bytes, {content_type}")
             
-            # 使用 base64 方法分析
-            return await self.analyze_image_base64(image_data, content_type)
+            # 使用 base64 方法分析（传递 category_id）
+            return await self.analyze_image_base64(image_data, content_type, category_id)
 
         except httpx.ConnectError as e:
             logger.error(f"下载图片连接失败: {e}")
@@ -276,8 +315,19 @@ class VisionService:
             logger.error(f"远程图片分析失败: {e}")
             raise
     
-    async def analyze_image_base64(self, image_data: bytes, mime_type: str = "image/jpeg") -> ImageAnalysisResult:
-        """分析 Base64 编码的图像（支持 OpenAI 和 Gemini 原生格式）"""
+    async def analyze_image_base64(
+        self, 
+        image_data: bytes, 
+        mime_type: str = "image/jpeg",
+        category_id: int | None = None,
+    ) -> ImageAnalysisResult:
+        """分析 Base64 编码的图像（支持 OpenAI 和 Gemini 原生格式）
+        
+        Args:
+            image_data: 图片字节数据
+            mime_type: MIME 类型
+            category_id: 可选的分类 ID (level=0 的 Tag)，用于获取分类专用提示词
+        """
         original_size = len(image_data)
         logger.info(f"分析 Base64 图像, 类型: {mime_type}, 原始大小: {original_size/1024:.1f} KB")
         
@@ -300,7 +350,7 @@ class VisionService:
             api_base = await config_cache.get("vision_api_base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"
             api_key = await config_cache.get("vision_api_key", "") or ""
             model = await self._get_model()
-            prompt = await self._get_prompt()
+            prompt = await self._get_prompt(category_id)  # 传递分类 ID
             
             if not api_key:
                 raise ValueError("视觉模型 API 密钥未配置")
@@ -318,7 +368,7 @@ class VisionService:
             logger.debug(f"  - API Key: {api_key_preview}")
             logger.debug(f"  - Model: {model}")
             logger.debug(f"  - Image: Base64 ({len(image_data)} bytes, {mime_type})")
-            logger.debug(f"  - Prompt: {prompt[:100]}...")
+            logger.debug(f"  - Prompt: {prompt[:500]}...")
             
             # 使用 httpx 直接请求，支持原生 Gemini 响应
             async with httpx.AsyncClient(timeout=120.0) as client:

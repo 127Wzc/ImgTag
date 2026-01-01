@@ -263,6 +263,188 @@ class TaskRepository(BaseRepository[Task]):
         result = await session.execute(stmt)
         return result.rowcount or 0
 
+    async def claim_next_task(
+        self,
+        session: AsyncSession,
+        task_types: list[str],
+    ) -> Optional[Task]:
+        """Atomically claim the next pending task using FOR UPDATE SKIP LOCKED.
+        
+        This ensures no two workers can claim the same task.
+        
+        Args:
+            session: Database session.
+            task_types: List of task types to process.
+            
+        Returns:
+            Claimed task (already updated to 'processing'), or None.
+        """
+        # Use FOR UPDATE SKIP LOCKED to atomically claim a task
+        stmt = (
+            select(Task)
+            .where(Task.status == "pending")
+            .where(Task.type.in_(task_types))
+            .order_by(Task.created_at)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        result = await session.execute(stmt)
+        task = result.scalar_one_or_none()
+        
+        if task:
+            task.status = "processing"
+            await session.flush()
+            image_id = task.payload.get("image_id") if task.payload else None
+            logger.debug(f"抢占任务 {task.id} (image_id={image_id})")
+        
+        return task
+
+    async def reset_stuck_tasks(
+        self,
+        session: AsyncSession,
+        task_types: list[str],
+        stuck_minutes: int = 10,
+    ) -> int:
+        """Reset stuck 'processing' tasks back to 'pending'.
+        
+        Called on service startup to recover tasks that were interrupted.
+        
+        Args:
+            session: Database session.
+            task_types: Task types to check.
+            stuck_minutes: Minutes after which a processing task is considered stuck.
+            
+        Returns:
+            Number of tasks reset.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=stuck_minutes)
+        stmt = (
+            update(Task)
+            .where(Task.status == "processing")
+            .where(Task.type.in_(task_types))
+            .where(Task.updated_at < cutoff)
+            .values(status="pending")
+        )
+        result = await session.execute(stmt)
+        count = result.rowcount or 0
+        if count > 0:
+            logger.info(f"重置了 {count} 个 stuck 任务 (超过 {stuck_minutes} 分钟)")
+        return count
+
+    async def has_pending_for_image(
+        self,
+        session: AsyncSession,
+        image_id: int,
+        task_types: list[str],
+    ) -> bool:
+        """Check if there's already a pending/processing task for an image.
+        
+        Args:
+            session: Database session.
+            image_id: Image ID to check.
+            task_types: Task types to check.
+            
+        Returns:
+            True if a pending/processing task exists.
+        """
+        from sqlalchemy import func
+        
+        stmt = (
+            select(func.count())
+            .select_from(Task)
+            .where(Task.status.in_(["pending", "processing"]))
+            .where(Task.type.in_(task_types))
+            .where(Task.payload["image_id"].as_integer() == image_id)
+        )
+        result = await session.execute(stmt)
+        count = result.scalar() or 0
+        return count > 0
+
+    async def get_stats_by_type(
+        self,
+        session: AsyncSession,
+        task_types: list[str],
+    ) -> dict[str, int]:
+        """Get task statistics by status for specific task types.
+        
+        Args:
+            session: Database session.
+            task_types: Task types to count.
+            
+        Returns:
+            Dict with pending, processing, completed, failed counts.
+        """
+        from sqlalchemy import func, case
+        
+        stmt = (
+            select(
+                func.count(case((Task.status == "pending", 1))).label("pending"),
+                func.count(case((Task.status == "processing", 1))).label("processing"),
+                func.count(case((Task.status == "completed", 1))).label("completed"),
+                func.count(case((Task.status == "failed", 1))).label("failed"),
+            )
+            .select_from(Task)
+            .where(Task.type.in_(task_types))
+        )
+        result = await session.execute(stmt)
+        row = result.one()
+        return {
+            "pending": row.pending or 0,
+            "processing": row.processing or 0,
+            "completed": row.completed or 0,
+            "failed": row.failed or 0,
+        }
+
+    async def delete_by_status(
+        self,
+        session: AsyncSession,
+        status: str,
+        task_types: list[str],
+    ) -> int:
+        """Delete all tasks with a specific status.
+        
+        Args:
+            session: Database session.
+            status: Status to match (pending, completed, failed).
+            task_types: Task types to delete.
+            
+        Returns:
+            Number of deleted tasks.
+        """
+        stmt = (
+            delete(Task)
+            .where(Task.status == status)
+            .where(Task.type.in_(task_types))
+        )
+        result = await session.execute(stmt)
+        return result.rowcount or 0
+
+    async def get_recent_completed(
+        self,
+        session: AsyncSession,
+        task_types: list[str],
+        limit: int = 10,
+    ) -> Sequence[Task]:
+        """Get recently completed tasks.
+        
+        Args:
+            session: Database session.
+            task_types: Task types to query.
+            limit: Maximum number of results.
+            
+        Returns:
+            List of recent completed/failed tasks.
+        """
+        stmt = (
+            select(Task)
+            .where(Task.status.in_(["completed", "failed"]))
+            .where(Task.type.in_(task_types))
+            .order_by(Task.completed_at.desc())
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        return result.scalars().all()
+
 
 # Global repository instance
 task_repository = TaskRepository()
