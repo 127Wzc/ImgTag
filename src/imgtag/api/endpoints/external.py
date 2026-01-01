@@ -268,41 +268,6 @@ async def analyze_image_from_url(
         raise HTTPException(status_code=500, detail=f"添加失败: {e}")
 
 
-@router.get("/images/{image_id}")
-async def get_image_info(
-    image_id: int,
-    api_user: dict = Depends(require_api_key),
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Get image details.
-
-    Args:
-        image_id: Image ID.
-        api_user: API user.
-        session: Database session.
-
-    Returns:
-        Image details.
-    """
-    username = api_user.get("username")
-    logger.info(f"[外部API] 获取图片: id={image_id}, user={username}")
-
-    image = await image_repository.get_with_tags(session, image_id)
-    if not image:
-        raise HTTPException(status_code=404, detail="图片不存在")
-
-    # Get display URL from storage service
-    display_url = await storage_service.get_read_url(image) or ""
-
-    return {
-        "id": image.id,
-        "url": display_url,
-        "description": image.description or "",
-        "tags": [t.name for t in image.tags if t.level == 2],
-        "created_at": image.created_at,
-    }
-
-
 @router.get("/images/search")
 async def search_images(
     keyword: str = Query(None, description="关键词搜索"),
@@ -364,3 +329,39 @@ async def search_images(
     except Exception as e:
         logger.error(f"[外部API] 搜索失败: {e}")
         raise HTTPException(status_code=500, detail=f"搜索失败: {e}")
+
+
+@router.get("/images/{image_id}")
+async def get_image_info(
+    image_id: int,
+    api_user: dict = Depends(require_api_key),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Get image details.
+
+    Args:
+        image_id: Image ID.
+        api_user: API user.
+        session: Database session.
+
+    Returns:
+        Image details.
+    """
+    username = api_user.get("username")
+    logger.info(f"[外部API] 获取图片: id={image_id}, user={username}")
+
+    image = await image_repository.get_with_tags(session, image_id)
+    if not image:
+        raise HTTPException(status_code=404, detail="图片不存在")
+
+    # Get display URL from storage service
+    display_url = await storage_service.get_read_url(image) or ""
+
+    return {
+        "id": image.id,
+        "url": display_url,
+        "description": image.description or "",
+        "tags": [t.name for t in image.tags if t.level == 2],
+        "created_at": image.created_at,
+    }
+

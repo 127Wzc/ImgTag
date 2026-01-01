@@ -482,14 +482,16 @@ class ImageRepository(BaseRepository[Image]):
         images = images_result.scalars().all()
 
         # Step 3: Group by hash
+        from imgtag.services.storage_service import storage_service
+        url_map = await storage_service.get_read_urls_with_session(session, list(images))
+        
         groups: dict[str, list[dict]] = {}
         for img in images:
             if img.file_hash not in groups:
                 groups[img.file_hash] = []
             groups[img.file_hash].append({
                 "id": img.id,
-                "image_url": img.image_url,
-                "file_path": img.file_path,
+                "image_url": url_map.get(img.id, ""),
                 "file_size": float(img.file_size) if img.file_size else 0,
                 "width": img.width,
                 "height": img.height,
@@ -873,10 +875,14 @@ class ImageRepository(BaseRepository[Image]):
         result = await session.execute(stmt)
         images = result.scalars().all()
 
+        # Batch fetch URLs using storage service (avoids N+1)
+        from imgtag.services.storage_service import storage_service
+        url_map = await storage_service.get_read_urls_with_session(session, list(images))
+
         return [
             {
                 "id": img.id,
-                "image_url": img.image_url,
+                "image_url": url_map.get(img.id, ""),
                 "description": img.description or "",
                 "tags": [t.name for t in img.tags if t.level == 2],
             }
@@ -972,16 +978,16 @@ class ImageRepository(BaseRepository[Image]):
             limit: Max results.
 
         Returns:
-            List of image dicts.
+            List of dicts with 'id' key only.
         """
         stmt = (
-            select(Image.id, Image.file_path, Image.image_url)
+            select(Image.id)
             .where(Image.file_hash.is_(None))
             .limit(limit)
         )
         result = await session.execute(stmt)
         return [
-            {"id": row.id, "file_path": row.file_path, "image_url": row.image_url}
+            {"id": row.id}
             for row in result
         ]
 

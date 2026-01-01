@@ -44,7 +44,7 @@ curl -H "api_key: YOUR_API_KEY" "http://your-domain/api/v1/external/images/rando
   "images": [
     {
       "id": 123,
-      "url": "https://example.com/uploads/image.jpg",
+      "url": "/data/uploads/ab/cd/abcd1234.jpg",
       "description": "图片描述",
       "tags": ["标签1", "标签2"]
     }
@@ -52,6 +52,8 @@ curl -H "api_key: YOUR_API_KEY" "http://your-domain/api/v1/external/images/rando
   "count": 1
 }
 ```
+
+> **URL 路径说明**：本地存储端点返回的 URL 以 `/data/` 开头（如 `/data/uploads/...`），这是前端静态资源服务的访问路径。如果配置了 `public_url_prefix`，则返回完整的外部访问 URL。
 
 ---
 
@@ -164,7 +166,7 @@ curl "http://your-domain/api/v1/external/images/123?api_key=YOUR_KEY"
 ```json
 {
   "id": 123,
-  "url": "/uploads/abc123.jpg",
+  "url": "/data/uploads/ab/cd/abc123.jpg",
   "description": "图片描述",
   "tags": ["标签1", "标签2"],
   "created_at": "2024-01-01T12:00:00Z"
@@ -203,11 +205,10 @@ curl "http://your-domain/api/v1/external/images/search?api_key=YOUR_KEY&tags=%E5
   "images": [
     {
       "id": 123,
-      "image_url": "/uploads/abc.jpg",
+      "image_url": "/data/uploads/ab/cd/abc.jpg",
       "tags": ["可爱", "二次元"],
       "description": "图片描述",
-      "source_type": "local",
-      "original_url": null
+      "created_at": "2024-01-01T12:00:00Z"
     }
   ],
   "total": 100,

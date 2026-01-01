@@ -315,9 +315,34 @@ class StorageService:
     async def get_read_urls(self, images: list[Image]) -> dict[int, str]:
         """Get accessible URLs for multiple images efficiently.
         
-        Batches database queries to avoid N+1 problem.
+        Creates its own session for standalone usage.
+        For better performance when you already have a session, use
+        get_read_urls_with_session() instead.
         
         Args:
+            images: List of Image instances.
+            
+        Returns:
+            Dictionary mapping image_id to URL.
+        """
+        if not images:
+            return {}
+        
+        async with async_session_maker() as session:
+            return await self.get_read_urls_with_session(session, images)
+
+    async def get_read_urls_with_session(
+        self,
+        session: "AsyncSession",
+        images: list[Image],
+    ) -> dict[int, str]:
+        """Get accessible URLs for multiple images using existing session.
+        
+        Preferred method when caller already has an active session, as it
+        avoids creating additional database connections.
+        
+        Args:
+            session: Existing database session.
             images: List of Image instances.
             
         Returns:
@@ -329,29 +354,28 @@ class StorageService:
         image_ids = [img.id for img in images]
         result = {img.id: "" for img in images}
         
-        async with async_session_maker() as session:
-            # Get healthy endpoints once
-            endpoints = await storage_endpoint_repository.get_healthy_for_read(session)
-            endpoint_map = {ep.id: ep for ep in endpoints}
+        # Get healthy endpoints once
+        endpoints = await storage_endpoint_repository.get_healthy_for_read(session)
+        endpoint_map = {ep.id: ep for ep in endpoints}
+        
+        if not endpoint_map:
+            return result
+        
+        # Batch get all locations for all images (single query)
+        all_locations = await image_location_repository.get_by_image_ids(session, image_ids)
+        
+        # Build URLs for each image using weighted selection
+        for image_id in image_ids:
+            locations = all_locations.get(image_id, [])
             
-            if not endpoint_map:
-                return result
-            
-            # Batch get all locations for all images (single query)
-            all_locations = await image_location_repository.get_by_image_ids(session, image_ids)
-            
-            # Build URLs for each image using weighted selection
-            for image_id in image_ids:
-                locations = all_locations.get(image_id, [])
-                
-                # Select location using priority + weight-based load balancing
-                selected = _select_by_weight(locations, endpoint_map)
-                if selected:
-                    endpoint = endpoint_map.get(selected.endpoint_id)
-                    if endpoint:
-                        url = self._build_url(endpoint, selected.object_key)
-                        if url:
-                            result[image_id] = url
+            # Select location using priority + weight-based load balancing
+            selected = _select_by_weight(locations, endpoint_map)
+            if selected:
+                endpoint = endpoint_map.get(selected.endpoint_id)
+                if endpoint:
+                    url = self._build_url(endpoint, selected.object_key)
+                    if url:
+                        result[image_id] = url
         
         return result
 
