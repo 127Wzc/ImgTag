@@ -251,10 +251,10 @@ async def create_image_manual(
 async def analyze_and_create_from_url(
     request: ImageCreateByUrl,
     background_tasks: BackgroundTasks,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Analyze and create image from URL (requires login).
+    """Analyze and create image from URL (admin only).
 
     Supports specifying target storage endpoint or using system default.
     Category subdirectory is automatically applied if category_id is provided.
@@ -668,10 +668,10 @@ async def upload_zip(
     file: UploadFile = File(..., description="ZIP 压缩包"),
     category_id: Optional[int] = Form(default=None, description="主分类ID"),
     endpoint_id: Optional[int] = Form(default=None, description="目标存储端点ID (默认使用系统默认端点)"),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Upload ZIP file with images (requires login).
+    """Upload ZIP file with images (admin only).
 
     Supports specifying target storage endpoint or using system default.
 

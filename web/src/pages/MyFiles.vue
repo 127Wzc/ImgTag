@@ -18,11 +18,15 @@ import { getErrorMessage } from '@/utils/api-error'
 import { useCategories } from '@/api/queries'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import UploadDialog from '@/components/UploadDialog.vue'
 
 const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
 
 const router = useRouter()
 const userStore = useUserStore()
+
+// 上传弹窗
+const showUploadDialog = ref(false)
 
 if (!userStore.isLoggedIn) router.push('/login?redirect=/my-files')
 
@@ -313,7 +317,7 @@ function nextImage() {
         <div v-else-if="!images.length" class="text-center py-20">
           <FolderOpen class="w-12 h-12 mx-auto text-muted-foreground mb-4" />
           <p class="text-muted-foreground">暂无上传的图片</p>
-          <Button variant="outline" class="mt-4" @click="router.push('/upload')">上传图片</Button>
+          <Button variant="outline" class="mt-4" @click="showUploadDialog = true">上传图片</Button>
         </div>
 
         <!-- 图片网格 -->
@@ -414,6 +418,9 @@ function nextImage() {
       @cancel="handleCancel"
       @update:checkbox-checked="(v) => confirmState.checkboxChecked = v"
     />
+
+    <!-- 上传弹窗 -->
+    <UploadDialog v-model:open="showUploadDialog" />
   </div>
 </template>
 

@@ -27,12 +27,6 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '我的图库', requiresAuth: true },
     },
     {
-        path: '/upload',
-        name: 'Upload',
-        component: () => import('@/pages/Upload.vue'),
-        meta: { title: '上传', requiresAuth: true },
-    },
-    {
         path: '/search',
         name: 'Search',
         component: () => import('@/pages/Search.vue'),

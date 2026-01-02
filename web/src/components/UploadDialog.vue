@@ -85,9 +85,9 @@ async function fetchEndpoints() {
   }
 }
 
-// 当 dialog 打开时获取端点列表（管理员）
+// 当 dialog 打开时获取端点列表
 watch(() => props.open, async (isOpen) => {
-  if (isOpen && isAdmin.value && endpoints.value.length === 0) {
+  if (isOpen && endpoints.value.length === 0) {
     await fetchEndpoints()
   }
 }, { immediate: true })
@@ -292,6 +292,7 @@ const pendingCount = computed(() => files.value.filter(f => f.status === 'pendin
             <Image class="w-4 h-4" />图片
           </button>
           <button
+            v-if="isAdmin"
             @click="uploadMode = 'zip'"
             class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors"
             :class="uploadMode === 'zip' 
@@ -301,6 +302,7 @@ const pendingCount = computed(() => files.value.filter(f => f.status === 'pendin
             <FileArchive class="w-4 h-4" />ZIP
           </button>
           <button
+            v-if="isAdmin"
             @click="uploadMode = 'url'"
             class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors"
             :class="uploadMode === 'url' 
@@ -322,8 +324,8 @@ const pendingCount = computed(() => files.value.filter(f => f.status === 'pendin
               <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
             </select>
           </div>
-          <!-- 存储端点选择（仅管理员且有多个端点） -->
-          <div v-if="isAdmin && endpoints.length > 1" class="flex items-center gap-2">
+          <!-- 存储端点选择（仅管理员） -->
+          <div v-if="isAdmin && endpoints.length > 0" class="flex items-center gap-2">
             <HardDrive class="w-4 h-4 text-muted-foreground" />
             <select
               v-model="selectedEndpointId"
@@ -337,28 +339,26 @@ const pendingCount = computed(() => files.value.filter(f => f.status === 'pendin
           <!-- 公开/私有选择 -->
           <div class="flex items-center gap-2">
             <component :is="isPublic ? Globe : Lock" class="w-4 h-4 text-muted-foreground" />
-            <span class="text-muted-foreground">可见性</span>
+            <span class="text-muted-foreground">公开</span>
             <button
               @click="isPublic = !isPublic"
               class="relative w-9 h-5 rounded-full transition-colors"
-              :class="isPublic ? 'bg-green-500' : 'bg-amber-500'"
+              :class="isPublic ? 'bg-green-500' : 'bg-muted-foreground/30'"
             >
               <span 
                 class="absolute top-0.5 w-4 h-4 bg-white rounded-full transition-all shadow"
                 :class="isPublic ? 'left-[18px]' : 'left-0.5'"
               />
             </button>
-            <span class="text-xs" :class="isPublic ? 'text-green-500' : 'text-amber-500'">
-              {{ isPublic ? '公开' : '私有' }}
-            </span>
           </div>
-          <div v-if="isAdmin" class="flex items-center gap-2">
+          <!-- AI 分析开关 -->
+          <div class="flex items-center gap-2">
             <Sparkles class="w-4 h-4 text-muted-foreground" />
             <span class="text-muted-foreground">AI 分析</span>
             <button
               @click="autoAnalyze = !autoAnalyze"
               class="relative w-9 h-5 rounded-full transition-colors"
-              :class="autoAnalyze ? 'bg-primary' : 'bg-muted-foreground/30'"
+              :class="autoAnalyze ? 'bg-green-500' : 'bg-muted-foreground/30'"
             >
               <span 
                 class="absolute top-0.5 w-4 h-4 bg-white rounded-full transition-all shadow"
