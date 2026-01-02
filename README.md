@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" alt="ImgTag" width="120" />
+  <img src="web/public/logo.png" alt="ImgTag" width="120" />
 </p>
 
 <h1 align="center">ImgTag</h1>
