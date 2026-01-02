@@ -16,6 +16,8 @@ import asyncio
 
 from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
+from imgtag.db.database import async_session_maker
+from imgtag.db.repositories import image_repository
 
 if TYPE_CHECKING:
     import numpy as np
@@ -489,6 +491,41 @@ class EmbeddingService:
         
         combined_text = " | ".join(parts) if parts else ""
         return await self.get_embedding(combined_text)
+    
+    async def save_embedding_for_image(
+        self,
+        image_id: int,
+        description: str,
+        tags: list[str],
+    ) -> bool:
+        """为图片生成并保存向量，失败时优雅降级。
+        
+        此方法封装了向量生成和保存的完整流程，包含错误处理。
+        向量生成或保存失败时记录警告日志，不抛出异常。
+        
+        Args:
+            image_id: 图片ID
+            description: 图片描述
+            tags: 标签列表
+            
+        Returns:
+            是否成功保存向量
+        """
+        try:
+            embedding = await self.get_embedding_combined(description, tags)
+            
+            async with async_session_maker() as session:
+                image_model = await image_repository.get_by_id(session, image_id)
+                if image_model:
+                    await image_repository.update_image(
+                        session, image_model, embedding=embedding
+                    )
+                await session.commit()
+            
+            return True
+        except Exception as e:
+            logger.warning(f"图片 {image_id} 向量生成/保存失败: {e}")
+            return False
     
     @classmethod
     def reload_model(cls):

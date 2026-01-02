@@ -390,17 +390,9 @@ class TaskQueueService:
             # 如果已有描述和标签，直接生成向量
             if image.get("description") and image.get("tags"):
                 logger.info(f"图片 {image_id} 已有标签，只生成向量")
-                embedding = await embedding_service.get_embedding_combined(
-                    image["description"], image["tags"]
+                await embedding_service.save_embedding_for_image(
+                    image_id, image["description"], image["tags"]
                 )
-                
-                async with async_session_maker() as session:
-                    image_model = await image_repository.get_by_id(session, image_id)
-                    if image_model:
-                        await image_repository.update_image(
-                            session, image_model, embedding=embedding
-                        )
-                    await session.commit()
                 
                 await self._mark_task_completed(task.id, {
                     "image_id": image_id,
@@ -450,24 +442,24 @@ class TaskQueueService:
                 file_content, mime_type, category_id=image.get("category_id")
             )
             
-            # 生成向量
-            embedding = await embedding_service.get_embedding_combined(
-                analysis.description, analysis.tags
-            )
-            
-            # 更新数据库
+            # 更新数据库 - 保存分析结果
             async with async_session_maker() as session:
                 image_model = await image_repository.get_with_tags(session, image_id)
                 if image_model:
                     await image_repository.update_image(
                         session, image_model,
                         description=analysis.description,
-                        embedding=embedding,
                     )
                     await image_tag_repository.set_image_tags(
                         session, image_id, analysis.tags, source="ai"
                     )
+                    
                 await session.commit()
+            
+            # 生成并保存向量（失败时优雅降级，独立事务）
+            await embedding_service.save_embedding_for_image(
+                image_id, analysis.description, analysis.tags
+            )
             
             # 完成
             await self._mark_task_completed(task.id, {

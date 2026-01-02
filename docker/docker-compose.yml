@@ -19,4 +19,7 @@ services:
       # 统一数据目录（所有本地存储 bucket 都在此目录下）
       # 例如：./data/uploads, ./data/test, ./data/images 等
       - ./data:/app/data
+      # 本地嵌入模型目录（可选，支持离线运行）
+      # 预置模型后容器启动时无需联网下载
+      - ./models:/app/models
     restart: unless-stopped
