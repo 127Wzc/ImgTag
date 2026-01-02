@@ -12,6 +12,7 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=6)
+    role: Optional[str] = Field(default="user", description="user 或 admin")
 
 
 class UserLogin(BaseModel):

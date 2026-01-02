@@ -292,6 +292,10 @@ async def update_user(
     """
     if user_id == admin["id"]:
         raise HTTPException(status_code=400, detail="不能修改自己的权限")
+    
+    # 保护超级管理员 (id=1)
+    if user_id == 1 and admin["id"] != 1:
+        raise HTTPException(status_code=403, detail="无权修改超级管理员")
 
     if role is not None and role not in ["user", "admin"]:
         raise HTTPException(status_code=400, detail="无效的角色")
@@ -326,6 +330,10 @@ async def delete_user(
     """
     if user_id == admin["id"]:
         raise HTTPException(status_code=400, detail="不能删除自己")
+    
+    # 保护超级管理员 (id=1)
+    if user_id == 1:
+        raise HTTPException(status_code=403, detail="不能删除超级管理员")
 
     user = await user_repository.get_by_id(session, user_id)
     if not user:
@@ -362,6 +370,7 @@ async def create_user_by_admin(
             username=data.username,
             password_hash=password_hash,
             email=data.email,
+            role=data.role or "user",
         )
         return {"message": "创建成功", "user_id": user.id}
     except Exception as e:
@@ -389,6 +398,10 @@ async def change_user_password(
     """
     if len(new_password) < 6:
         raise HTTPException(status_code=400, detail="密码至少6位")
+    
+    # 保护超级管理员 (id=1) 的密码只能由本人修改
+    if user_id == 1 and admin["id"] != 1:
+        raise HTTPException(status_code=403, detail="无权修改超级管理员密码")
 
     user = await user_repository.get_by_id(session, user_id)
     if not user:

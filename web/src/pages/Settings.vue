@@ -21,7 +21,13 @@ import {
   AlertTriangle,
   CheckCircle,
   RotateCw,
-  ChevronDown
+  ChevronDown,
+  Users,
+  UserPlus,
+  Shield,
+  Ban,
+  Key,
+  HardDrive
 } from 'lucide-vue-next'
 import {
   Select,
@@ -33,6 +39,7 @@ import {
 const categories = [
   { key: 'vision', label: '视觉模型', icon: Eye, description: 'AI 图片分析和标签提取', color: 'text-violet-500 bg-violet-500/10' },
   { key: 'embedding', label: '向量嵌入', icon: Brain, description: '语义搜索向量化配置', color: 'text-blue-500 bg-blue-500/10' },
+  { key: 'users', label: '用户管理', icon: Users, description: '用户账户与权限管理', color: 'text-emerald-500 bg-emerald-500/10' },
   { key: 'maintenance', label: '系统维护', icon: Wrench, description: '系统设置与存储清理', color: 'text-rose-500 bg-rose-500/10' },
 ]
 
@@ -455,11 +462,150 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
 })
 
+// ========== 用户管理 ==========
+interface UserItem {
+  id: number
+  username: string
+  email: string | null
+  role: 'admin' | 'user'
+  is_active: boolean
+  created_at: string
+}
+
+// 获取当前登录用户 ID（用于保护自己不被修改）
+import { useUserStore } from '@/stores'
+const userStore = useUserStore()
+const currentUserId = computed(() => userStore.user?.id)
+
+const userList = ref<UserItem[]>([])
+const usersLoading = ref(false)
+const userActionLoading = ref<number | null>(null)
+
+// 新建用户表单
+const showCreateUser = ref(false)
+const newUser = ref({ username: '', password: '', email: '', role: 'user' })
+const creatingUser = ref(false)
+
+// 修改密码
+const showChangePassword = ref<number | null>(null)
+const newPassword = ref('')
+const changingPassword = ref(false)
+
+async function fetchUsers() {
+  usersLoading.value = true
+  try {
+    const { data } = await apiClient.get('/auth/users')
+    userList.value = data.users || []
+  } catch (e: any) {
+    toast.error(e.response?.data?.detail || '获取用户列表失败')
+  } finally {
+    usersLoading.value = false
+  }
+}
+
+async function toggleUserActive(user: UserItem) {
+  userActionLoading.value = user.id
+  try {
+    await apiClient.put(`/auth/users/${user.id}`, null, { 
+      params: { is_active: !user.is_active } 
+    })
+    user.is_active = !user.is_active
+    toast.success(user.is_active ? '用户已启用' : '用户已禁用')
+  } catch (e: any) {
+    toast.error(e.response?.data?.detail || '操作失败')
+  } finally {
+    userActionLoading.value = null
+  }
+}
+
+async function changeUserRole(user: UserItem, newRole: 'admin' | 'user') {
+  if (user.role === newRole) return
+  userActionLoading.value = user.id
+  try {
+    await apiClient.put(`/auth/users/${user.id}`, null, { 
+      params: { role: newRole } 
+    })
+    user.role = newRole
+    toast.success('角色已更新')
+  } catch (e: any) {
+    toast.error(e.response?.data?.detail || '操作失败')
+  } finally {
+    userActionLoading.value = null
+  }
+}
+
+async function createUser() {
+  if (!newUser.value.username || !newUser.value.password) {
+    toast.error('用户名和密码不能为空')
+    return
+  }
+  creatingUser.value = true
+  try {
+    await apiClient.post('/auth/users', {
+      username: newUser.value.username,
+      password: newUser.value.password,
+      email: newUser.value.email || undefined,
+      role: newUser.value.role,
+    })
+    toast.success('用户创建成功')
+    showCreateUser.value = false
+    newUser.value = { username: '', password: '', email: '', role: 'user' }
+    await fetchUsers()
+  } catch (e: any) {
+    toast.error(e.response?.data?.detail || '创建失败')
+  } finally {
+    creatingUser.value = false
+  }
+}
+
+async function changePassword(userId: number) {
+  if (!newPassword.value || newPassword.value.length < 6) {
+    toast.error('密码至少 6 位')
+    return
+  }
+  changingPassword.value = true
+  try {
+    await apiClient.put(`/auth/admin/users/${userId}/password`, null, {
+      params: { new_password: newPassword.value }
+    })
+    toast.success('密码已修改')
+    showChangePassword.value = null
+    newPassword.value = ''
+  } catch (e: any) {
+    toast.error(e.response?.data?.detail || '修改失败')
+  } finally {
+    changingPassword.value = false
+  }
+}
+
+async function deleteUser(user: UserItem) {
+  const confirmed = await confirm({
+    title: '删除用户',
+    message: `确定删除用户 "${user.username}"？此操作不可恢复。`,
+    variant: 'danger',
+    confirmText: '删除',
+  })
+  if (!confirmed.confirmed) return
+  
+  userActionLoading.value = user.id
+  try {
+    await apiClient.delete(`/auth/users/${user.id}`)
+    userList.value = userList.value.filter(u => u.id !== user.id)
+    toast.success('用户已删除')
+  } catch (e: any) {
+    toast.error(e.response?.data?.detail || '删除失败')
+  } finally {
+    userActionLoading.value = null
+  }
+}
+
 // 监听分类切换
 import { watch } from 'vue'
 watch(activeCategory, (newVal) => {
   if (newVal === 'embedding') {
     fetchVectorStatus()
+  } else if (newVal === 'users') {
+    fetchUsers()
   }
 })
 
@@ -674,6 +820,192 @@ onMounted(() => fetchConfigs())
                       />
                     </button>
                     <span class="text-sm text-muted-foreground">{{ configs[def.key] === 'true' ? '开启' : '关闭' }}</span>
+                  </div>
+                </div>
+              </template>
+
+              <!-- 用户管理面板 -->
+              <template v-else-if="activeCategory === 'users'">
+                <!-- 加载中 -->
+                <div v-if="usersLoading" class="flex items-center justify-center py-10">
+                  <Loader2 class="w-6 h-6 animate-spin text-muted-foreground" />
+                </div>
+
+                <div v-else class="space-y-4">
+                  <!-- 新建用户按钮 -->
+                  <div class="flex justify-end">
+                    <Button size="sm" @click="showCreateUser = !showCreateUser">
+                      <UserPlus class="w-4 h-4 mr-1" />
+                      新建用户
+                    </Button>
+                  </div>
+
+                  <!-- 新建用户表单 -->
+                  <div v-if="showCreateUser" class="p-4 bg-muted/50 rounded-xl space-y-3 animate-in fade-in">
+                    <div class="grid grid-cols-2 gap-3">
+                      <div class="space-y-1">
+                        <label class="text-xs text-muted-foreground">用户名 *</label>
+                        <input
+                          v-model="newUser.username"
+                          type="text"
+                          class="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                          placeholder="用户名"
+                        />
+                      </div>
+                      <div class="space-y-1">
+                        <label class="text-xs text-muted-foreground">密码 *</label>
+                        <input
+                          v-model="newUser.password"
+                          type="password"
+                          class="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                          placeholder="至少 6 位"
+                        />
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3">
+                      <div class="space-y-1">
+                        <label class="text-xs text-muted-foreground">邮箱（可选）</label>
+                        <input
+                          v-model="newUser.email"
+                          type="email"
+                          class="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                          placeholder="email@example.com"
+                        />
+                      </div>
+                      <div class="space-y-1">
+                        <label class="text-xs text-muted-foreground">角色</label>
+                        <select
+                          v-model="newUser.role"
+                          class="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                        >
+                          <option value="user">普通用户</option>
+                          <option value="admin">管理员</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div class="flex justify-end gap-2">
+                      <Button variant="ghost" size="sm" @click="showCreateUser = false">取消</Button>
+                      <Button size="sm" @click="createUser" :disabled="creatingUser">
+                        <Loader2 v-if="creatingUser" class="w-4 h-4 mr-1 animate-spin" />
+                        创建
+                      </Button>
+                    </div>
+                  </div>
+
+                  <!-- 用户列表 -->
+                  <div class="space-y-2">
+                    <div
+                      v-for="user in userList"
+                      :key="user.id"
+                      class="p-3 bg-muted/30 rounded-xl border border-border flex items-center gap-3"
+                    >
+                      <!-- 用户信息 -->
+                      <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2">
+                          <span class="font-medium text-foreground">{{ user.username }}</span>
+                          <span
+                            class="px-1.5 py-0.5 rounded text-xs font-medium"
+                            :class="user.role === 'admin' ? 'bg-violet-500/10 text-violet-500' : 'bg-muted text-muted-foreground'"
+                          >
+                            <Shield v-if="user.role === 'admin'" class="w-3 h-3 inline mr-0.5" />
+                            {{ user.role === 'admin' ? '管理员' : '用户' }}
+                          </span>
+                          <span
+                            v-if="!user.is_active"
+                            class="px-1.5 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-500"
+                          >
+                            <Ban class="w-3 h-3 inline mr-0.5" />
+                            已禁用
+                          </span>
+                        </div>
+                        <div class="text-xs text-muted-foreground mt-0.5">
+                          {{ user.email || '无邮箱' }} · ID: {{ user.id }}
+                        </div>
+                      </div>
+
+                      <!-- 操作按钮 -->
+                      <div class="flex items-center gap-1">
+                        <!-- 修改密码 -->
+                        <Button
+                          v-if="user.id !== 1 || currentUserId === 1"
+                          variant="ghost"
+                          size="icon"
+                          class="w-8 h-8"
+                          @click="showChangePassword = showChangePassword === user.id ? null : user.id"
+                          title="修改密码"
+                        >
+                          <Key class="w-4 h-4" />
+                        </Button>
+                        
+                        <!-- 切换角色 -->
+                        <Button
+                          v-if="user.id !== currentUserId && user.id !== 1"
+                          variant="ghost"
+                          size="icon"
+                          class="w-8 h-8"
+                          @click="changeUserRole(user, user.role === 'admin' ? 'user' : 'admin')"
+                          :disabled="userActionLoading === user.id"
+                          :title="user.role === 'admin' ? '设为普通用户' : '设为管理员'"
+                        >
+                          <Shield class="w-4 h-4" :class="user.role === 'admin' ? 'text-violet-500' : ''" />
+                        </Button>
+
+                        <!-- 禁用/启用 -->
+                        <Button
+                          v-if="user.id !== currentUserId && user.id !== 1"
+                          variant="ghost"
+                          size="icon"
+                          class="w-8 h-8"
+                          @click="toggleUserActive(user)"
+                          :disabled="userActionLoading === user.id"
+                          :title="user.is_active ? '禁用用户' : '启用用户'"
+                        >
+                          <Ban class="w-4 h-4" :class="!user.is_active ? 'text-red-500' : ''" />
+                        </Button>
+
+                        <!-- 删除 -->
+                        <Button
+                          v-if="user.id !== currentUserId && user.id !== 1"
+                          variant="ghost"
+                          size="icon"
+                          class="w-8 h-8 text-red-500 hover:text-red-600"
+                          @click="deleteUser(user)"
+                          :disabled="userActionLoading === user.id"
+                          title="删除用户"
+                        >
+                          <X class="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 修改密码弹出框 -->
+                  <div
+                    v-if="showChangePassword"
+                    class="p-4 bg-muted/50 rounded-xl space-y-3 animate-in fade-in"
+                  >
+                    <div class="flex items-center gap-2 text-sm font-medium">
+                      <Key class="w-4 h-4" />
+                      修改密码 - {{ userList.find(u => u.id === showChangePassword)?.username }}
+                    </div>
+                    <input
+                      v-model="newPassword"
+                      type="password"
+                      class="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                      placeholder="新密码（至少 6 位）"
+                    />
+                    <div class="flex justify-end gap-2">
+                      <Button variant="ghost" size="sm" @click="showChangePassword = null; newPassword = ''">取消</Button>
+                      <Button size="sm" @click="changePassword(showChangePassword!)" :disabled="changingPassword">
+                        <Loader2 v-if="changingPassword" class="w-4 h-4 mr-1 animate-spin" />
+                        确认修改
+                      </Button>
+                    </div>
+                  </div>
+
+                  <!-- 空状态 -->
+                  <div v-if="userList.length === 0 && !usersLoading" class="text-center py-10 text-muted-foreground">
+                    暂无用户
                   </div>
                 </div>
               </template>
@@ -996,7 +1328,7 @@ onMounted(() => fetchConfigs())
             </div>
 
             <!-- 底部操作 -->
-            <div v-if="activeCategory !== 'maintenance'" class="p-6 border-t border-border flex justify-end gap-2">
+            <div v-if="activeCategory !== 'users'" class="p-6 border-t border-border flex justify-end gap-2">
               <Button variant="outline" @click="closeDrawer">取消</Button>
               <Button @click="saveConfigs" :disabled="!hasChanges || saving">
                 <Loader2 v-if="saving" class="w-4 h-4 mr-1 animate-spin" />

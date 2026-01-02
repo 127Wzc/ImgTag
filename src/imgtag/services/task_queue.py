@@ -243,6 +243,41 @@ class TaskQueueService:
             await session.commit()
         logger.info(f"清空了 {c1 + c2} 个已完成/失败任务")
     
+    async def retry_task(self, task_id: str) -> bool:
+        """重试失败的任务
+        
+        将失败的任务状态重置为 pending，让 Worker 重新处理。
+        
+        Args:
+            task_id: 任务 ID
+            
+        Returns:
+            True 如果重试成功，False 如果任务不存在或不是失败状态
+        """
+        async with async_session_maker() as session:
+            task = await task_repository.get_by_id(session, task_id)
+            if not task:
+                logger.warning(f"任务 {task_id} 不存在")
+                return False
+            
+            if task.status != StorageTaskStatus.FAILED.value:
+                logger.warning(f"任务 {task_id} 状态为 {task.status}，无法重试")
+                return False
+            
+            # 重置为 pending 状态
+            await task_repository.update_status(
+                session, task_id, StorageTaskStatus.PENDING.value, error=None
+            )
+            await session.commit()
+        
+        logger.info(f"任务 {task_id} 已重置为待处理状态")
+        
+        # 确保处理正在运行
+        if not self._running:
+            asyncio.create_task(self.start_processing())
+        
+        return True
+    
     async def _recover_stuck_tasks(self):
         """恢复 stuck 的 processing 任务"""
         async with async_session_maker() as session:

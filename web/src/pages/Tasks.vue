@@ -303,11 +303,12 @@ const canDelete = (status: string) => status === 'completed' || status === 'fail
               <Eye class="w-4 h-4" />
             </Button>
             <Button 
-              v-if="task.status === 'failed'"
+              v-if="task.status === 'failed' && ['analyze_image', 'rebuild_vector', 'storage_sync'].includes(task.type)"
               variant="ghost" 
               size="icon"
               @click="handleRetry(task.id)"
               :disabled="retryTaskMutation.isPending.value"
+              title="重试"
             >
               <PlayCircle class="w-4 h-4" />
             </Button>

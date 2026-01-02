@@ -11,10 +11,12 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 
 from imgtag.api.endpoints.auth import get_current_user
-
-from imgtag.services.task_service import task_service
-from imgtag.schemas import Task, TaskResponse
 from imgtag.core.logging_config import get_logger
+from imgtag.db.database import async_session_maker
+from imgtag.db.repositories import task_repository
+from imgtag.schemas import Task, TaskResponse
+from imgtag.services.task_queue import task_queue
+from imgtag.services.task_service import task_service
 
 logger = get_logger(__name__)
 
@@ -74,4 +76,46 @@ async def batch_delete_tasks(
     """批量删除任务（需登录）"""
     count = await task_service.batch_delete(request.task_ids)
     return {"message": f"已删除 {count} 个任务", "deleted_count": count}
+
+
+# 支持重试的任务类型
+RETRYABLE_TASK_TYPES = ["analyze_image", "rebuild_vector", "storage_sync"]
+
+
+@router.post("/{task_id}/retry", response_model=Dict[str, Any])
+async def retry_task(
+    task_id: str,
+    user: Dict = Depends(get_current_user)
+):
+    """重试失败的任务（需登录）
+    
+    仅支持以下任务类型的重试：
+    - analyze_image: 图片分析
+    - rebuild_vector: 向量重建
+    - storage_sync: 存储同步
+    """
+    # 获取任务信息
+    async with async_session_maker() as session:
+        task = await task_repository.get_by_id(session, task_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    # 检查任务类型是否支持重试
+    if task.type not in RETRYABLE_TASK_TYPES:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"任务类型 {task.type} 不支持重试"
+        )
+    
+    # 尝试重试
+    success = await task_queue.retry_task(task_id)
+    
+    if not success:
+        raise HTTPException(
+            status_code=400, 
+            detail="任务状态不允许重试（仅支持重试失败的任务）"
+        )
+    
+    return {"message": "任务已加入重试队列", "task_id": task_id}
 

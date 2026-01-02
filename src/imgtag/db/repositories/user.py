@@ -238,7 +238,7 @@ class UserRepository(BaseRepository[User]):
         Returns:
             List of User instances.
         """
-        stmt = select(User).order_by(User.created_at.desc())
+        stmt = select(User).order_by(User.id.asc())
         if not include_inactive:
             stmt = stmt.where(User.is_active == True)  # noqa: E712
         result = await session.execute(stmt)

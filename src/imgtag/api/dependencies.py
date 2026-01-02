@@ -49,6 +49,9 @@ async def verify_api_key(
     # 尝试匹配用户密钥
     user = await user_repository.get_by_api_key(session, provided_key)
     if user:
+        # 检查用户是否被禁用
+        if not user.is_active:
+            raise HTTPException(status_code=403, detail="用户已被禁用")
         return {
             "id": user.id,
             "username": user.username,
@@ -83,6 +86,9 @@ async def require_api_key(
     
     user = await user_repository.get_by_api_key(session, provided_key)
     if user:
+        # 检查用户是否被禁用
+        if not user.is_active:
+            raise HTTPException(status_code=403, detail="用户已被禁用")
         return {
             "id": user.id,
             "username": user.username,
