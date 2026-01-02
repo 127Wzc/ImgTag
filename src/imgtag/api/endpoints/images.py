@@ -13,6 +13,7 @@ import logging
 import os
 import time
 import zipfile
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -287,8 +288,10 @@ async def analyze_and_create_from_url(
         # 根据 MIME 类型确定扩展名（使用统一常量）
         file_type = get_extension_from_mime(mime_type)
         
-        # 提取图片尺寸
-        width, height = upload_service.extract_image_dimensions(file_content)
+        # 提取图片尺寸（PIL 操作移至线程池，避免阻塞）
+        width, height = await asyncio.to_thread(
+            upload_service.extract_image_dimensions, file_content
+        )
 
         # Get target endpoint (use specified or default)
         target_endpoint, err = await storage_endpoint_repository.resolve_upload_endpoint(
@@ -542,8 +545,10 @@ async def upload_and_analyze(
         local_endpoint = await storage_endpoint_repository.get_by_id(session, 1)  # id=1 是本地端点
         is_local_endpoint = target_endpoint and target_endpoint.provider == StorageProvider.LOCAL
         
-        # 提取图片信息（统一处理，避免重复代码）
-        width, height = upload_service.extract_image_dimensions(file_content)
+        # 提取图片信息（PIL 是 CPU 密集型操作，移至线程池避免阻塞）
+        width, height = await asyncio.to_thread(
+            upload_service.extract_image_dimensions, file_content
+        )
         file_type = ext
         
         if is_local_endpoint or not target_endpoint:
@@ -725,8 +730,10 @@ async def upload_zip(
                     file_size = round(len(file_content) / (1024 * 1024), 2)
                     file_hash = await asyncio.to_thread(lambda c=file_content: hashlib.md5(c).hexdigest())
                     
-                    # 提取图片尺寸和格式
-                    width, height = upload_service.extract_image_dimensions(file_content)
+                    # 提取图片尺寸和格式（PIL 操作移至线程池）
+                    width, height = await asyncio.to_thread(
+                        upload_service.extract_image_dimensions, file_content
+                    )
                     file_type = ext.lstrip(".")
                     
                     # Generate object key with category prefix
@@ -1319,31 +1326,65 @@ async def _delete_files_async(
     from imgtag.db.database import async_session_maker
     
     deleted = 0
+    skipped = 0
     failed = 0
     
-    async with async_session_maker() as session:
-        for file_info in files:
-            try:
-                endpoint = await storage_endpoint_repository.get_by_id(
-                    session, file_info["endpoint_id"]
-                )
-                if not endpoint:
-                    continue
-                
-                # 使用 delete_from_endpoint 统一删除（同时支持本地和远程）
-                success = await storage_service.delete_from_endpoint(
-                    object_key=file_info["object_key"],
-                    endpoint=endpoint,
-                )
-                if success:
-                    deleted += 1
-                else:
-                    failed += 1
-            except Exception as e:
-                failed += 1
-                log.warning(f"删除文件失败: {file_info['object_key']}, 错误: {e}")
+    # 按 endpoint_id 分组，并去重相同的 object_key
+    # （批量删除重复图片时可能有多个相同的 object_key）
+    files_by_endpoint: dict[int, set[str]] = defaultdict(set)
+    for f in files:
+        files_by_endpoint[f["endpoint_id"]].add(f["object_key"])
     
-    log.info(f"后台删除文件完成: 成功 {deleted}, 失败 {failed}")
+    async with async_session_maker() as session:
+        # 批量查询每个 endpoint 的引用计数
+        ref_counts_cache: dict[tuple[int, str], int] = {}
+        for endpoint_id, object_keys in files_by_endpoint.items():
+            counts = await image_location_repository.batch_count_by_object_keys(
+                session, endpoint_id, object_keys
+            )
+            for obj_key, count in counts.items():
+                ref_counts_cache[(endpoint_id, obj_key)] = count
+        
+        # 缓存 endpoint 对象
+        endpoint_cache: dict[int, Any] = {}
+        
+        # 迭代去重后的文件集合
+        for endpoint_id, object_keys in files_by_endpoint.items():
+            # 从缓存获取 endpoint
+            if endpoint_id not in endpoint_cache:
+                endpoint_cache[endpoint_id] = await storage_endpoint_repository.get_by_id(
+                    session, endpoint_id
+                )
+            endpoint = endpoint_cache[endpoint_id]
+            
+            if not endpoint:
+                continue
+            
+            for object_key in object_keys:
+                try:
+                    # 从缓存获取引用计数
+                    ref_count = ref_counts_cache.get((endpoint_id, object_key), 0)
+                    if ref_count > 0:
+                        log.debug(
+                            f"跳过删除文件 {object_key}: 仍有 {ref_count} 个 location 引用"
+                        )
+                        skipped += 1
+                        continue
+                    
+                    # 使用 delete_from_endpoint 统一删除（同时支持本地和远程）
+                    success = await storage_service.delete_from_endpoint(
+                        object_key=object_key,
+                        endpoint=endpoint,
+                    )
+                    if success:
+                        deleted += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    failed += 1
+                    log.warning(f"删除文件失败: {object_key}, 错误: {e}")
+    
+    log.info(f"后台删除文件完成: 成功 {deleted}, 跳过 {skipped}, 失败 {failed}")
 
 
 class BatchUpdateTagsRequest(BaseModel):

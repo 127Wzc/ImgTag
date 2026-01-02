@@ -381,8 +381,8 @@ onUnmounted(() => {
           />
         </div>
 
-        <!-- 顶部控制栏 -->
-        <div class="absolute top-4 right-4 flex items-center gap-2 opacity-0 group-hover/modal:opacity-100 transition-opacity duration-300 z-20">
+        <!-- 顶部控制栏（移动端始终可见，桌面端 hover 显示） -->
+        <div class="absolute top-4 right-4 flex items-center gap-2 z-20 transition-opacity duration-300 md:opacity-0 md:group-hover/modal:opacity-100">
           <button 
             class="p-2.5 bg-black/40 hover:bg-black/60 rounded-full transition-colors backdrop-blur-sm"
             :class="{ 'bg-white/20': showInfoPanel }"
@@ -428,7 +428,7 @@ onUnmounted(() => {
         <!-- 左侧切换按钮 -->
         <button
           v-if="canNavigatePrev"
-          class="absolute left-4 top-1/2 -translate-y-1/2 p-4 bg-black/40 hover:bg-black/60 rounded-full backdrop-blur-sm opacity-0 group-hover/modal:opacity-100 transition-all duration-300 hover:scale-110 z-20"
+          class="absolute left-4 top-1/2 -translate-y-1/2 p-4 bg-black/40 hover:bg-black/60 rounded-full backdrop-blur-sm transition-all duration-300 hover:scale-110 z-20 md:opacity-0 md:group-hover/modal:opacity-100"
           @click="emit('prev')"
           title="上一张 (←)"
         >
@@ -438,7 +438,7 @@ onUnmounted(() => {
         <!-- 右侧切换按钮 -->
         <button
           v-if="canNavigateNext"
-          class="absolute right-4 top-1/2 -translate-y-1/2 p-4 bg-black/40 hover:bg-black/60 rounded-full backdrop-blur-sm opacity-0 group-hover/modal:opacity-100 transition-all duration-300 hover:scale-110 z-20"
+          class="absolute right-4 top-1/2 -translate-y-1/2 p-4 bg-black/40 hover:bg-black/60 rounded-full backdrop-blur-sm transition-all duration-300 hover:scale-110 z-20 md:opacity-0 md:group-hover/modal:opacity-100"
           @click="emit('next')"
           title="下一张 (→)"
         >
@@ -448,27 +448,18 @@ onUnmounted(() => {
         <!-- 底部计数器 -->
         <div 
           v-if="totalCount" 
-          class="absolute bottom-4 right-4 px-3 py-1.5 bg-black/40 rounded-full text-white/90 text-sm font-medium backdrop-blur-sm opacity-0 group-hover/modal:opacity-100 transition-opacity duration-300 z-20"
+          class="absolute bottom-4 right-4 px-3 py-1.5 bg-black/40 rounded-full text-white/90 text-sm font-medium backdrop-blur-sm transition-opacity duration-300 z-20 md:opacity-0 md:group-hover/modal:opacity-100"
         >
           {{ (currentIndex ?? 0) + 1 }} / {{ totalCount }}
         </div>
 
-        <!-- 信息抽屉 -->
+        <!-- 信息抽屉（从顶部留出空间，避免与控制栏重叠） -->
         <Transition name="drawer">
           <div 
             v-if="showInfoPanel"
-            class="absolute top-0 right-0 bottom-0 w-80 bg-black/60 backdrop-blur-md overflow-y-auto z-10"
+            class="absolute top-16 right-0 bottom-0 w-80 bg-black/60 backdrop-blur-md overflow-y-auto z-10 rounded-tl-xl"
             @click.stop
           >
-            <!-- 抽屉头部（简洁） -->
-            <div class="sticky top-0 bg-black/80 backdrop-blur-sm px-4 py-3 flex items-center justify-end border-b border-white/10">
-              <button 
-                @click="tryClosePanel"
-                class="p-1 hover:bg-white/10 rounded"
-              >
-                <ChevronRight class="w-4 h-4 text-white" />
-              </button>
-            </div>
 
             <div class="p-4 space-y-5">
               <!-- 元信息 -->

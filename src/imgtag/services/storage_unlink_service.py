@@ -140,6 +140,17 @@ class StorageUnlinkService(BaseStorageTaskService[UnlinkContext]):
             return (True, None)
         
         try:
+            # 从 item 中读取预先查询的引用计数（由 run_task 批量查询）
+            # ref_count 包含当前这个 location（尚未删除）
+            # 如果 > 1，说明有其他 location 也引用这个文件
+            ref_count = item.get("ref_count", 1)
+            if ref_count > 1:
+                logger.debug(
+                    f"跳过删除文件 {item['object_key']}: "
+                    f"仍有 {ref_count - 1} 个其他 location 引用"
+                )
+                return (True, None)  # 标记为成功，但实际跳过删除
+            
             # Use delete_from_endpoint for both local and S3 endpoints
             # This method correctly handles path_prefix for all provider types
             success = await storage_service.delete_from_endpoint(
@@ -199,6 +210,17 @@ class StorageUnlinkService(BaseStorageTaskService[UnlinkContext]):
         # Collect orphan image IDs
         orphan_image_ids = [item["image_id"] for item in items if item.get("is_orphan")]
         progress.extra["orphan_image_ids"] = orphan_image_ids
+        
+        # 预先批量查询引用计数，避免 N+1 查询，并将结果添加到每个 item 中
+        if context.delete_files and items:
+            object_keys = [item["object_key"] for item in items]
+            async with async_session_maker() as session:
+                ref_counts = await image_location_repository.batch_count_by_object_keys(
+                    session, context.endpoint_id, object_keys
+                )
+            # 将引用计数添加到每个 item 中
+            for item in items:
+                item["ref_count"] = ref_counts.get(item["object_key"], 1)
         
         # Call parent's batch processing
         await self._process_items(items, context, progress)

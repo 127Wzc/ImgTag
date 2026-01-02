@@ -255,6 +255,75 @@ class ImageLocationRepository(BaseRepository[ImageLocation]):
             is_primary=False,
         )
 
+    async def count_by_object_key(
+        self,
+        session: AsyncSession,
+        endpoint_id: int,
+        object_key: str,
+    ) -> int:
+        """Count locations with same object_key on an endpoint.
+        
+        Used to check if file is referenced by multiple locations before deletion.
+        If count > 1, the physical file should NOT be deleted because other
+        locations still reference it.
+        
+        Args:
+            session: Database session.
+            endpoint_id: Endpoint ID to filter by.
+            object_key: Object key to count references for.
+            
+        Returns:
+            Number of locations referencing this object_key on this endpoint.
+        """
+        from sqlalchemy import func
+
+        stmt = (
+            select(func.count())
+            .select_from(self.model)
+            .where(self.model.endpoint_id == endpoint_id)
+            .where(self.model.object_key == object_key)
+        )
+        result = await session.execute(stmt)
+        return result.scalar() or 0
+
+    async def batch_count_by_object_keys(
+        self,
+        session: AsyncSession,
+        endpoint_id: int,
+        object_keys: list[str],
+    ) -> dict[str, int]:
+        """Batch count locations for multiple object_keys on an endpoint.
+        
+        优化性能：一次查询获取多个 object_key 的引用计数，避免 N+1 问题。
+        
+        Args:
+            session: Database session.
+            endpoint_id: Endpoint ID to filter by.
+            object_keys: List of object keys to count.
+            
+        Returns:
+            Dict mapping object_key to reference count.
+        """
+        if not object_keys:
+            return {}
+        
+        from sqlalchemy import func
+
+        stmt = (
+            select(self.model.object_key, func.count().label("cnt"))
+            .where(self.model.endpoint_id == endpoint_id)
+            .where(self.model.object_key.in_(object_keys))
+            .group_by(self.model.object_key)
+        )
+        result = await session.execute(stmt)
+        
+        # 构建结果字典，未查到的 key 默认为 0
+        counts = {key: 0 for key in object_keys}
+        for row in result:
+            counts[row.object_key] = row.cnt
+        
+        return counts
+
     async def delete_by_endpoint(
         self,
         session: AsyncSession,

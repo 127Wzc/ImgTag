@@ -140,8 +140,10 @@ async def analyze_image_from_url(
         file_hash = await asyncio.to_thread(lambda: hashlib.md5(content).hexdigest())
         file_size = round(len(content) / (1024 * 1024), 2)
         
-        # 提取图片尺寸
-        width, height = upload_service.extract_image_dimensions(content)
+        # 提取图片尺寸（PIL 操作移至线程池，避免阻塞）
+        width, height = await asyncio.to_thread(
+            upload_service.extract_image_dimensions, content
+        )
         file_type = file_path.split(".")[-1] if "." in file_path else "jpg"
 
         new_image = await image_repository.create_image(
