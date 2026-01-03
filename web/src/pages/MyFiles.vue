@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores'
 import { useMyImages } from '@/api/queries'
 import apiClient from '@/api/client'
-import type { ImageResponse, ImageSearchRequest } from '@/types'
-import { Loader2, Filter, CheckSquare, Trash2, Tags, Sparkles, LayoutGrid, ChevronDown, FolderOpen, ArrowUpDown } from 'lucide-vue-next'
+import type { ImageResponse, ImageSearchRequest, TagWithSource } from '@/types'
+import { Loader2, Filter, CheckSquare, Trash2, Tags, Sparkles, LayoutGrid, ChevronDown, ChevronLeft, ChevronRight, FolderOpen, ArrowUpDown, Tag } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -45,6 +45,10 @@ const pageSize = ref(40)
 const currentPage = ref(1)
 const sortBy = ref('id') // 排序字段
 const sortDesc = ref(true) // 是否倒序
+const jumpPage = ref('')  // 跳转页码输入
+
+// 显示模式
+const showLabelsAlways = ref(false)  // 是否始终显示标签
 
 // 搜索参数
 const searchParams = ref<ImageSearchRequest>({ limit: pageSize.value, offset: 0, sort_by: sortBy.value, sort_desc: sortDesc.value })
@@ -53,10 +57,34 @@ const searchParams = ref<ImageSearchRequest>({ limit: pageSize.value, offset: 0,
 const { data: imageData, isLoading, isError, refetch } = useMyImages(searchParams)
 const { data: categoriesData } = useCategories()
 
-const images = computed(() => imageData.value?.images || [])
+// 标签局部更新覆盖层（用于避免刷新整个列表）
+const tagOverrides = ref<Map<number, TagWithSource[]>>(new Map())
+
+// 合并原始数据和覆盖层
+const images = computed(() => {
+  const original = imageData.value?.images || []
+  if (tagOverrides.value.size === 0) return original
+  
+  return original.map(img => {
+    const override = tagOverrides.value.get(img.id)
+    return override ? { ...img, tags: override } : img
+  })
+})
 const total = computed(() => imageData.value?.total || 0)
 const totalPages = computed(() => Math.ceil(total.value / pageSize.value))
 const categories = computed(() => categoriesData.value || [])
+
+// 处理标签更新（局部更新）
+function handleTagsUpdated(imageId: number, newTags: TagWithSource[]) {
+  tagOverrides.value.set(imageId, newTags)
+  // 触发响应式更新
+  tagOverrides.value = new Map(tagOverrides.value)
+}
+
+// 搜索参数变化时清理标签覆盖层
+watch(searchParams, () => {
+  tagOverrides.value.clear()
+}, { deep: true })
 
 // 搜索和分页
 function handleSearch() {
@@ -108,6 +136,17 @@ function changePageSize(size: unknown) {
   pageSize.value = newSize
   currentPage.value = 1
   searchParams.value = { ...searchParams.value, limit: newSize, offset: 0 }
+}
+
+// 跳转到指定页码
+function handleJump() {
+  const page = parseInt(jumpPage.value)
+  if (isNaN(page) || page < 1 || page > totalPages.value) {
+    toast.error(`请输入 1-${totalPages.value} 之间的页码`)
+    return
+  }
+  changePage(page)
+  jumpPage.value = ''
 }
 
 // 批量选择
@@ -243,9 +282,18 @@ function nextImage() {
             <p class="text-sm text-muted-foreground mt-1">共 {{ total }} 张图片</p>
           </div>
           <div class="flex items-center gap-2">
+            <!-- 标签显示开关 -->
+            <Button 
+              variant="outline" 
+              size="sm" 
+              @click="showLabelsAlways = !showLabelsAlways"
+              :class="{ 'bg-primary text-primary-foreground': showLabelsAlways }"
+            >
+              <Tag class="w-4 h-4 mr-1" />{{ showLabelsAlways ? '隐藏标签' : '显示标签' }}
+            </Button>
             <!-- 排序选择 -->
             <Select :model-value="currentSort" @update:model-value="changeSort">
-              <SelectTrigger class="w-[130px]">
+              <SelectTrigger class="w-[140px]">
                 <ArrowUpDown class="w-4 h-4 mr-1" />
                 <SelectValue />
               </SelectTrigger>
@@ -327,27 +375,66 @@ function nextImage() {
           :select-mode="selectMode" 
           :selected-ids="selectedIds"
           :show-pending-badge="true"
+          :show-labels-always="showLabelsAlways"
+          :editable="showLabelsAlways"
           @select="openImage" 
-          @toggle-select="toggleSelect" 
+          @toggle-select="toggleSelect"
+          @tags-updated="handleTagsUpdated"
         />
 
-        <!-- 分页 -->
-        <div v-if="total > 0" class="mt-8 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div class="text-sm text-muted-foreground">第 {{ currentPage }} / {{ totalPages }} 页，共 {{ total }} 张</div>
-          <div class="flex items-center gap-2">
-            <Select :model-value="String(pageSize)" @update:model-value="changePageSize">
-              <SelectTrigger class="w-24"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="20">20 张</SelectItem>
-                <SelectItem value="40">40 张</SelectItem>
-                <SelectItem value="60">60 张</SelectItem>
-                <SelectItem value="80">80 张</SelectItem>
-                <SelectItem value="100">100 张</SelectItem>
-              </SelectContent>
-            </Select>
-            <Button variant="outline" size="sm" @click="changePage(currentPage - 1)" :disabled="currentPage <= 1">上一页</Button>
-            <Button variant="outline" size="sm" @click="changePage(currentPage + 1)" :disabled="currentPage >= totalPages">下一页</Button>
+        <!-- 分页 (Apple 风格简洁设计) -->
+        <div v-if="total > 0" class="mt-8 flex items-center justify-center gap-3">
+          <!-- 每页数量 -->
+          <Select :model-value="String(pageSize)" @update:model-value="changePageSize">
+            <SelectTrigger class="w-20 h-8 text-xs border-0 bg-muted/50 hover:bg-muted">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="20">20 张</SelectItem>
+              <SelectItem value="40">40 张</SelectItem>
+              <SelectItem value="60">60 张</SelectItem>
+              <SelectItem value="100">100 张</SelectItem>
+            </SelectContent>
+          </Select>
+
+          <div class="flex items-center gap-1 bg-muted/50 rounded-lg p-1">
+            <!-- 上一页 -->
+            <button
+              class="w-8 h-8 flex items-center justify-center rounded-md transition-colors"
+              :class="currentPage <= 1 ? 'text-muted-foreground/30 cursor-not-allowed' : 'text-foreground hover:bg-background'"
+              :disabled="currentPage <= 1"
+              @click="changePage(currentPage - 1)"
+            >
+              <ChevronLeft class="w-4 h-4" />
+            </button>
+
+            <!-- 可编辑页码 -->
+            <div class="flex items-center gap-1 px-2">
+              <input
+                v-model="jumpPage"
+                type="text"
+                class="w-10 h-7 text-center text-sm bg-background border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+                :placeholder="String(currentPage)"
+                @keyup.enter="handleJump"
+                @blur="handleJump"
+              />
+              <span class="text-muted-foreground text-sm">/</span>
+              <span class="text-muted-foreground text-sm">{{ totalPages }}</span>
+            </div>
+
+            <!-- 下一页 -->
+            <button
+              class="w-8 h-8 flex items-center justify-center rounded-md transition-colors"
+              :class="currentPage >= totalPages ? 'text-muted-foreground/30 cursor-not-allowed' : 'text-foreground hover:bg-background'"
+              :disabled="currentPage >= totalPages"
+              @click="changePage(currentPage + 1)"
+            >
+              <ChevronRight class="w-4 h-4" />
+            </button>
           </div>
+
+          <!-- 总数提示 -->
+          <span class="text-xs text-muted-foreground">共 {{ total }} 张</span>
         </div>
       </div>
     </main>

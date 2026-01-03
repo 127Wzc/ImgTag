@@ -57,8 +57,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health || exit 1
 
-# 启动命令
-CMD ["uv", "run", "uvicorn", "imgtag.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 启动命令：先迁移再启动
+CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn imgtag.main:app --host 0.0.0.0 --port 8000"]
 
 # -----------------------------------------------------------
 # 完整版：支持本地 ONNX 嵌入模型（约 700MB）
@@ -89,8 +89,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health || exit 1
 
-# 启动命令
-CMD ["uv", "run", "uvicorn", "imgtag.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 启动命令：先迁移再启动
+CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn imgtag.main:app --host 0.0.0.0 --port 8000"]
 
 # -----------------------------------------------------------
 # 纯后端精简版（无前端，用于前后端分离部署）
@@ -117,8 +117,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health || exit 1
 
-# 启动命令
-CMD ["uv", "run", "uvicorn", "imgtag.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 启动命令：先迁移再启动
+CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn imgtag.main:app --host 0.0.0.0 --port 8000"]
 
 # -----------------------------------------------------------
 # 纯后端完整版（无前端，含本地嵌入模型）
@@ -145,5 +145,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health || exit 1
 
-# 启动命令
-CMD ["uv", "run", "uvicorn", "imgtag.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 启动命令：先迁移再启动
+CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn imgtag.main:app --host 0.0.0.0 --port 8000"]

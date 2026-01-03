@@ -3,7 +3,7 @@ import { ref, computed } from 'vue'
 import { PublicHeader } from '@/components/layout'
 import { useImages } from '@/api/queries'
 import type { ImageResponse, ImageSearchRequest } from '@/types'
-import { Loader2, Filter, ChevronDown, Image as ImageIcon } from 'lucide-vue-next'
+import { Loader2, Filter, ChevronDown, ChevronLeft, ChevronRight, Image as ImageIcon } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import ImageGrid from '@/components/ImageGrid.vue'
@@ -57,6 +57,16 @@ function changePageSize(size: unknown) {
   pageSize.value = newSize
   currentPage.value = 1
   searchParams.value = { ...searchParams.value, limit: newSize, offset: 0 }
+}
+
+// 页码跳转
+const jumpPage = ref('')
+function handleJump() {
+  const page = parseInt(jumpPage.value)
+  if (!isNaN(page) && page >= 1 && page <= totalPages.value) {
+    goToPage(page)
+  }
+  jumpPage.value = ''
 }
 
 // 图片详情
@@ -132,23 +142,59 @@ function nextImage() {
         <!-- 图片网格 -->
         <ImageGrid v-else :images="images" @select="openImage" />
 
-        <!-- 分页 -->
-        <div v-if="total > 0" class="mt-8 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div class="text-sm text-muted-foreground">第 {{ currentPage }} / {{ totalPages }} 页，共 {{ total }} 张</div>
-          <div class="flex items-center gap-2">
-            <Select :model-value="String(pageSize)" @update:model-value="changePageSize">
-              <SelectTrigger class="w-24"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="20">20 张</SelectItem>
-                <SelectItem value="40">40 张</SelectItem>
-                <SelectItem value="60">60 张</SelectItem>
-                <SelectItem value="80">80 张</SelectItem>
-                <SelectItem value="100">100 张</SelectItem>
-              </SelectContent>
-            </Select>
-            <Button variant="outline" size="sm" @click="goToPage(currentPage - 1)" :disabled="currentPage <= 1">上一页</Button>
-            <Button variant="outline" size="sm" @click="goToPage(currentPage + 1)" :disabled="currentPage >= totalPages">下一页</Button>
+        <!-- 分页 (Apple 风格简洁设计) -->
+        <div v-if="total > 0" class="mt-8 flex items-center justify-center gap-3">
+          <!-- 每页数量 -->
+          <Select :model-value="String(pageSize)" @update:model-value="changePageSize">
+            <SelectTrigger class="w-20 h-8 text-xs border-0 bg-muted/50 hover:bg-muted">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="20">20 张</SelectItem>
+              <SelectItem value="40">40 张</SelectItem>
+              <SelectItem value="60">60 张</SelectItem>
+              <SelectItem value="100">100 张</SelectItem>
+            </SelectContent>
+          </Select>
+
+          <div class="flex items-center gap-1 bg-muted/50 rounded-lg p-1">
+            <!-- 上一页 -->
+            <button
+              class="w-8 h-8 flex items-center justify-center rounded-md transition-colors"
+              :class="currentPage <= 1 ? 'text-muted-foreground/30 cursor-not-allowed' : 'text-foreground hover:bg-background'"
+              :disabled="currentPage <= 1"
+              @click="goToPage(currentPage - 1)"
+            >
+              <ChevronLeft class="w-4 h-4" />
+            </button>
+
+            <!-- 可编辑页码 -->
+            <div class="flex items-center gap-1 px-2">
+              <input
+                v-model="jumpPage"
+                type="text"
+                class="w-10 h-7 text-center text-sm bg-background border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+                :placeholder="String(currentPage)"
+                @keyup.enter="handleJump"
+                @blur="handleJump"
+              />
+              <span class="text-muted-foreground text-sm">/</span>
+              <span class="text-muted-foreground text-sm">{{ totalPages }}</span>
+            </div>
+
+            <!-- 下一页 -->
+            <button
+              class="w-8 h-8 flex items-center justify-center rounded-md transition-colors"
+              :class="currentPage >= totalPages ? 'text-muted-foreground/30 cursor-not-allowed' : 'text-foreground hover:bg-background'"
+              :disabled="currentPage >= totalPages"
+              @click="goToPage(currentPage + 1)"
+            >
+              <ChevronRight class="w-4 h-4" />
+            </button>
           </div>
+
+          <!-- 总数提示 -->
+          <span class="text-xs text-muted-foreground">共 {{ total }} 张</span>
         </div>
       </div>
     </main>

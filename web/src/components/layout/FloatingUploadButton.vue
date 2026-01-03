@@ -33,7 +33,7 @@ function handleClick() {
     <button
       v-if="isVisible"
       @click="handleClick"
-      class="fixed right-6 bottom-6 z-50 w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-lg hover:shadow-xl hover:scale-105 active:scale-95 transition-all duration-200 flex items-center justify-center group"
+      class="fixed right-6 bottom-20 z-50 w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-lg hover:shadow-xl hover:scale-105 active:scale-95 transition-all duration-200 flex items-center justify-center group"
       aria-label="上传图片"
     >
       <Plus class="w-6 h-6 group-hover:rotate-90 transition-transform duration-200" />

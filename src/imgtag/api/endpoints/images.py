@@ -24,6 +24,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     UploadFile,
 )
 from pydantic import BaseModel
@@ -47,7 +48,7 @@ from imgtag.db.repositories import (
     tag_repository,
 )
 from imgtag.models.image import Image
-from imgtag.models.tag import Tag
+from imgtag.models.tag import Tag, ImageTag
 from imgtag.schemas import (
     ImageCreateByUrl,
     ImageCreateManual,
@@ -1214,6 +1215,142 @@ async def delete_image(
     except Exception as e:
         logger.error(f"删除图像失败: {e}")
         raise HTTPException(status_code=500, detail=f"删除图像失败: {e}")
+
+
+@router.post("/{image_id}/tags", response_model=dict[str, Any])
+async def add_tag_to_image(
+    image_id: int,
+    tag_id: Optional[int] = Query(default=None, description="标签ID（与tag_name二选一）"),
+    tag_name: Optional[str] = Query(default=None, description="标签名称（与tag_id二选一，不存在则创建）"),
+    current_user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Add a single tag to an image (requires login).
+
+    Supports adding by tag_id or tag_name.
+    If tag_name is provided and doesn't exist, creates a new level=2 tag.
+
+    Args:
+        image_id: Image ID.
+        tag_id: Tag ID to add (optional).
+        tag_name: Tag name to add (optional, will create if not exists).
+        current_user: Current user.
+        session: Database session.
+
+    Returns:
+        Success confirmation with tag info.
+    """
+    if not tag_id and not tag_name:
+        raise HTTPException(status_code=400, detail="请提供 tag_id 或 tag_name 参数")
+
+    logger.info(f"添加标签: image_id={image_id}, tag_id={tag_id}, tag_name={tag_name}")
+
+    try:
+        image = await image_repository.get_by_id(session, image_id)
+        if not image:
+            raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
+
+        check_image_permission(image, current_user, "编辑")
+
+        resolved_tag = None
+        is_new = False
+
+        if tag_id:
+            # 按 ID 查找
+            resolved_tag = await tag_repository.get_by_id(session, tag_id)
+            if not resolved_tag:
+                raise HTTPException(status_code=404, detail=f"未找到 ID 为 {tag_id} 的标签")
+        else:
+            # 按名称查找或创建（合并为单次操作）
+            tag_name = tag_name.strip()
+            resolved_tag, is_new = await tag_repository.get_or_create_with_flag(
+                session, tag_name, level=2, source="user"
+            )
+            if is_new:
+                logger.info(f"创建新标签: id={resolved_tag.id}, name={tag_name}")
+
+        # 使用 upsert 避免先查询再插入
+        stmt = pg_insert(ImageTag).values(
+            image_id=image_id,
+            tag_id=resolved_tag.id,
+            source="user",
+            added_by=current_user.get("id"),
+            sort_order=99,
+            added_at=datetime.now(timezone.utc),
+        ).on_conflict_do_nothing(index_elements=["image_id", "tag_id"])
+        
+        result = await session.execute(stmt)
+        await session.flush()
+        
+        # rowcount=0 表示已存在
+        already_exists = result.rowcount == 0
+
+        return {
+            "message": "标签已存在" if already_exists else "标签添加成功",
+            "tag_id": resolved_tag.id,
+            "tag_name": resolved_tag.name,
+            "is_new": is_new and not already_exists,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"添加标签失败: {e}")
+        raise HTTPException(status_code=500, detail=f"添加标签失败: {e}")
+
+
+
+@router.delete("/{image_id}/tags/{tag_id}", response_model=dict[str, Any])
+async def remove_tag_from_image(
+    image_id: int,
+    tag_id: int,
+    current_user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Remove a single tag from an image (requires login).
+
+    Only level=2 (normal) tags can be removed.
+
+    Args:
+        image_id: Image ID.
+        tag_id: Tag ID to remove.
+        current_user: Current user.
+        session: Database session.
+
+    Returns:
+        Success confirmation.
+    """
+    logger.info(f"删除标签: image_id={image_id}, tag_id={tag_id}")
+
+    try:
+        image = await image_repository.get_by_id(session, image_id)
+        if not image:
+            raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
+
+        check_image_permission(image, current_user, "编辑")
+
+        # Check if tag exists and is level=2
+        tag = await tag_repository.get_by_id(session, tag_id)
+        if not tag:
+            raise HTTPException(status_code=404, detail=f"未找到 ID 为 {tag_id} 的标签")
+        if tag.level != 2:
+            raise HTTPException(status_code=400, detail="只能删除普通标签 (level=2)")
+
+        # Remove tag
+        removed = await image_tag_repository.remove_tag_from_image(
+            session,
+            image_id=image_id,
+            tag_id=tag_id,
+        )
+
+        if not removed:
+            raise HTTPException(status_code=404, detail="该图片没有此标签")
+
+        return {"message": "标签删除成功", "tag_id": tag_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除标签失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除标签失败: {e}")
 
 class BatchDeleteRequest(BaseModel):
     """Request body for batch delete."""

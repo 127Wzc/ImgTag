@@ -84,7 +84,7 @@ npx vercel --prod
 | Build command | `pnpm install && pnpm build` |
 | Publish directory | `web/dist` |
 
-4. 添加环境变量：`VITE_API_BASE_URL`
+4. 添加环境变量：`VITE_API_RL`
 
 ### 方式二：使用配置文件
 
