@@ -30,6 +30,75 @@
 
 ---
 
+<details>
+<summary><b>📸 Screenshots (Click to expand)</b></summary>
+
+### 🏠 Dashboard - Overview & Statistics
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+Real-time display of total images, pending analysis queue, today's uploads/analysis stats. Tag usage Top rankings at a glance.
+
+---
+
+### 🖼️ My Files - Image Management & Filtering
+
+![My Files](docs/screenshots/my-files.png)
+
+Filter by category, resolution, keywords. Inline tag editing, batch selection for one-click tagging or deletion.
+
+---
+
+### 🔍 Image Detail - AI Description & Tags
+
+![Image Detail](docs/screenshots/image-detail.png)
+
+View AI-generated descriptions, tag sources (AI/User), image metadata. Copy image links and edit descriptions.
+
+---
+
+### ✨ Explore - Browse & Smart Search
+
+![Explore](docs/screenshots/search.png)
+
+Multi-dimensional search by tags and descriptions. Semantic search with natural language, vector similarity-based retrieval.
+
+---
+
+### 📤 Upload - Smart Analysis
+
+![Upload](docs/screenshots/upload.png)
+
+Drag & drop upload, ZIP batch import, URL fetch. Optional AI auto-analysis for tags and descriptions.
+
+---
+
+### 🏷️ Tag Management - Categories & Statistics
+
+![Tags](docs/screenshots/tags.png)
+
+Three-tier tag system: Main categories (Wallpaper/Meme etc.), Resolution (4K/2K etc.), Normal tags. Usage count and source tracking.
+
+---
+
+### 💾 Storage Endpoints - Multi-Endpoint Config
+
+![Storage](docs/screenshots/storage.png)
+
+Local storage and S3-compatible endpoints (MinIO, AWS S3, etc.). Configurable primary endpoint and backup sync (auto + scheduled). Multi-endpoint load balancing.
+
+---
+
+### ⚙️ Settings - AI Model Configuration
+
+![Settings](docs/screenshots/settings.png)
+
+Configure vision models (OpenAI, Gemini, etc.), embedding models, and system parameters.
+
+</details>
+
+---
+
 ## 🐳 Quick Deploy
 
 **Prerequisites**: PostgreSQL database with pgvector extension

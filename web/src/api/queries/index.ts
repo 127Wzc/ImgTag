@@ -9,6 +9,8 @@ export {
     useBatchUpload,
     useDeleteImage,
     useUpdateImage,
+    useAddImageTag,
+    useRemoveImageTag,
 } from './images'
 
 // Tags

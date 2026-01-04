@@ -238,3 +238,43 @@ export function useUpdateImage() {
         },
     })
 }
+
+/**
+ * 为图片添加单个标签（支持 ID 或名称）
+ */
+export function useAddImageTag() {
+    return useMutation({
+        mutationFn: async ({ imageId, tagId, tagName }: {
+            imageId: number
+            tagId?: number
+            tagName?: string
+        }) => {
+            const params = new URLSearchParams()
+            if (tagId) params.set('tag_id', tagId.toString())
+            if (tagName) params.set('tag_name', tagName)
+
+            const { data } = await apiClient.post<{
+                message: string
+                tag_id: number
+                tag_name: string
+                is_new: boolean
+            }>(`/images/${imageId}/tags?${params.toString()}`)
+            return data
+        },
+    })
+}
+
+/**
+ * 从图片删除单个标签
+ */
+export function useRemoveImageTag() {
+    return useMutation({
+        mutationFn: async ({ imageId, tagId }: { imageId: number; tagId: number }) => {
+            const { data } = await apiClient.delete<{ message: string; tag_id: number }>(
+                `/images/${imageId}/tags/${tagId}`
+            )
+            return data
+        },
+    })
+}
+

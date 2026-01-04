@@ -512,7 +512,7 @@ onUnmounted(() => {
                   <span 
                     v-for="tag in resolutionTags" 
                     :key="tag.name"
-                    class="px-2.5 py-1 bg-blue-500/70 text-white text-xs rounded-full"
+                    class="px-2.5 py-1 bg-sky-500/80 text-white text-xs rounded-full font-medium"
                   >
                     {{ tag.name }}
                   </span>

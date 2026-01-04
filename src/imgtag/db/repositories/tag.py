@@ -3,9 +3,11 @@
 Provides tag-specific queries including hierarchical tag support.
 """
 
+from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, delete as sa_delete, func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.db.repositories.base import BaseRepository
@@ -68,6 +70,38 @@ class TagRepository(BaseRepository[Tag]):
             source=source,
             level=level,
         )
+
+    async def get_or_create_with_flag(
+        self,
+        session: AsyncSession,
+        name: str,
+        *,
+        source: str = "user",
+        level: int = 2,
+    ) -> tuple[Tag, bool]:
+        """Get existing tag or create new one, with creation flag.
+
+        Args:
+            session: Database session.
+            name: Tag name.
+            source: Tag source (system/ai/user).
+            level: Tag level (0=category, 1=resolution, 2=normal).
+
+        Returns:
+            Tuple of (Tag, is_new).
+        """
+        existing = await self.get_by_name(session, name)
+        if existing:
+            return existing, False
+
+        new_tag = await self.create(
+            session,
+            name=name,
+            source=source,
+            level=level,
+        )
+        return new_tag, True
+
 
     async def get_all_with_count(
         self,
@@ -300,20 +334,18 @@ class TagRepository(BaseRepository[Tag]):
         Returns:
             List of tag dicts with usage count.
         """
-        stmt = (
-            select(
-                Tag.id,
-                Tag.name,
-                Tag.level,
-                Tag.source,
-                Tag.description,
-                Tag.sort_order,
-                Tag.created_at,
-                Tag.code,
-                Tag.prompt,
-                func.count(ImageTag.image_id).label("usage_count"),
-            )
-            .outerjoin(ImageTag, Tag.id == ImageTag.tag_id)
+        # 直接查询 tags 表，不再 JOIN 计算 usage_count
+        stmt = select(
+            Tag.id,
+            Tag.name,
+            Tag.level,
+            Tag.source,
+            Tag.description,
+            Tag.sort_order,
+            Tag.created_at,
+            Tag.code,
+            Tag.prompt,
+            Tag.usage_count,
         )
         
         # 添加 level 过滤
@@ -323,13 +355,11 @@ class TagRepository(BaseRepository[Tag]):
         # 添加关键字模糊搜索
         if keyword:
             stmt = stmt.where(Tag.name.ilike(f"%{keyword}%"))
-        
-        stmt = stmt.group_by(Tag.id)
 
         if sort_by == "name":
             stmt = stmt.order_by(Tag.level, Tag.name)
         else:
-            stmt = stmt.order_by(Tag.level, func.count(ImageTag.image_id).desc())
+            stmt = stmt.order_by(Tag.level, Tag.usage_count.desc())
 
         stmt = stmt.offset(offset).limit(limit)
 
@@ -411,6 +441,35 @@ class TagRepository(BaseRepository[Tag]):
 
         await self.delete(session, tag)
         return True, f"分类 '{tag.name}' 已删除"
+
+    async def sync_usage_counts(
+        self,
+        session: AsyncSession,
+    ) -> int:
+        """Sync all tag usage counts by recalculating from image_tags.
+
+        Used for manual sync when triggers might be out of sync.
+
+        Args:
+            session: Database session.
+
+        Returns:
+            Number of tags updated.
+        """
+        # 使用一条 UPDATE 语句批量更新所有标签的 usage_count
+        await session.execute(text("""
+            UPDATE tags t
+            SET usage_count = (
+                SELECT COUNT(*) FROM image_tags it WHERE it.tag_id = t.id
+            )
+        """))
+        
+        # 获取更新的标签数量
+        count_stmt = select(func.count()).select_from(Tag)
+        count = (await session.execute(count_stmt)).scalar() or 0
+        
+        await session.flush()
+        return count
 
 
 class ImageTagRepository(BaseRepository[ImageTag]):
@@ -507,6 +566,32 @@ class ImageTagRepository(BaseRepository[ImageTag]):
         result = await session.execute(stmt)
         return result.scalars().all()
 
+    async def get_image_tag(
+        self,
+        session: AsyncSession,
+        image_id: int,
+        tag_id: int,
+    ) -> ImageTag | None:
+        """Get a specific image-tag association.
+
+        Args:
+            session: Database session.
+            image_id: Image ID.
+            tag_id: Tag ID.
+
+        Returns:
+            ImageTag if exists, None otherwise.
+        """
+        stmt = select(ImageTag).where(
+            and_(
+                ImageTag.image_id == image_id,
+                ImageTag.tag_id == tag_id,
+            )
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+
     async def set_image_tags(
         self,
         session: AsyncSession,
@@ -530,7 +615,6 @@ class ImageTagRepository(BaseRepository[ImageTag]):
         Returns:
             List of Tag instances after update.
         """
-        from datetime import datetime, timezone
 
         # Get current tags with source
         current_stmt = (
@@ -619,8 +703,6 @@ class ImageTagRepository(BaseRepository[ImageTag]):
         Returns:
             Number of associations changed.
         """
-        from datetime import datetime, timezone
-        from sqlalchemy import delete as sa_delete
 
         # Filter out invalid tag IDs (id=0 or non-existent)
         if not tag_ids:
@@ -705,7 +787,6 @@ class ImageTagRepository(BaseRepository[ImageTag]):
         Returns:
             Number of tags removed.
         """
-        from sqlalchemy import delete as sa_delete
 
         stmt = sa_delete(ImageTag).where(ImageTag.image_id == image_id)
         result = await session.execute(stmt)
@@ -753,8 +834,6 @@ class ImageTagRepository(BaseRepository[ImageTag]):
             if not image_ids:
                 return 0
 
-        from datetime import datetime, timezone
-        from sqlalchemy.dialects.postgresql import insert as pg_insert
 
         # Get or create all tags first
         tags = []
@@ -841,9 +920,6 @@ class ImageTagRepository(BaseRepository[ImageTag]):
             if not image_ids:
                 return 0
 
-        from datetime import datetime, timezone
-        from sqlalchemy import delete as sa_delete
-        from sqlalchemy.dialects.postgresql import insert as pg_insert
 
         # Delete existing tags for these images
         await session.execute(

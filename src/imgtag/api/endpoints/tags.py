@@ -288,5 +288,22 @@ async def sync_tags(
     admin: dict = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Sync tag usage counts (admin only, for compatibility)."""
-    return {"message": "标签同步完成（ORM 模式下实时计算）", "count": 0}
+    """Sync all tag usage counts (admin only).
+    
+    Recalculates usage_count for all tags from image_tags table.
+    Use this if triggers are out of sync or after bulk operations.
+    """
+    import time
+    start = time.time()
+    
+    count = await tag_repository.sync_usage_counts(session)
+    
+    elapsed = time.time() - start
+    logger.info(f"标签使用计数同步完成: {count} 个标签, 耗时 {elapsed:.3f}s")
+    
+    return {
+        "message": f"标签使用计数同步完成",
+        "count": count,
+        "elapsed_ms": round(elapsed * 1000, 2),
+    }
+
