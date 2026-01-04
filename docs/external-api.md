@@ -68,11 +68,20 @@ curl -H "api_key: YOUR_API_KEY" "http://your-domain/api/v1/external/images/rando
 | `description` | string | 否 | 图片描述 |
 | `category_id` | int | 否 | 主分类 ID |
 | `endpoint_id` | int | 否 | 存储端点 ID（默认使用系统默认端点） |
-| `auto_analyze` | bool | 否 | 是否自动 AI 分析，默认 true |
+| `auto_analyze` | bool | 否 | 是否自动 AI 分析，默认 true。**设为 false 有绝对优先级，完全跳过分析和向量生成** |
 | `callback_url` | string | 否 | 分析完成后的回调 URL |
 | `is_public` | bool | 否 | 是否公开可见，默认 true |
 
-> **智能跳过 AI 分析**：当同时提供 `tags` 和 `description` 时，系统会跳过 AI 视觉分析（只生成向量），仍可使用回调机制通知完成。
+#### 标签处理逻辑
+
+| 场景 | 触发条件 | 处理方式 |
+|------|----------|----------|
+| **禁用分析** | `auto_analyze=false` | 完全跳过 AI 和向量，只保存图片和用户标签 |
+| 完整跳过 AI | 同时提供 `tags` 和 `description` | 跳过 AI 分析，只生成向量嵌入 |
+| 部分 AI | 只提供 `tags` | 先保存为用户标签(source=user)，再 AI 分析补充 |
+| 完整 AI | 都不提供 | 完整 AI 视觉分析 |
+
+> **标签合并规则**：AI 分析的标签会与用户标签**合并**，当标签名重复时，**优先保留用户标签**（不会被覆盖）。
 
 **请求示例：**
 ```bash
@@ -113,7 +122,7 @@ curl -X POST "http://your-domain/api/v1/external/images?api_key=YOUR_KEY" \
 
 | 响应字段 | 说明 |
 |----------|------|
-| `skip_analyze` | 是否跳过了 AI 分析（true = 用户提供内容或禁用分析） |
+| `skip_analyze` | 是否跳过了 AI 分析。`auto_analyze=false` 有绝对优先级 |
 
 > 图片会保存到系统默认端点（可通过 `endpoint_id` 指定），如有备份端点会自动同步。
 

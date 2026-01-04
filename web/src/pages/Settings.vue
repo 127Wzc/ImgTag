@@ -51,13 +51,14 @@ interface ConfigDef {
   label: string
   type: 'text' | 'password' | 'number' | 'boolean' | 'select' | 'textarea' | 'combobox'
   description?: string
+  placeholder?: string
   options?: { value: string; label: string }[]
   showWhen?: { key: string; value: string }
 }
 
 const configDefinitions: Record<string, ConfigDef[]> = {
   vision: [
-    { key: 'vision_api_base_url', label: 'API 地址', type: 'text', description: 'OpenAI 兼容端点' },
+    { key: 'vision_api_base_url', label: 'API 地址', type: 'text', description: 'OpenAI 兼容端点', placeholder: 'https://api.openai.com/v1' },
     { key: 'vision_api_key', label: 'API 密钥', type: 'password' },
     { key: 'vision_model', label: '模型名称', type: 'combobox', description: '可选择或手动输入' },
     { key: 'vision_prompt', label: '分析提示词', type: 'textarea', description: '控制输出格式和风格' },
@@ -76,7 +77,7 @@ const configDefinitions: Record<string, ConfigDef[]> = {
     { key: 'embedding_local_model', label: '本地模型', type: 'text', description: 'HuggingFace 模型名称', showWhen: { key: 'embedding_mode', value: 'local' } },
     { key: 'hf_endpoint', label: 'HF 镜像地址', type: 'text', showWhen: { key: 'embedding_mode', value: 'local' } },
     // API 模式配置
-    { key: 'embedding_api_base_url', label: 'API 地址', type: 'text', showWhen: { key: 'embedding_mode', value: 'api' } },
+    { key: 'embedding_api_base_url', label: 'API 地址', type: 'text', showWhen: { key: 'embedding_mode', value: 'api' }, placeholder: 'https://api.siliconflow.cn/v1' },
     { key: 'embedding_api_key', label: 'API 密钥', type: 'password', showWhen: { key: 'embedding_mode', value: 'api' } },
     { key: 'embedding_model', label: 'API 模型', type: 'text', showWhen: { key: 'embedding_mode', value: 'api' } },
     { key: 'embedding_dimensions', label: '向量维度', type: 'number' },
@@ -1081,7 +1082,7 @@ onMounted(() => fetchConfigs())
                         v-model="configs['embedding_api_base_url']"
                         type="text"
                         class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                        placeholder="https://api.openai.com/v1"
+                        placeholder="https://api.siliconflow.cn/v1"
                       />
                     </div>
                     <div class="space-y-1.5">
@@ -1317,6 +1318,7 @@ onMounted(() => fetchConfigs())
                             :id="def.key"
                             v-model="configs[def.key]"
                             :type="def.type"
+                            :placeholder="def.placeholder"
                             class="w-full px-3 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring"
                           />
                         </template>

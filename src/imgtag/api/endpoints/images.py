@@ -33,6 +33,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import get_current_user, get_current_user_optional, require_admin
+from imgtag.core.category_cache import get_category_code_cached
 from imgtag.core.logging_config import get_logger, get_perf_logger
 from imgtag.core.storage_constants import (
     StorageProvider,
@@ -62,6 +63,7 @@ from imgtag.schemas import (
     UploadAnalyzeResponse,
 )
 from imgtag.services import embedding_service, storage_service, upload_service
+from imgtag.services.backup_service import trigger_backup_for_image
 from imgtag.services.task_queue import task_queue
 
 logger = get_logger(__name__)
@@ -304,7 +306,6 @@ async def analyze_and_create_from_url(
         # Get category code for subdirectory (if category specified)
         category_code = None
         if request.category_id:
-            from imgtag.core.category_cache import get_category_code_cached
             category_code = await get_category_code_cached(session, request.category_id)
         
         # Generate object key (hash-based path)
@@ -370,6 +371,7 @@ async def analyze_and_create_from_url(
                 image_id=new_image.id,
                 user_id=user.get("id"),
                 tags=tags,
+                description=description,
                 category_id=request.category_id,
                 width=width,
                 height=height,
@@ -379,7 +381,6 @@ async def analyze_and_create_from_url(
         )
         
         # Trigger backup to backup endpoints
-        from imgtag.services.backup_service import trigger_backup_for_image
         asyncio.create_task(trigger_backup_for_image(new_image.id, target_endpoint.id))
 
         total_time = time.time() - start_time
@@ -403,6 +404,7 @@ async def _post_upload_process(
     image_id: int,
     user_id: int | None,
     tags: list[str],
+    description: str,
     category_id: int | None,
     width: int | None,
     height: int | None,
@@ -414,10 +416,16 @@ async def _post_upload_process(
     此函数在响应返回后异步执行，不阻塞上传响应。
     使用独立的数据库会话，确保事务独立性。
     
+    标签处理逻辑：
+    - 若同时提供 tags 和 description，跳过 AI 分析，只生成向量
+    - 若只提供 tags，AI 分析会补充标签并合并（优先用户标签）
+    - 若都不提供，完整 AI 分析
+    
     Args:
         image_id: 图片 ID
         user_id: 上传用户 ID
         tags: 用户指定的标签列表
+        description: 用户指定的描述
         category_id: 分类 ID
         width: 图片宽度
         height: 图片高度  
@@ -460,13 +468,30 @@ async def _post_upload_process(
             # 提交标签事务
             await session.commit()
             
-            # 4. 添加 AI 分析任务
-            if auto_analyze:
+            # 4. 判断是否需要 AI 分析
+            # - 若用户提供了 tags + description，无需 AI 分析，只生成向量
+            # - 若只提供 tags，需要 AI 分析补充并合并
+            # - 若都不提供，需要完整 AI 分析
+            # 注意：空字符串和空白字符串都不算有效值
+            has_valid_tags = bool([t for t in tags if t and t.strip()])
+            has_valid_description = bool(description and description.strip())
+            user_provided_full = has_valid_tags and has_valid_description
+            need_analysis = auto_analyze and not user_provided_full
+            
+            if need_analysis:
+                # 加入 AI 分析任务队列
                 t4 = time.time()
                 await task_queue.add_tasks([image_id])
                 perf_logger.debug(f"[Async] 添加AI分析任务耗时: {time.time() - t4:.4f}秒")
                 if not task_queue._running:
                     asyncio.create_task(task_queue.start_processing())
+            elif user_provided_full:
+                # 用户已提供完整内容，只需生成向量
+                t4 = time.time()
+                await embedding_service.save_embedding_for_image(
+                    image_id, description, tags
+                )
+                perf_logger.debug(f"[Async] 生成向量耗时: {time.time() - t4:.4f}秒")
             
             log.info(f"[Async] 后台处理完成: image_id={image_id}")
     except Exception as e:
@@ -533,7 +558,6 @@ async def upload_and_analyze(
         # Get category code for subdirectory (if category specified)
         category_code = None
         if category_id:
-            from imgtag.core.category_cache import get_category_code_cached
             category_code = await get_category_code_cached(session, category_id)
         
         # Generate object key (hash-based path without category)
@@ -636,6 +660,7 @@ async def upload_and_analyze(
                 image_id=new_image.id,
                 user_id=user.get("id"),
                 tags=final_tags,
+                description=final_description,
                 category_id=category_id,
                 width=width,
                 height=height,
@@ -645,7 +670,6 @@ async def upload_and_analyze(
         )
         
         # 触发自动备份到备份端点
-        from imgtag.services.backup_service import trigger_backup_for_image
         asyncio.create_task(
             trigger_backup_for_image(new_image.id, actual_endpoint_id)
         )
@@ -708,7 +732,6 @@ async def upload_zip(
         # Get category code for subdirectory
         category_code = None
         if category_id:
-            from imgtag.core.category_cache import get_category_code_cached
             category_code = await get_category_code_cached(session, category_id)
 
         with zipfile.ZipFile(io.BytesIO(zip_content), "r") as zf:

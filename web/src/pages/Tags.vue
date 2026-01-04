@@ -284,6 +284,8 @@ const isLoading = computed(() => statsLoading.value || tagsLoading.value)
               class="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm cursor-default"
               :class="getTagColor(activeLevel)"
             >
+              <!-- 主分类显示 ID（供外部 API 使用） -->
+              <span v-if="activeLevel === 0" class="text-xs font-mono opacity-50">#{{ tag.id }}</span>
               <span>{{ tag.name }}</span>
               <span class="text-xs opacity-60">{{ tag.usage_count }}</span>
               

@@ -13,7 +13,7 @@ from datetime import datetime, timezone as tz
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.dependencies import require_api_key
@@ -25,7 +25,11 @@ from imgtag.db.repositories import (
     image_repository,
     image_tag_repository,
     storage_endpoint_repository,
+    tag_repository,
 )
+from imgtag.core.category_cache import get_category_code_cached
+from imgtag.services import embedding_service
+from imgtag.services.backup_service import trigger_backup_for_image
 from imgtag.services.storage_service import storage_service
 from imgtag.services.task_queue import task_queue
 from imgtag.services.upload_service import upload_service
@@ -37,16 +41,44 @@ router = APIRouter()
 
 
 class ExternalImageCreate(BaseModel):
-    """External API image create request."""
+    """External API image create request.
+    
+    标签处理逻辑：
+    - 若同时提供 tags 和 description，跳过 AI 分析，只生成向量嵌入
+    - 若只提供 tags，先保存为用户标签(source=user)，再进行 AI 分析
+    - AI 分析的标签会与用户标签合并，重名标签优先保留用户标签
+    - 若都不指定，正常进行 AI 分析
+    """
 
-    image_url: str
-    tags: list[str] = []
-    description: str = ""
-    category_id: int | None = None  # 主分类ID
-    endpoint_id: int | None = None  # 存储端点ID（不可选备份端点）
-    auto_analyze: bool = True
-    callback_url: str | None = None  # 分析完成后的回调URL
-    is_public: bool = True  # 是否公开可见，默认公开
+    image_url: str = Field(..., description="图片URL")
+    tags: list[str] = Field(
+        default=[], 
+        description="用户自定义标签列表(level=2)。会与 AI 分析结果合并，重名优先保留用户标签"
+    )
+    description: str = Field(
+        default="", 
+        description="用户提供的描述。若同时提供 tags 和 description 则跳过 AI 分析"
+    )
+    category_id: int | None = Field(
+        default=None, 
+        description="主分类ID(level=0标签)，用于分类专用提示词和存储子目录"
+    )
+    endpoint_id: int | None = Field(
+        default=None, 
+        description="目标存储端点ID，不可选备份端点，不指定则使用系统默认"
+    )
+    auto_analyze: bool = Field(
+        default=True, 
+        description="是否启用 AI 分析。若为 False 则不分析也不生成向量"
+    )
+    callback_url: str | None = Field(
+        default=None, 
+        description="分析完成后的回调URL，会 POST 包含 tags/description/image_url 的 JSON"
+    )
+    is_public: bool = Field(
+        default=True, 
+        description="是否公开可见，默认公开"
+    )
 
 
 
@@ -117,7 +149,6 @@ async def analyze_image_from_url(
     Returns:
         Created image info. If wait_for_result=True, includes AI-generated tags and description.
     """
-    from imgtag.db.repositories import tag_repository
     
     start_time = time.time()
     username = api_user.get("username")
@@ -166,7 +197,6 @@ async def analyze_image_from_url(
         # 获取分类代码（如果指定了分类）
         category_code = None
         if request.category_id:
-            from imgtag.core.category_cache import get_category_code_cached
             category_code = await get_category_code_cached(session, request.category_id)
         
         full_object_key = storage_service.get_full_object_key(object_key, category_code)
@@ -225,24 +255,35 @@ async def analyze_image_from_url(
         await session.commit()
         
         # 触发自动备份到备份端点（必须在 commit 之后）
-        from imgtag.services.backup_service import trigger_backup_for_image
         asyncio.create_task(
             trigger_backup_for_image(new_image.id, target_endpoint.id)
         )
 
-        # 判断是否跳过 AI 分析
-        # 注意：即使用户提供了 tags 和 description，也可以进入队列
-        # 队列会自动识别并跳过 AI 分析，只生成向量（参见 task_queue._process_task）
-        user_provided_content = bool(request.tags and request.description)
-        skip_analyze = not request.auto_analyze
+        # 判断是否需要 AI 分析
+        # - auto_analyze=false 有绝对优先级，直接跳过
+        # - 若用户提供了 tags + description，无需 AI 分析，只生成向量
+        # - 若只提供 tags，需要 AI 分析补充并合并
+        # - 若都不提供，需要完整 AI 分析
+        # 注意：空字符串和空白字符串都不算有效值
+        skip_analyze = not request.auto_analyze  # 绝对优先级
+        has_valid_tags = bool([t for t in request.tags if t and t.strip()])
+        has_valid_description = bool(request.description and request.description.strip())
+        user_provided_full = has_valid_tags and has_valid_description
+        need_analysis = request.auto_analyze and not user_provided_full
         
-        if request.auto_analyze or user_provided_content:
-            # 加入任务队列
-            # - 如果用户提供了完整内容，队列会跳过 AI 分析，只生成向量
-            # - 如果需要 AI 分析，队列会执行完整流程
+        if need_analysis:
+            # 加入 AI 分析任务队列
+            # - 如果用户提供了部分标签，AI 会补充并合并
             await task_queue.add_tasks(
                 [new_image.id], 
                 callback_url=request.callback_url,
+            )
+        elif user_provided_full:
+            # 用户已提供完整内容，只需生成向量（后台执行）
+            asyncio.create_task(
+                embedding_service.save_embedding_for_image(
+                    new_image.id, request.description, request.tags
+                )
             )
 
         process_time = time.time() - start_time
