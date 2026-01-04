@@ -258,7 +258,7 @@ function isAnyOpPending(imageId: number): boolean {
 </script>
 
 <template>
-  <div class="columns-2 sm:columns-3 lg:columns-4 xl:columns-5 gap-4 space-y-4">
+  <div class="columns-2 sm:columns-3 md:columns-4 lg:columns-5 xl:columns-6 2xl:columns-7 min-[1920px]:columns-8 gap-4 space-y-4">
     <div 
       v-for="(image, index) in images" 
       :key="image.id"

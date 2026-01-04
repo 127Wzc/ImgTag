@@ -272,7 +272,7 @@ function nextImage() {
 <template>
   <div class="min-h-screen">
     <main class="py-6 px-6">
-      <div class="max-w-7xl">
+      <div>
         <!-- 标题区 -->
         <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
@@ -383,7 +383,7 @@ function nextImage() {
         />
 
         <!-- 分页 (Apple 风格简洁设计) -->
-        <div v-if="total > 0" class="mt-8 flex items-center justify-center gap-3">
+        <div v-if="total > 0" class="mt-8 flex items-center justify-center gap-3 max-w-7xl mx-auto">
           <!-- 每页数量 -->
           <Select :model-value="String(pageSize)" @update:model-value="changePageSize">
             <SelectTrigger class="w-20 h-8 text-xs border-0 bg-muted/50 hover:bg-muted">
