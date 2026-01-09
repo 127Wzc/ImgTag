@@ -461,19 +461,29 @@ class TaskQueueService:
                 image_id, analysis.description, analysis.tags
             )
             
+            # 获取合并后的完整标签列表（用户标签 + AI 标签），按 source 排序：用户标签优先
+            async with async_session_maker() as session:
+                tags_with_source = await image_repository.get_image_tags_with_source(session, image_id)
+                # 排序：user/system 标签优先，ai 标签其次，同级别按 sort_order 排序
+                sorted_tags = sorted(
+                    tags_with_source,
+                    key=lambda t: (0 if t["source"] in ("user", "system") else 1, t["sort_order"])
+                )
+                final_tags = [t["name"] for t in sorted_tags]
+            
             # 完成
             await self._mark_task_completed(task.id, {
                 "image_id": image_id,
-                "tags": analysis.tags,
+                "tags": final_tags,
                 "description": analysis.description,
             })
             logger.info(f"图片 {image_id} 处理完成")
             
-            # 回调
+            # 回调 - 使用合并后的完整标签
             if callback_url:
                 asyncio.create_task(self._send_callback(
                     callback_url, image_id, task.id, True, 
-                    analysis.tags, analysis.description
+                    final_tags, analysis.description
                 ))
             
         except Exception as e:
