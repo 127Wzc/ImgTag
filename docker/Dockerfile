@@ -17,9 +17,10 @@ FROM python:3.11-slim AS base
 
 WORKDIR /app
 
-# 安装系统依赖
+# 安装系统依赖（ca-certificates 用于 HTTPS 证书验证）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 uv
