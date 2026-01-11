@@ -6,6 +6,14 @@ on:
     tags:
       - 'v*'
   
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号 (如 2.0.1，不需要加 v 前缀)'
+        required: true
+        type: string
+  
   # 被其他工作流调用（如 auto-release）
   workflow_call:
     inputs:
