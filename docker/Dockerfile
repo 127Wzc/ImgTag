@@ -1,15 +1,26 @@
 # 多阶段构建：前端 + 后端合并为单一镜像
+# ============================================================
+# 前端构建阶段
+# 注意：在 CI 环境中，前端已经预先构建好并放在 web/dist 目录
+# 此阶段仅在本地构建或 dist 目录不存在时实际执行构建
+# ============================================================
 FROM node:20-slim AS web-builder
 
 WORKDIR /app/web
 
-# 安装依赖
-COPY web/package.json web/pnpm-lock.yaml ./
-RUN npm install -g pnpm && pnpm install --frozen-lockfile
+# 先复制预构建的 dist（如果存在）
+COPY web/dist* ./dist/
 
-# 构建前端
+# 如果 dist 不存在或为空，则执行构建
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN if [ ! -d "dist" ] || [ -z "$(ls -A dist 2>/dev/null)" ]; then \
+    npm install -g pnpm && pnpm install --frozen-lockfile; \
+    fi
+
 COPY web/ .
-RUN pnpm build
+RUN if [ ! -d "dist" ] || [ -z "$(ls -A dist 2>/dev/null)" ]; then \
+    pnpm build; \
+    fi
 
 # -----------------------------------------------------------
 # Python 后端基础镜像
