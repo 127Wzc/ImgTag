@@ -61,10 +61,12 @@ from imgtag.schemas import (
     SimilarSearchRequest,
     SimilarSearchResponse,
     UploadAnalyzeResponse,
+    PaginatedResponse,
 )
 from imgtag.services import embedding_service, storage_service, upload_service
 from imgtag.services.backup_service import trigger_backup_for_image
 from imgtag.services.task_queue import task_queue
+from imgtag.utils.pagination import PageParams
 
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
@@ -912,8 +914,8 @@ async def search_images(
             skip_visibility_filter=skip_visibility_filter,
             pending_only=request.pending_only,
             duplicates_only=request.duplicates_only,
-            limit=request.limit,
-            offset=request.offset,
+            limit=request.size,
+            offset=(request.page - 1) * request.size,
             sort_by=request.sort_by,
             sort_desc=request.sort_desc,
         )
@@ -927,11 +929,13 @@ async def search_images(
         # Convert to response with batch URL retrieval
         images = await _images_to_responses(results["images"], tags_map)
 
-        response = ImageSearchResponse(
-            images=images,
+        # 使用通用分页响应
+        # 分页响应 (已移至顶部 import)
+        response = PaginatedResponse.create(
+            items=images,
             total=results["total"],
-            limit=results["limit"],
-            offset=results["offset"],
+            page=request.page,
+            size=request.size,
         )
 
         process_time = time.time() - start_time
@@ -988,7 +992,7 @@ async def smart_search(
             session,
             query_vector=query_vector,
             query_text=request.text,
-            limit=request.limit,
+            limit=request.size,
             threshold=request.threshold,
             vector_weight=request.vector_weight,
             tag_weight=request.tag_weight,
@@ -1001,9 +1005,13 @@ async def smart_search(
         # Convert to response model
         images = [ImageWithSimilarity(**img) for img in results]
 
-        response = SimilarSearchResponse(
-            images=images,
+        # 使用通用分页响应
+        # 分页响应 (已移至顶部 import)
+        response = PaginatedResponse.create(
+            items=images,
             total=len(images),
+            page=request.page,
+            size=request.size,
         )
 
         process_time = time.time() - start_time
@@ -1052,8 +1060,8 @@ async def get_my_images(
             user_id=current_user_id,  # Always filter by current user
             pending_only=request.pending_only,
             duplicates_only=request.duplicates_only,
-            limit=request.limit,
-            offset=request.offset,
+            limit=request.size,
+            offset=(request.page - 1) * request.size,
             sort_by=request.sort_by,
             sort_desc=request.sort_desc,
         )
@@ -1067,11 +1075,13 @@ async def get_my_images(
         # Convert to response with batch URL retrieval
         images = await _images_to_responses(results["images"], tags_map)
 
-        response = ImageSearchResponse(
-            images=images,
+        # 使用通用分页响应
+        # 分页响应 (已移至顶部 import)
+        response = PaginatedResponse.create(
+            items=images,
             total=results["total"],
-            limit=results["limit"],
-            offset=results["offset"],
+            page=request.page,
+            size=request.size,
         )
 
         process_time = time.time() - start_time

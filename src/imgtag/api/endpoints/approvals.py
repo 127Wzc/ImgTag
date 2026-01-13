@@ -24,6 +24,7 @@ from imgtag.db.repositories import (
     audit_log_repository,
     image_repository,
 )
+from imgtag.utils.pagination import PageParams
 
 logger = get_logger(__name__)
 
@@ -49,19 +50,18 @@ def _approval_to_dict(approval) -> dict:
 
 @router.get("/", response_model=ApprovalList)
 async def get_pending_approvals(
-    limit: int = 50,
-    offset: int = 0,
+    page: int = 1,
+    size: int = 50,
     admin: Dict = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
     """获取待审批列表（仅管理员）"""
     approvals, total = await approval_repository.get_pending(
-        session, limit=limit, offset=offset
+        session, limit=size, offset=(page - 1) * size
     )
-    return {
-        "approvals": [_approval_to_dict(a) for a in approvals],
-        "total": total,
-    }
+    
+    params = PageParams(page=page, size=size)
+    return params.paginate([_approval_to_dict(a) for a in approvals], total)
 
 
 @router.get("/{approval_id}", response_model=ApprovalResponse)

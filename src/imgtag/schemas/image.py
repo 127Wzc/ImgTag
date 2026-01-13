@@ -9,6 +9,8 @@ Pydantic 模式定义
 from typing import List, Optional
 from pydantic import BaseModel, Field, HttpUrl
 
+from .base import BaseSchema
+
 
 # ============= 图像分析结果 =============
 
@@ -40,7 +42,7 @@ class ImageCreateManual(BaseModel):
 
 # ============= 图像响应 =============
 
-class TagWithSource(BaseModel):
+class TagWithSource(BaseSchema):
     """带来源的标签"""
     id: int = Field(..., description="标签 ID")
     name: str = Field(..., description="标签名称")
@@ -48,7 +50,7 @@ class TagWithSource(BaseModel):
     level: int = Field(default=2, description="标签级别: 0=主分类, 1=分辨率, 2=普通标签")
 
 
-class ImageResponse(BaseModel):
+class ImageResponse(BaseSchema):
     """图像响应
     
     Note: image_url is computed dynamically from image_locations.
@@ -89,7 +91,7 @@ class ImageUpdate(BaseModel):
 # ============= 搜索请求 =============
 
 class ImageSearchRequest(BaseModel):
-    """高级图像搜索请求"""
+    """高级图像搜索请求 (Page/Size 风格)"""
     tags: Optional[List[str]] = Field(default=None, description="标签列表（包含任一即匹配）")
     url_contains: Optional[str] = Field(default=None, description="URL 包含的文本")
     description_contains: Optional[str] = Field(default=None, description="描述包含的文本（向后兼容）")
@@ -98,19 +100,22 @@ class ImageSearchRequest(BaseModel):
     resolution_id: Optional[int] = Field(default=None, description="分辨率 tag_id (level=1)")
     pending_only: bool = Field(default=False, description="仅显示待分析的图片（无标签）")
     duplicates_only: bool = Field(default=False, description="仅显示重复的图片")
-    limit: int = Field(default=10, ge=1, le=100, description="返回结果数量")
-    offset: int = Field(default=0, ge=0, description="结果偏移量")
+    # Page/Size 风格分页
+    page: int = Field(default=1, ge=1, description="页码 (从 1 开始)")
+    size: int = Field(default=20, ge=1, le=100, description="每页数量")
     sort_by: str = Field(default="id", description="排序字段")
-    sort_desc: bool = Field(default=False, description="是否降序")
+    sort_desc: bool = Field(default=True, description="是否降序")
 
 
 class SimilarSearchRequest(BaseModel):
-    """相似度搜索请求"""
+    """相似度搜索请求 (Page/Size 风格)"""
     text: str = Field(..., description="搜索文本")
     tags: Optional[List[str]] = Field(default=None, description="标签列表")
     category_id: Optional[int] = Field(default=None, description="主分类 tag_id (level=0)")
     resolution_id: Optional[int] = Field(default=None, description="分辨率 tag_id (level=1)")
-    limit: int = Field(default=10, ge=1, le=100, description="返回结果数量")
+    # Page/Size 风格分页
+    page: int = Field(default=1, ge=1, description="页码 (从 1 开始)")
+    size: int = Field(default=20, ge=1, le=100, description="每页数量")
     threshold: float = Field(default=0.7, ge=0, le=1, description="相似度阈值")
     vector_weight: float = Field(default=0.7, ge=0, le=1, description="向量相似度权重")
     tag_weight: float = Field(default=0.3, ge=0, le=1, description="标签匹配权重")
@@ -118,23 +123,18 @@ class SimilarSearchRequest(BaseModel):
 
 # ============= 搜索响应 =============
 
-class ImageSearchResponse(BaseModel):
-    """图像搜索响应"""
-    images: List[ImageResponse] = Field(default_factory=list, description="图像列表")
-    total: int = Field(default=0, description="总数")
-    limit: int = Field(default=10, description="每页数量")
-    offset: int = Field(default=0, description="偏移量")
+from .base import PaginatedResponse
 
+# 图像搜索响应 - 直接使用通用分页基类
+ImageSearchResponse = PaginatedResponse[ImageResponse]
 
-class SimilarSearchResponse(BaseModel):
-    """相似度搜索响应"""
-    images: List[ImageWithSimilarity] = Field(default_factory=list, description="图像列表")
-    total: int = Field(default=0, description="结果数量")
+# 相似度搜索响应 - 直接使用通用分页基类  
+SimilarSearchResponse = PaginatedResponse[ImageWithSimilarity]
 
 
 # ============= 上传响应 =============
 
-class UploadAnalyzeResponse(BaseModel):
+class UploadAnalyzeResponse(BaseSchema):
     """上传并分析响应"""
     id: int = Field(..., description="图像 ID")
     image_url: Optional[str] = Field(default=None, description="图像访问 URL (远程端点可能为空)")

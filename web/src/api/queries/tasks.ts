@@ -1,25 +1,25 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import { computed, type Ref } from 'vue'
 import apiClient from '../client'
-import type { Task, TaskResponse } from '@/types'
+import type { Task, TaskListResponse } from '@/types'
 
 /**
  * 获取任务列表
  */
 export function useTasks(params: Ref<{
     status?: string
-    limit?: number
-    offset?: number
+    page?: number
+    size?: number
 }>) {
     return useQuery({
         queryKey: ['tasks', params],
         queryFn: async () => {
             const searchParams = new URLSearchParams()
             if (params.value.status) searchParams.append('status', params.value.status)
-            if (params.value.limit) searchParams.append('limit', String(params.value.limit))
-            if (params.value.offset) searchParams.append('offset', String(params.value.offset))
+            if (params.value.page) searchParams.append('page', String(params.value.page))
+            if (params.value.size) searchParams.append('size', String(params.value.size))
 
-            const { data } = await apiClient.get<TaskResponse>(`/tasks/?${searchParams}`)
+            const { data } = await apiClient.get<TaskListResponse>(`/tasks/?${searchParams}`)
             return data
         },
         refetchInterval: 5000, // 每5秒自动刷新

@@ -192,26 +192,26 @@ curl "http://your-domain/api/v1/external/images/123?api_key=YOUR_KEY"
 |------|------|------|------|
 | `keyword` | string | 否 | 关键词搜索（描述） |
 | `tags` | array | 否 | 标签筛选 |
-| `limit` | int | 否 | 返回数量，默认 20，最大 100 |
-| `offset` | int | 否 | 分页偏移，默认 0 |
+| `page` | int | 否 | 页码（从 1 开始），默认 1 |
+| `size` | int | 否 | 每页数量，默认 20，最大 100 |
 | `api_key` | string | 否 | API 密钥 |
 
 **请求示例：**
 ```bash
 # 无参数搜索
-curl "http://your-domain/api/v1/external/images/search?api_key=YOUR_KEY&limit=10"
+curl "http://your-domain/api/v1/external/images/search?api_key=YOUR_KEY&size=10"
 
 # 关键词搜索（中文需 URL 编码）
 curl "http://your-domain/api/v1/external/images/search?api_key=YOUR_KEY&keyword=%E5%88%9D%E9%9F%B3"
 
-# 标签筛选
-curl "http://your-domain/api/v1/external/images/search?api_key=YOUR_KEY&tags=%E5%8F%AF%E7%88%B1"
+# 标签筛选 + 分页
+curl "http://your-domain/api/v1/external/images/search?api_key=YOUR_KEY&tags=%E5%8F%AF%E7%88%B1&page=2&size=20"
 ```
 
 **响应示例：**
 ```json
 {
-  "images": [
+  "data": [
     {
       "id": 123,
       "image_url": "/data/uploads/ab/cd/abc.jpg",
@@ -221,8 +221,11 @@ curl "http://your-domain/api/v1/external/images/search?api_key=YOUR_KEY&tags=%E5
     }
   ],
   "total": 100,
-  "limit": 20,
-  "offset": 0
+  "page": 1,
+  "size": 20,
+  "pages": 5,
+  "has_next": true,
+  "has_prev": false
 }
 ```
 

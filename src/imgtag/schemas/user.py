@@ -4,6 +4,8 @@ from typing import Optional, List
 from datetime import datetime
 from pydantic import BaseModel, Field
 
+from .base import BaseSchema
+
 
 class UserBase(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
@@ -20,18 +22,17 @@ class UserLogin(BaseModel):
     password: str
 
 
-class UserResponse(UserBase):
+class UserResponse(BaseSchema):
     id: int
+    username: str
+    email: Optional[str] = None
     role: str
     is_active: bool
     created_at: datetime
     last_login_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
 
-
-class Token(BaseModel):
+class Token(BaseSchema):
     access_token: str
     token_type: str = "bearer"
     expires_in: int  # seconds

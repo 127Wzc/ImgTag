@@ -41,10 +41,10 @@ const galleryFilters = ref({ category: 'all', resolution: 'all', keyword: '' })
 const showGalleryFilters = ref(false)
 const galleryPageSize = ref(20)
 const galleryCurrentPage = ref(1)
-const gallerySearchParams = ref<ImageSearchRequest>({ limit: 20, offset: 0, sort_by: 'id', sort_desc: true })
+const gallerySearchParams = ref<ImageSearchRequest>({ size: 20, page: 1, sort_by: 'id', sort_desc: true })
 
 const { data: galleryData, isLoading: galleryLoading, isError: galleryError, refetch: galleryRefetch } = useImages(gallerySearchParams)
-const galleryImages = computed(() => galleryData.value?.images || [])
+const galleryImages = computed(() => galleryData.value?.data || [])
 const galleryTotal = computed(() => galleryData.value?.total || 0)
 const galleryTotalPages = computed(() => Math.ceil(galleryTotal.value / galleryPageSize.value))
 
@@ -55,19 +55,19 @@ function handleGallerySearch() {
     keyword: galleryFilters.value.keyword || undefined,
     category_id: galleryFilters.value.category !== 'all' ? parseInt(galleryFilters.value.category) : undefined,
     resolution_id: galleryFilters.value.resolution !== 'all' ? parseInt(galleryFilters.value.resolution) : undefined,
-    offset: 0,
+    page: 1,
   }
 }
 
 function handleGalleryReset() {
   galleryCurrentPage.value = 1
   galleryFilters.value = { category: 'all', resolution: 'all', keyword: '' }
-  gallerySearchParams.value = { limit: galleryPageSize.value, offset: 0, sort_by: 'id', sort_desc: true }
+  gallerySearchParams.value = { size: galleryPageSize.value, page: 1, sort_by: 'id', sort_desc: true }
 }
 
 function galleryGoToPage(page: number) {
   galleryCurrentPage.value = page
-  gallerySearchParams.value = { ...gallerySearchParams.value, offset: (page - 1) * galleryPageSize.value }
+  gallerySearchParams.value = { ...gallerySearchParams.value, page: page }
 }
 
 function galleryChangePageSize(size: unknown) {
@@ -76,7 +76,7 @@ function galleryChangePageSize(size: unknown) {
   if (isNaN(newSize)) return
   galleryPageSize.value = newSize
   galleryCurrentPage.value = 1
-  gallerySearchParams.value = { ...gallerySearchParams.value, limit: newSize, offset: 0 }
+  gallerySearchParams.value = { ...gallerySearchParams.value, size: newSize, page: 1 }
 }
 
 // ==================== 智能搜索模式 ====================
@@ -112,7 +112,7 @@ const selectedTags = computed<Tag[]>(() => {
 
 const smartSearchParams = ref<SimilarSearchRequest | null>(null)
 const { data: smartData, isLoading: smartLoading, isFetching: smartFetching } = useSimilarSearch(smartSearchParams)
-const smartResults = computed<ImageWithSimilarity[]>(() => smartData.value?.images || [])
+const smartResults = computed<ImageWithSimilarity[]>(() => smartData.value?.data || [])
 const smartTotal = computed(() => smartData.value?.total || 0)
 const hasVectorSearch = computed(() => !!smartSearchParams.value?.text)
 
@@ -158,7 +158,8 @@ function handleSmartSearch() {
     tags: tagNames.length > 0 ? tagNames : undefined,
     category_id: selectedCategoryId.value || undefined,
     resolution_id: selectedResolutionId.value || undefined,
-    limit: 50,
+    page: 1,
+    size: 50,
     threshold: similarityThreshold.value[0],
     vector_weight: 0.7,
     tag_weight: 0.3,

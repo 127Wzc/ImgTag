@@ -1,14 +1,19 @@
-from typing import Optional, List
+from typing import Optional
 from datetime import datetime
 from pydantic import BaseModel
+
+from .base import BaseSchema, PaginatedResponse
+
 
 class CollectionBase(BaseModel):
     name: str
     description: Optional[str] = None
     parent_id: Optional[int] = None
 
+
 class CollectionCreate(CollectionBase):
     pass
+
 
 class CollectionUpdate(BaseModel):
     name: Optional[str] = None
@@ -16,21 +21,24 @@ class CollectionUpdate(BaseModel):
     cover_image_id: Optional[int] = None
     parent_id: Optional[int] = None
 
-class Collection(CollectionBase):
+
+class Collection(BaseSchema):
+    """收藏夹响应模型"""
     id: int
+    name: str
+    description: Optional[str] = None
+    parent_id: Optional[int] = None
     cover_image_id: Optional[int] = None
-    sort_order: int
-    is_public: bool
+    sort_order: int = 0
+    is_public: bool = True
     image_count: int = 0
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
 
-class CollectionList(BaseModel):
-    items: List[Collection]
-    total: int
+# 收藏夹列表响应 - 直接使用通用分页基类
+CollectionList = PaginatedResponse[Collection]
+
 
 class CollectionImageAdd(BaseModel):
     image_id: int

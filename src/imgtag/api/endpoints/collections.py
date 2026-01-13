@@ -234,16 +234,16 @@ async def remove_image_from_collection(
 @router.get("/{collection_id}/images", response_model=dict[str, Any])
 async def get_collection_images(
     collection_id: int,
-    limit: int = 20,
-    offset: int = 0,
+    page: int = 1,
+    size: int = 20,
     session: AsyncSession = Depends(get_async_session),
 ):
     """Get images in collection.
 
     Args:
         collection_id: Collection ID.
-        limit: Maximum results.
-        offset: Pagination offset.
+        page: Page number (from 1).
+        size: Page size.
         session: Database session.
 
     Returns:
@@ -252,8 +252,8 @@ async def get_collection_images(
     return await image_collection_repository.get_collection_images(
         session,
         collection_id,
-        limit=limit,
-        offset=offset,
+        limit=size,
+        offset=(page - 1) * size,
     )
 
 

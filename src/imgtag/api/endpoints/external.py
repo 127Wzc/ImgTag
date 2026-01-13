@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import time
 from datetime import datetime, timezone as tz
+from math import ceil
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -51,34 +52,13 @@ class ExternalImageCreate(BaseModel):
     """
 
     image_url: str = Field(..., description="图片URL")
-    tags: list[str] = Field(
-        default=[], 
-        description="用户自定义标签列表(level=2)。会与 AI 分析结果合并，重名优先保留用户标签"
-    )
-    description: str = Field(
-        default="", 
-        description="用户提供的描述。若同时提供 tags 和 description 则跳过 AI 分析"
-    )
-    category_id: int | None = Field(
-        default=None, 
-        description="主分类ID(level=0标签)，用于分类专用提示词和存储子目录"
-    )
-    endpoint_id: int | None = Field(
-        default=None, 
-        description="目标存储端点ID，不可选备份端点，不指定则使用系统默认"
-    )
-    auto_analyze: bool = Field(
-        default=True, 
-        description="是否启用 AI 分析。若为 False 则不分析也不生成向量"
-    )
-    callback_url: str | None = Field(
-        default=None, 
-        description="分析完成后的回调URL，会 POST 包含 tags/description/image_url 的 JSON"
-    )
-    is_public: bool = Field(
-        default=True, 
-        description="是否公开可见，默认公开"
-    )
+    tags: list[str] = Field(default=[], description="用户自定义标签列表")
+    description: str = Field(default="", description="用户提供的描述")
+    category_id: int | None = Field(default=None, description="主分类ID")
+    endpoint_id: int | None = Field(default=None, description="目标存储端点ID")
+    auto_analyze: bool = Field(default=True, description="是否启用 AI 分析")
+    callback_url: str | None = Field(default=None, description="分析完成后的回调URL")
+    is_public: bool = Field(default=True, description="是否公开可见")
 
 
 
@@ -315,8 +295,8 @@ async def analyze_image_from_url(
 async def search_images(
     keyword: str = Query(None, description="关键词搜索"),
     tags: list[str] = Query([], description="标签筛选"),
-    limit: int = Query(20, ge=1, le=100, description="返回数量"),
-    offset: int = Query(0, ge=0, description="偏移量"),
+    page: int = Query(1, ge=1, description="页码 (从 1 开始)"),
+    size: int = Query(20, ge=1, le=100, description="每页数量"),
     threshold: float = Query(0.7, ge=0.0, le=1.0, description="相似度阈值（用于向量搜索）"),
     api_user: dict = Depends(require_api_key),
     session: AsyncSession = Depends(get_async_session),
@@ -328,8 +308,8 @@ async def search_images(
     Args:
         keyword: Keyword search.
         tags: Tag filter.
-        limit: Max results.
-        offset: Pagination offset.
+        page: Page number (from 1).
+        size: Page size.
         api_user: API user.
         session: Database session.
 
@@ -340,11 +320,12 @@ async def search_images(
     logger.info(f"[外部API] 搜索图片: keyword={keyword}, tags={tags}, user={username}")
 
     try:
+        offset = (page - 1) * size
         result = await image_repository.search_images(
             session,
             tags=tags if tags else None,
             keyword=keyword,
-            limit=limit,
+            limit=size,
             offset=offset,
         )
 
@@ -360,14 +341,20 @@ async def search_images(
                 "image_url": urls.get(img.id, ""),
                 "description": img.description or "",
                 "tags": [t.name for t in img.tags] if hasattr(img, "tags") else [],
-                "created_at": img.created_at,
+                "created_at": img.created_at.isoformat() if img.created_at else None,
             })
 
+        total = result["total"]
+        pages = ceil(total / size) if size > 0 else 0
+        
         return {
-            "images": images,
-            "total": result["total"],
-            "limit": limit,
-            "offset": offset,
+            "data": images,
+            "total": total,
+            "page": page,
+            "size": size,
+            "pages": pages,
+            "has_next": page < pages,
+            "has_prev": page > 1,
         }
     except Exception as e:
         logger.error(f"[外部API] 搜索失败: {e}")
@@ -405,6 +392,6 @@ async def get_image_info(
         "url": display_url,
         "description": image.description or "",
         "tags": [t.name for t in image.tags if t.level == 2],
-        "created_at": image.created_at,
+        "created_at": image.created_at.isoformat() if image.created_at else None,
     }
 

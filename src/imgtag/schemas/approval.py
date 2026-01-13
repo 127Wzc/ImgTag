@@ -4,6 +4,8 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel, Field
 
+from .base import BaseSchema, PaginatedResponse
+
 
 class ApprovalCreate(BaseModel):
     type: str = Field(..., description="审批类型")
@@ -12,7 +14,8 @@ class ApprovalCreate(BaseModel):
     payload: Dict[str, Any] = Field(..., description="操作详情")
 
 
-class ApprovalResponse(BaseModel):
+class ApprovalResponse(BaseSchema):
+    """审批响应模型"""
     id: int
     type: str
     status: str
@@ -20,21 +23,15 @@ class ApprovalResponse(BaseModel):
     requester_name: Optional[str] = None
     target_type: Optional[str] = None
     target_ids: Optional[List[int]] = None
-    payload: Dict[str, Any]
+    payload: Dict[str, Any] = Field(default_factory=dict)
     reviewer_id: Optional[int] = None
     review_comment: Optional[str] = None
     created_at: datetime
     reviewed_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
 
-
-class ApprovalList(BaseModel):
-    approvals: List[ApprovalResponse]
-    total: int
-    limit: int
-    offset: int
+# 审批列表响应 - 直接使用通用分页基类
+ApprovalList = PaginatedResponse[ApprovalResponse]
 
 
 class ApprovalAction(BaseModel):

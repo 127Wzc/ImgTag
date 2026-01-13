@@ -7,7 +7,6 @@ import os
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,123 +24,21 @@ from imgtag.models.image_location import ImageLocation
 from imgtag.models.user import User
 from imgtag.services import storage_service, storage_sync_service
 from imgtag.services.storage_deletion_service import storage_deletion_service
+from imgtag.schemas.storage import (
+    ActiveTaskInfo,
+    EndpointCreate,
+    EndpointUpdate,
+    EndpointResponse,
+    SyncStartRequest,
+    SyncProgressResponse,
+    DeletionImpactResponse,
+    SoftDeleteRequest,
+    HardDeleteRequest,
+)
 
 logger = get_logger(__name__)
 
 router = APIRouter()
-
-
-# === Request/Response Models ===
-
-
-class EndpointCreate(BaseModel):
-    """Request model for creating a storage endpoint."""
-
-    name: str = Field(..., min_length=1, max_length=50)
-    provider: str = Field(..., pattern="^(local|s3)$")
-    endpoint_url: Optional[str] = None
-    region: Optional[str] = "auto"
-    bucket_name: Optional[str] = None
-    path_style: bool = True  # True = path style, False = virtual-hosted
-    access_key_id: Optional[str] = None
-    secret_access_key: Optional[str] = None
-    public_url_prefix: Optional[str] = None
-    path_prefix: str = ""
-    role: str = "primary"
-    is_enabled: bool = True
-    is_default_upload: bool = False
-    auto_sync_enabled: bool = False
-    sync_from_endpoint_id: Optional[int] = None
-    read_priority: int = 100
-    read_weight: int = 1
-
-
-class EndpointUpdate(BaseModel):
-    """Request model for updating a storage endpoint."""
-
-    name: Optional[str] = None
-    provider: Optional[str] = None
-    endpoint_url: Optional[str] = None
-    region: Optional[str] = None
-    bucket_name: Optional[str] = None
-    path_style: Optional[bool] = None
-    access_key_id: Optional[str] = None
-    secret_access_key: Optional[str] = None
-    public_url_prefix: Optional[str] = None
-    path_prefix: Optional[str] = None
-    role: Optional[str] = None
-    is_enabled: Optional[bool] = None
-    is_default_upload: Optional[bool] = None
-    auto_sync_enabled: Optional[bool] = None
-    sync_from_endpoint_id: Optional[int] = None
-    read_priority: Optional[int] = None
-    read_weight: Optional[int] = None
-
-
-class ActiveTaskInfo(BaseModel):
-    """Info about an active task for an endpoint."""
-    task_id: str
-    task_type: str
-    status: str
-    progress_percent: float = 0.0
-    success_count: int = 0
-    failed_count: int = 0
-    total_count: int = 0
-
-
-class EndpointResponse(BaseModel):
-    """Response model for storage endpoint."""
-
-    id: int
-    name: str
-    provider: str
-    endpoint_url: Optional[str] = None
-    region: Optional[str] = None
-    bucket_name: Optional[str] = None
-    path_style: bool = True
-    has_credentials: bool = False
-    access_key_id: Optional[str] = None  # 明文返回，前端显示时伪装
-    secret_access_key: Optional[str] = None  # 明文返回，前端显示时伪装
-    public_url_prefix: Optional[str] = None
-    path_prefix: str = ""
-    role: str
-    is_enabled: bool
-    is_default_upload: bool
-    auto_sync_enabled: bool
-    sync_from_endpoint_id: Optional[int] = None
-    read_priority: int
-    read_weight: int
-    is_healthy: bool
-    location_count: int = 0
-    active_task: Optional[ActiveTaskInfo] = None  # 进行中的任务
-
-    class Config:
-        from_attributes = True
-
-
-
-class SyncStartRequest(BaseModel):
-    """Request to start a sync task."""
-
-    source_endpoint_id: int
-    target_endpoint_id: int
-    image_ids: Optional[list[int]] = None
-    force_overwrite: bool = False
-
-
-class SyncProgressResponse(BaseModel):
-    """Response for sync task progress."""
-
-    task_id: str
-    task_type: str = "storage_sync"
-    status: str
-    total_count: int
-    success_count: int
-    failed_count: int
-    progress_percent: float
-    batch_index: Optional[int] = None
-    total_batches: Optional[int] = None
-
 
 # === Endpoint Management APIs ===
 
@@ -490,17 +387,6 @@ async def delete_endpoint(
     return {"message": "Endpoint deleted", "locations_removed": count}
 
 
-class DeletionImpactResponse(BaseModel):
-    """Response for deletion impact analysis."""
-    endpoint_id: int
-    endpoint_name: str
-    total_locations: int
-    unique_images: int  # Only on this endpoint
-    shared_images: int  # On other endpoints too
-    total_file_size_mb: float
-    can_soft_delete: bool
-    can_hard_delete: bool
-    warnings: list[str]
 
 
 @router.get("/endpoints/{endpoint_id}/deletion-impact", response_model=DeletionImpactResponse)
@@ -562,10 +448,6 @@ async def get_deletion_impact(
     )
 
 
-class SoftDeleteRequest(BaseModel):
-    """Request for soft delete (unlink locations)."""
-    confirm: bool = False
-    delete_files: bool = False  # 同时删除物理文件和孤儿元数据
 
 
 @router.delete("/endpoints/{endpoint_id}/locations")
@@ -704,11 +586,6 @@ async def get_endpoint_active_task(
             total_count=total,
         )
     }
-
-class HardDeleteRequest(BaseModel):
-    """Request for hard delete with confirmation text."""
-    confirm: bool = False
-    confirm_text: str = ""
 
 
 @router.delete("/endpoints/{endpoint_id}/files")

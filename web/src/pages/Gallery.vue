@@ -19,12 +19,12 @@ const pageSize = ref(40)
 const currentPage = ref(1)
 
 // 搜索参数
-const searchParams = ref<ImageSearchRequest>({ limit: pageSize.value, offset: 0, sort_by: 'id', sort_desc: true })
+const searchParams = ref<ImageSearchRequest>({ size: pageSize.value, page: 1, sort_by: 'id', sort_desc: true })
 
 // 查询数据
 const { data: imageData, isLoading, isError, refetch } = useImages(searchParams)
 
-const images = computed(() => imageData.value?.images || [])
+const images = computed(() => imageData.value?.data || [])
 const total = computed(() => imageData.value?.total || 0)
 const totalPages = computed(() => Math.ceil(total.value / pageSize.value))
 
@@ -36,18 +36,18 @@ function handleSearch() {
     keyword: filters.value.keyword || undefined,
     category_id: filters.value.category !== 'all' ? parseInt(filters.value.category) : undefined,
     resolution_id: filters.value.resolution !== 'all' ? parseInt(filters.value.resolution) : undefined,
-    offset: 0,
+    page: 1,
   }
 }
 
 function handleReset() {
   currentPage.value = 1
-  searchParams.value = { limit: pageSize.value, offset: 0, sort_by: 'id', sort_desc: true }
+  searchParams.value = { size: pageSize.value, page: 1, sort_by: 'id', sort_desc: true }
 }
 
 function goToPage(page: number) {
   currentPage.value = page
-  searchParams.value = { ...searchParams.value, offset: (page - 1) * pageSize.value }
+  searchParams.value = { ...searchParams.value, page: page }
 }
 
 function changePageSize(size: unknown) {
@@ -56,7 +56,7 @@ function changePageSize(size: unknown) {
   if (isNaN(newSize)) return
   pageSize.value = newSize
   currentPage.value = 1
-  searchParams.value = { ...searchParams.value, limit: newSize, offset: 0 }
+  searchParams.value = { ...searchParams.value, size: newSize, page: 1 }
 }
 
 // 页码跳转

@@ -15,6 +15,7 @@ from imgtag.core.logging_config import get_logger
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import task_repository
 from imgtag.schemas import Task, TaskResponse
+from imgtag.schemas.base import PaginatedResponse
 from imgtag.services.task_queue import task_queue
 from imgtag.services.task_service import task_service
 
@@ -23,14 +24,21 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
-@router.get("/", response_model=Dict[str, Any])
+@router.get("/")
 async def get_tasks(
-    limit: int = Query(50, ge=1, le=100),
-    offset: int = Query(0, ge=0),
+    page: int = Query(1, ge=1, description="页码 (从 1 开始)"),
+    size: int = Query(50, ge=1, le=100, description="每页数量"),
     status: str = Query(None, description="任务状态筛选")
 ):
     """获取任务列表"""
-    return await task_service.get_tasks(limit, offset, status)
+    result = await task_service.get_tasks(size, (page - 1) * size, status)
+    # 使用 PaginatedResponse 格式化响应（data 字段而非 tasks）
+    return PaginatedResponse.create(
+        items=result["tasks"],
+        total=result["total"],
+        page=page,
+        size=size,
+    ).model_dump()
 
 
 @router.get("/{task_id}", response_model=Task)

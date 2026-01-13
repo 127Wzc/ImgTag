@@ -33,14 +33,14 @@ interface TaskItem {
 const statusFilter = ref<string>('')
 const taskParams = ref({
   status: '',
-  limit: 50,
-  offset: 0,
+  page: 1,
+  size: 50,
 })
 
 // 获取任务列表
 const queryClient = useQueryClient()
 const { data: taskData, isLoading, refetch } = useTasks(taskParams)
-const tasks = computed(() => (taskData.value?.tasks || []) as TaskItem[])
+const tasks = computed(() => (taskData.value?.data || []) as TaskItem[])
 const total = computed(() => taskData.value?.total || 0)
 
 // Mutations
@@ -88,7 +88,7 @@ function toggleSelect(id: string) {
 
 function setStatusFilter(status: string) {
   statusFilter.value = status
-  taskParams.value = { ...taskParams.value, status, offset: 0 }
+  taskParams.value = { ...taskParams.value, status, page: 1 }
   selectedIds.value = []
 }
 

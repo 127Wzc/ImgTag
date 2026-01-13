@@ -3,6 +3,10 @@
 
 """schemas 模块"""
 
+from .base import (
+    BaseSchema,
+    PaginatedResponse,
+)
 from .image import (
     ImageAnalysisResult,
     ImageCreateByUrl,
@@ -52,8 +56,23 @@ from .approval import (
     ApprovalAction,
     BatchApproveRequest,
 )
+from .storage import (
+    EndpointCreate,
+    EndpointUpdate,
+    EndpointResponse,
+    SyncStartRequest,
+    SyncProgressResponse,
+    SoftDeleteRequest,
+    HardDeleteRequest,
+    DeletionImpactResponse,
+    ActiveTaskInfo,
+)
 
 __all__ = [
+    # Base
+    "BaseSchema",
+    "PaginatedResponse",
+    # Image
     "ImageAnalysisResult",
     "ImageCreateByUrl",
     "ImageCreateManual",
@@ -66,30 +85,44 @@ __all__ = [
     "SimilarSearchResponse",
     "UploadAnalyzeResponse",
     "TagWithSource",
+    # Collection
     "CollectionBase",
     "CollectionCreate",
     "CollectionUpdate",
     "Collection",
     "CollectionList",
     "CollectionImageAdd",
+    # Tag
     "TagBase",
     "TagCreate",
     "TagUpdate",
     "Tag",
     "TagList",
+    # Task
     "TaskCreate",
     "Task",
     "TaskResponse",
+    # User
     "UserBase",
     "UserCreate",
     "UserLogin",
     "UserResponse",
     "Token",
     "TokenPayload",
+    # Approval
     "ApprovalCreate",
     "ApprovalResponse",
     "ApprovalList",
     "ApprovalAction",
     "BatchApproveRequest",
+    # Storage
+    "EndpointCreate",
+    "EndpointUpdate",
+    "EndpointResponse",
+    "SyncStartRequest",
+    "SyncProgressResponse",
+    "SoftDeleteRequest",
+    "HardDeleteRequest",
+    "DeletionImpactResponse",
+    "ActiveTaskInfo",
 ]
-

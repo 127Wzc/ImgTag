@@ -51,7 +51,7 @@ const jumpPage = ref('')  // 跳转页码输入
 const showLabelsAlways = ref(false)  // 是否始终显示标签
 
 // 搜索参数
-const searchParams = ref<ImageSearchRequest>({ limit: pageSize.value, offset: 0, sort_by: sortBy.value, sort_desc: sortDesc.value })
+const searchParams = ref<ImageSearchRequest>({ size: pageSize.value, page: 1, sort_by: sortBy.value, sort_desc: sortDesc.value })
 
 // 查询数据
 const { data: imageData, isLoading, isError, refetch } = useMyImages(searchParams)
@@ -62,10 +62,10 @@ const tagOverrides = ref<Map<number, TagWithSource[]>>(new Map())
 
 // 合并原始数据和覆盖层
 const images = computed(() => {
-  const original = imageData.value?.images || []
+  const original = imageData.value?.data || []
   if (tagOverrides.value.size === 0) return original
   
-  return original.map(img => {
+  return original.map((img: ImageResponse) => {
     const override = tagOverrides.value.get(img.id)
     return override ? { ...img, tags: override } : img
   })
@@ -96,7 +96,7 @@ function handleSearch() {
     resolution_id: filters.value.resolution !== 'all' ? parseInt(filters.value.resolution) : undefined,
     pending_only: filters.value.pendingOnly || undefined,
     duplicates_only: filters.value.duplicatesOnly || undefined,
-    offset: 0,
+    page: 1,
   }
 }
 
@@ -104,7 +104,7 @@ function handleReset() {
   currentPage.value = 1
   sortBy.value = 'id'
   sortDesc.value = true
-  searchParams.value = { limit: pageSize.value, offset: 0, sort_by: 'id', sort_desc: true }
+  searchParams.value = { size: pageSize.value, page: 1, sort_by: 'id', sort_desc: true }
 }
 
 // 排序变更
@@ -118,7 +118,7 @@ function changeSort(value: unknown) {
     ...searchParams.value,
     sort_by: field,
     sort_desc: desc === 'desc',
-    offset: 0,
+    page: 1,
   }
 }
 
@@ -126,7 +126,7 @@ const currentSort = computed(() => `${sortBy.value}-${sortDesc.value ? 'desc' : 
 
 function changePage(page: number) {
   currentPage.value = page
-  searchParams.value = { ...searchParams.value, offset: (page - 1) * pageSize.value }
+  searchParams.value = { ...searchParams.value, page: page }
 }
 
 function changePageSize(size: unknown) {
@@ -135,7 +135,7 @@ function changePageSize(size: unknown) {
   if (isNaN(newSize)) return
   pageSize.value = newSize
   currentPage.value = 1
-  searchParams.value = { ...searchParams.value, limit: newSize, offset: 0 }
+  searchParams.value = { ...searchParams.value, size: newSize, page: 1 }
 }
 
 // 跳转到指定页码

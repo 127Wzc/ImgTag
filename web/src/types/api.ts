@@ -1,7 +1,19 @@
 /**
  * 后端 API 类型定义
- * 与后端 Pydantic Schema 对应
+ * 与后端 Pydantic Schema 对应 (snake_case 格式)
  */
+
+// ============= 通用分页类型 =============
+
+export interface PaginatedResponse<T> {
+    data: T[]
+    total: number
+    page: number
+    size: number
+    pages: number
+    has_next: boolean
+    has_prev: boolean
+}
 
 // ============= 用户相关 =============
 
@@ -54,6 +66,9 @@ export interface ImageResponse {
     height: number | null
     file_size: number | null
     uploaded_by: number | null  // 上传者用户ID
+    is_public?: boolean
+    created_at?: string | null
+    updated_at?: string | null
 }
 
 export interface ImageWithSimilarity extends ImageResponse {
@@ -69,34 +84,30 @@ export interface ImageSearchRequest {
     resolution_id?: number
     pending_only?: boolean
     duplicates_only?: boolean
-    limit?: number
-    offset?: number
+    // Page/Size 风格分页
+    page?: number
+    size?: number
     sort_by?: string
     sort_desc?: boolean
 }
 
-export interface ImageSearchResponse {
-    images: ImageResponse[]
-    total: number
-    limit: number
-    offset: number
-}
+// 分页响应 (使用新的 data 结构)
+export interface ImageSearchResponse extends PaginatedResponse<ImageResponse> { }
 
 export interface SimilarSearchRequest {
     text: string
     tags?: string[]
     category_id?: number
     resolution_id?: number
-    limit?: number
+    // Page/Size 风格分页
+    page?: number
+    size?: number
     threshold?: number
     vector_weight?: number
     tag_weight?: number
 }
 
-export interface SimilarSearchResponse {
-    images: ImageWithSimilarity[]
-    total: number
-}
+export interface SimilarSearchResponse extends PaginatedResponse<ImageWithSimilarity> { }
 
 export interface UploadAnalyzeResponse {
     id: number
@@ -116,13 +127,11 @@ export interface Task {
     result: Record<string, any> | null
     error: string | null
     created_at: string
+    updated_at?: string
     completed_at: string | null
 }
 
-export interface TaskResponse {
-    tasks: Task[]
-    total: number
-}
+export interface TaskListResponse extends PaginatedResponse<Task> { }
 
 // ============= 收藏夹相关 =============
 
@@ -135,7 +144,31 @@ export interface Collection {
     user_id: number | null
     is_public: boolean
     image_count?: number
+    sort_order?: number
+    created_at?: string
+    updated_at?: string
 }
+
+export interface CollectionListResponse extends PaginatedResponse<Collection> { }
+
+// ============= 审批相关 =============
+
+export interface ApprovalResponse {
+    id: number
+    type: string
+    status: string
+    requester_id: number | null
+    requester_name: string | null
+    target_type: string | null
+    target_ids: number[] | null
+    payload: Record<string, any>
+    reviewer_id: number | null
+    review_comment: string | null
+    created_at: string
+    reviewed_at: string | null
+}
+
+export interface ApprovalListResponse extends PaginatedResponse<ApprovalResponse> { }
 
 // ============= 系统配置 =============
 
