@@ -1,12 +1,10 @@
 name: Build and Push Docker Image
 
 on:
-  # Tag 推送触发（手动打 tag 时）
   push:
     tags:
       - 'v*'
   
-  # 手动触发
   workflow_dispatch:
     inputs:
       version:
@@ -14,7 +12,6 @@ on:
         required: true
         type: string
   
-  # 被其他工作流调用（如 auto-release）
   workflow_call:
     inputs:
       version:
@@ -26,123 +23,64 @@ env:
   DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/imgtag
 
 jobs:
-  # ========== 阶段 1：前端构建（仅运行一次）==========
-  build-frontend:
+  build-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
-      should_continue: ${{ steps.check.outputs.should_continue }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 4  # 并行构建所有 target
+      matrix:
+        include:
+          - target: slim
+            suffix: ""
+          - target: full
+            suffix: "-local"
+          - target: slim-backend
+            suffix: "-backend"
+          - target: full-backend
+            suffix: "-backend-local"
     
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Check DockerHub credentials
         id: check
         run: |
-          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
-            echo "should_continue=true" >> $GITHUB_OUTPUT
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "has_credentials=true" >> $GITHUB_OUTPUT
           else
-            echo "should_continue=false" >> $GITHUB_OUTPUT
+            echo "has_credentials=false" >> $GITHUB_OUTPUT
             echo "::warning::DockerHub credentials not configured, skipping build"
           fi
 
-      - name: Checkout code
-        if: steps.check.outputs.should_continue == 'true'
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        if: steps.check.outputs.should_continue == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: web/pnpm-lock.yaml
-
-      - name: Install pnpm
-        if: steps.check.outputs.should_continue == 'true'
-        run: npm install -g pnpm
-
-      - name: Install dependencies
-        if: steps.check.outputs.should_continue == 'true'
-        working-directory: web
-        run: pnpm install --frozen-lockfile
-
-      - name: Build frontend
-        if: steps.check.outputs.should_continue == 'true'
-        working-directory: web
-        run: pnpm build
-
-      - name: Upload frontend artifact
-        if: steps.check.outputs.should_continue == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist
-          path: web/dist
-          retention-days: 1
-
-  # ========== 阶段 2：Docker 多架构构建 ==========
-  build-and-push:
-    needs: build-frontend
-    if: needs.build-frontend.outputs.should_continue == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false  # 允许其他构建继续即使某个失败
-      matrix:
-        include:
-          # ========== 全栈版（前端+后端）==========
-          # 精简版：仅支持在线 API 模式（推荐大部分用户使用）
-          - target: slim
-            suffix: ""
-            needs_frontend: true
-          # 完整版：支持本地 ONNX 嵌入模型
-          - target: full
-            suffix: "-local"
-            needs_frontend: true
-          
-          # ========== 纯后端版（无前端，用于 CDN 部署场景）==========
-          # 纯后端精简版
-          - target: slim-backend
-            suffix: "-backend"
-            needs_frontend: false
-          # 纯后端完整版
-          - target: full-backend
-            suffix: "-backend-local"
-            needs_frontend: false
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download frontend artifact
-        if: matrix.needs_frontend
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist
-          path: web/dist
-
       - name: Set up QEMU
+        if: steps.check.outputs.has_credentials == 'true'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
+        if: steps.check.outputs.has_credentials == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Login to DockerHub
+        if: steps.check.outputs.has_credentials == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract version
+        if: steps.check.outputs.has_credentials == 'true'
         id: version
         run: |
-          # 如果是 workflow_call，使用传入的 version
           if [ -n "${{ inputs.version }}" ]; then
             echo "VERSION=${{ inputs.version }}" >> $GITHUB_OUTPUT
           else
-            # 否则从 tag 提取
             echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
           fi
 
       - name: Build and push
+        if: steps.check.outputs.has_credentials == 'true'
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -155,3 +93,5 @@ jobs:
             ${{ env.DOCKER_IMAGE }}:latest${{ matrix.suffix }}
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
