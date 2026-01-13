@@ -234,7 +234,7 @@ const currentImageList = computed(() => activeMode.value === 'gallery' ? gallery
     <PublicHeader v-if="!isLoggedIn" />
 
     <main :class="isLoggedIn ? 'py-6 px-6' : 'pt-20 pb-12 px-4 sm:px-6 lg:px-8'">
-      <div :class="isLoggedIn ? 'max-w-7xl' : 'max-w-7xl mx-auto'">
+      <div :class="isLoggedIn ? '' : 'max-w-7xl mx-auto'">
         <!-- 标题和模式切换 -->
         <div class="mb-6">
           <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
