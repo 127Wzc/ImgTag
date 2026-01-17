@@ -433,6 +433,7 @@ ImgTag 内置 MCP Server，使用 SSE (Server-Sent Events) 传输协议。
 | `search_images` | 搜索图片（关键词/标签） |
 | `get_random_images` | 随机获取图片 |
 | `get_image_detail` | 获取图片详情 |
+| `add_image` | 从 URL 添加图片（支持 AI 分析） |
 
 **端点地址：**
 ```

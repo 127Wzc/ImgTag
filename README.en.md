@@ -145,9 +145,12 @@ Manage via Web UI "System Settings":
 | Storage Endpoints | Multi-endpoint, S3-compatible, Auto-backup |
 ---
 
-## 🔌 API
+## 🔌 Developer Integration
 
-📖 [Swagger Docs](http://localhost:8000/docs) | [External API Reference](docs/external-api.md)
+| Interface | Description |
+|-----------|-------------|
+| [🤖 AI Integration API](docs/external-api.md) | Third-party access, supports REST / MCP / OpenAI Tools |
+| [📖 Swagger Docs](http://localhost:8000/docs) | Full backend API reference |
 
 ---
 

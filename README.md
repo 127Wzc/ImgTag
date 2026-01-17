@@ -150,9 +150,12 @@ cd web && pnpm install && pnpm dev
 
 ---
 
-## 🔌 API
+## 🔌 开发者接入
 
-📖 [Swagger 文档](http://localhost:8000/docs) | [外部 API 接口](docs/external-api.md)
+| 接口 | 说明 |
+|------|------|
+| [🤖 AI 集成 API](docs/external-api.md) | 第三方接入，支持 REST / MCP / OpenAI Tools |
+| [📖 Swagger 文档](http://localhost:8000/docs) | 后端全量接口参考 |
 
 ---
 
