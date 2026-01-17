@@ -33,67 +33,56 @@
 <details>
 <summary><b>📸 Screenshots (Click to expand)</b></summary>
 
-### 🏠 Dashboard - Overview & Statistics
-
-![Dashboard](docs/screenshots/dashboard.png)
-
-Real-time display of total images, pending analysis queue, today's uploads/analysis stats. Tag usage Top rankings at a glance.
-
----
-
-### 🖼️ My Files - Image Management & Filtering
-
-![My Files](docs/screenshots/my-files.png)
-
-Filter by category, resolution, keywords. Inline tag editing, batch selection for one-click tagging or deletion.
-
----
-
-### 🔍 Image Detail - AI Description & Tags
-
-![Image Detail](docs/screenshots/image-detail.png)
-
-View AI-generated descriptions, tag sources (AI/User), image metadata. Copy image links and edit descriptions.
-
----
-
-### ✨ Explore - Browse & Smart Search
-
-![Explore](docs/screenshots/search.png)
-
-Multi-dimensional search by tags and descriptions. Semantic search with natural language, vector similarity-based retrieval.
-
----
-
-### 📤 Upload - Smart Analysis
-
-![Upload](docs/screenshots/upload.png)
-
-Drag & drop upload, ZIP batch import, URL fetch. Optional AI auto-analysis for tags and descriptions.
-
----
-
-### 🏷️ Tag Management - Categories & Statistics
-
-![Tags](docs/screenshots/tags.png)
-
-Three-tier tag system: Main categories (Wallpaper/Meme etc.), Resolution (4K/2K etc.), Normal tags. Usage count and source tracking.
-
----
-
-### 💾 Storage Endpoints - Multi-Endpoint Config
-
-![Storage](docs/screenshots/storage.png)
-
-Local storage and S3-compatible endpoints (MinIO, AWS S3, etc.). Configurable primary endpoint and backup sync (auto + scheduled). Multi-endpoint load balancing.
-
----
-
-### ⚙️ Settings - AI Model Configuration
-
-![Settings](docs/screenshots/settings.png)
-
-Configure vision models (OpenAI, Gemini, etc.), embedding models, and system parameters.
+<table>
+  <tr>
+    <td width="50%">
+      <h4>🏠 Dashboard</h4>
+      <img src="docs/screenshots/dashboard.png" alt="Dashboard" />
+      <p>Overview, pending queue, tag rankings</p>
+    </td>
+    <td width="50%">
+      <h4>🖼️ My Files</h4>
+      <img src="docs/screenshots/my-files.png" alt="My Files" />
+      <p>Category filter, inline tag edit, batch ops</p>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <h4>🔍 Image Detail</h4>
+      <img src="docs/screenshots/image-detail.png" alt="Image Detail" />
+      <p>AI description, tag sources, metadata</p>
+    </td>
+    <td>
+      <h4>✨ Explore</h4>
+      <img src="docs/screenshots/search.png" alt="Explore" />
+      <p>Semantic search, vector similarity</p>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <h4>📤 Upload</h4>
+      <img src="docs/screenshots/upload.png" alt="Upload" />
+      <p>Drag & drop, ZIP import, URL fetch</p>
+    </td>
+    <td>
+      <h4>🏷️ Tags</h4>
+      <img src="docs/screenshots/tags.png" alt="Tags" />
+      <p>Three-tier system, source tracking</p>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <h4>💾 Storage</h4>
+      <img src="docs/screenshots/storage.png" alt="Storage" />
+      <p>Multi-endpoint, S3-compatible, auto backup</p>
+    </td>
+    <td>
+      <h4>⚙️ Settings</h4>
+      <img src="docs/screenshots/settings.png" alt="Settings" />
+      <p>AI model config, embedding, system params</p>
+    </td>
+  </tr>
+</table>
 
 </details>
 

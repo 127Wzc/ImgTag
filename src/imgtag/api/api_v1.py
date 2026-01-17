@@ -9,7 +9,7 @@ from fastapi import APIRouter
 
 from imgtag.api.endpoints import (
     images, search, system, config, vectors, queue, collections, tags,
-    tasks, auth, approvals, storage_endpoints,
+    tasks, auth, approvals, storage_endpoints, mcp,
 )
 
 api_router = APIRouter()
@@ -104,5 +104,12 @@ api_router.include_router(
     external.router, 
     prefix="/external", 
     tags=["外部API"]
+)
+
+# 注册 MCP Server 路由（Model Context Protocol）
+api_router.include_router(
+    mcp.router, 
+    prefix="/mcp", 
+    tags=["MCP"]
 )
 

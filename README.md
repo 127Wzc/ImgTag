@@ -33,67 +33,56 @@
 <details>
 <summary><b>📸 系统预览（点击展开）</b></summary>
 
-### 🏠 仪表盘 - 数据概览与统计
-
-![仪表盘](docs/screenshots/dashboard.png)
-
-实时展示图片总数、待分析队列、今日上传/分析统计。标签使用热度 Top 排行，一目了然。
-
----
-
-### 🖼️ 我的图库 - 图片管理与筛选
-
-![我的图库](docs/screenshots/my-files.png)
-
-支持按分类、分辨率、关键词筛选图片。内联编辑标签，批量选择后可一键添加标签或删除。
-
----
-
-### 🔍 图片详情 - AI 描述与标签
-
-![图片详情](docs/screenshots/image-detail.png)
-
-查看 AI 自动生成的描述、标签来源（AI/用户）、图片元信息。支持复制图片链接和编辑描述。
-
----
-
-### ✨ 图片探索 - 图库浏览/智能搜索
-
-![图片探索](docs/screenshots/search.png)
-
-支持图片标签、描述多维度松鼠，智能搜索输入自然语言描述，基于向量相似度检索图片描述和标签中文语义相关图片。
-
----
-
-### 📤 上传功能 - 智能分析
-
-![上传](docs/screenshots/upload.png)
-
-支持拖拽上传、ZIP 批量导入、URL 抓取。可选 AI 自动分析，生成标签和描述。
-
----
-
-### 🏷️ 标签管理 - 分类与统计
-
-![标签管理](docs/screenshots/tags.png)
-
-三级标签体系：主分类（壁纸/表情包等）、分辨率（4K/2K 等）、普通标签。显示使用次数和来源。支持自定义提示词针对性提取关键字。
-
----
-
-### 💾 存储端点 - 多端点配置
-
-![存储端点](docs/screenshots/storage.png)
-
-支持本地存储和 S3 兼容端点（MinIO、阿里云 OSS 等）。可配置主端点(上传可选)和备份同步(自动同步+定时同步备份)。支持多端点负载均衡，自动选择可用端点的图链。
-
----
-
-### ⚙️ 系统设置 - AI 模型配置
-
-![系统设置](docs/screenshots/settings.png)
-
-配置视觉分析模型（OpenAI、Gemini 等）、嵌入模型、系统参数。
+<table>
+  <tr>
+    <td width="50%">
+      <h4>🏠 仪表盘</h4>
+      <img src="docs/screenshots/dashboard.png" alt="仪表盘" />
+      <p>数据概览、待分析队列、标签热度排行</p>
+    </td>
+    <td width="50%">
+      <h4>🖼️ 我的图库</h4>
+      <img src="docs/screenshots/my-files.png" alt="我的图库" />
+      <p>分类筛选、内联标签编辑、批量操作</p>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <h4>🔍 图片详情</h4>
+      <img src="docs/screenshots/image-detail.png" alt="图片详情" />
+      <p>AI 描述、标签来源、元信息</p>
+    </td>
+    <td>
+      <h4>✨ 图片探索</h4>
+      <img src="docs/screenshots/search.png" alt="图片探索" />
+      <p>语义搜索、向量相似度检索</p>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <h4>📤 上传功能</h4>
+      <img src="docs/screenshots/upload.png" alt="上传" />
+      <p>拖拽上传、ZIP 导入、URL 抓取</p>
+    </td>
+    <td>
+      <h4>🏷️ 标签管理</h4>
+      <img src="docs/screenshots/tags.png" alt="标签管理" />
+      <p>三级标签体系、来源追踪、自定义提示词</p>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <h4>💾 存储端点</h4>
+      <img src="docs/screenshots/storage.png" alt="存储端点" />
+      <p>多端点配置、S3 兼容、自动备份</p>
+    </td>
+    <td>
+      <h4>⚙️ 系统设置</h4>
+      <img src="docs/screenshots/settings.png" alt="系统设置" />
+      <p>AI 模型配置、嵌入模型、系统参数</p>
+    </td>
+  </tr>
+</table>
 
 </details>
 
