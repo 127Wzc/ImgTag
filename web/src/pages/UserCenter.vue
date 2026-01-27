@@ -128,9 +128,17 @@ onMounted(() => {
 
 <template>
   <div class="p-6 lg:p-8">
-    <div class="max-w-3xl mx-auto">
-      <h1 class="text-2xl font-bold text-foreground mb-2">用户中心</h1>
-      <p class="text-muted-foreground mb-8">管理个人信息和安全设置</p>
+      <!-- 标题区 -->
+      <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 class="text-xl font-bold text-foreground flex items-center gap-2">
+            <User class="w-5 h-5 text-primary" />用户中心
+          </h1>
+          <p class="text-sm text-muted-foreground mt-1">管理个人信息和安全设置</p>
+        </div>
+      </div>
+
+      <div class="max-w-6xl mx-auto">
 
       <!-- 用户信息卡片 -->
       <div class="bg-card border border-border rounded-xl p-6 mb-6">

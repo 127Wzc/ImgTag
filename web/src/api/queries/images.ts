@@ -8,7 +8,7 @@ import type { ImageResponse, ImageSearchResponse, ImageSearchRequest, UploadAnal
  */
 export function useImages(params: Ref<ImageSearchRequest>) {
     return useQuery({
-        queryKey: ['images', params],
+        queryKey: computed(() => ['images', params.value]),
         queryFn: async () => {
             const { data } = await apiClient.post<ImageSearchResponse>('/images/search', params.value)
             return data
@@ -21,7 +21,7 @@ export function useImages(params: Ref<ImageSearchRequest>) {
  */
 export function useMyImages(params: Ref<ImageSearchRequest>) {
     return useQuery({
-        queryKey: ['my-images', params],
+        queryKey: computed(() => ['my-images', params.value]),
         queryFn: async () => {
             const { data } = await apiClient.post<ImageSearchResponse>('/images/my', params.value)
             return data
@@ -34,7 +34,7 @@ export function useMyImages(params: Ref<ImageSearchRequest>) {
  */
 export function useImage(id: Ref<number | null>) {
     return useQuery({
-        queryKey: ['image', id],
+        queryKey: computed(() => ['image', id.value]),
         queryFn: async () => {
             if (!id.value) return null
             const { data } = await apiClient.get<ImageResponse>(`/images/${id.value}`)

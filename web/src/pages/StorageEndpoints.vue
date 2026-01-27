@@ -395,24 +395,27 @@ onUnmounted(() => {
 
 <template>
   <div class="p-6 lg:p-8">
-    <div class="max-w-5xl mx-auto">
-      <!-- 标题 -->
-      <div class="flex items-center justify-between mb-8">
+      <!-- 标题区 -->
+      <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 class="text-2xl font-bold text-foreground">存储端点管理</h1>
-          <p class="text-muted-foreground mt-1">管理多个存储后端，支持 S3 兼容存储</p>
+          <h1 class="text-xl font-bold text-foreground flex items-center gap-2">
+            <HardDrive class="w-5 h-5 text-primary" />存储端点管理
+          </h1>
+          <p class="text-sm text-muted-foreground mt-1">配置与管理多个存储后端，支持 S3 兼容存储与自动同步</p>
         </div>
-        <div class="flex gap-2">
-          <Button variant="outline" @click="openSyncDialog" :disabled="endpoints.length < 2">
+        <div class="flex items-center gap-2">
+          <Button variant="outline" size="sm" class="h-9" @click="openSyncDialog" :disabled="endpoints.length < 2">
             <Play class="w-4 h-4 mr-2" />
             同步
           </Button>
-          <Button @click="openCreate">
+          <Button size="sm" class="h-9" @click="openCreate">
             <Plus class="w-4 h-4 mr-2" />
             添加端点
           </Button>
         </div>
       </div>
+
+      <div class="max-w-6xl mx-auto">
 
       <!-- 加载状态 -->
       <div v-if="loading" class="flex items-center justify-center py-20">

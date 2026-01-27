@@ -15,7 +15,7 @@ export function useSearch(params: Ref<{
     offset?: number
 } | null>) {
     return useQuery({
-        queryKey: ['search', params],
+        queryKey: computed(() => ['search', params.value]),
         queryFn: async () => {
             if (!params.value) return null
 
@@ -52,7 +52,7 @@ export function useSearch(params: Ref<{
  */
 export function useSimilarSearch(params: Ref<SimilarSearchRequest | null>) {
     return useQuery({
-        queryKey: ['similar-search', params],
+        queryKey: computed(() => ['similar-search', params.value]),
         queryFn: async () => {
             if (!params.value) return null
             const { data } = await apiClient.post<SimilarSearchResponse>('/images/smart-search', params.value)

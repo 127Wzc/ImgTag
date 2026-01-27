@@ -7,6 +7,7 @@ import { toast } from 'vue-sonner'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { 
+  Settings,
   Save,
   Loader2,
   Eye,
@@ -615,8 +616,17 @@ onMounted(() => fetchConfigs())
 
 <template>
   <div class="p-6 lg:p-8">
-    <div class="max-w-4xl mx-auto">
-      <h1 class="text-xl font-semibold text-foreground mb-6">系统设置</h1>
+    <!-- 标题区 -->
+    <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div>
+        <h1 class="text-xl font-bold text-foreground flex items-center gap-2">
+          <Settings class="w-5 h-5 text-primary" />系统设置
+        </h1>
+        <p class="text-sm text-muted-foreground mt-1">管理系统参数、模型配置与用户权限</p>
+      </div>
+    </div>
+
+    <div class="max-w-6xl mx-auto">
 
       <!-- 加载 -->
       <div v-if="loading" class="flex items-center justify-center py-20">
