@@ -7,9 +7,8 @@ import { RouterLink } from 'vue-router'
 import { useUserStore } from '@/stores'
 import { Button } from '@/components/ui/button'
 import {
-  Sparkles, Tags, Search, Shield, Zap,
-  ArrowRight, Github, FolderOpen, Cpu,
-  Layers, Database, Command
+  Sparkles, Search, Shield, Zap,
+  ArrowRight, Github, Database
 } from 'lucide-vue-next'
 import { ref, computed } from 'vue'
 
@@ -66,6 +65,28 @@ const features = [
     gradient: 'from-rose-500/20 via-red-500/5 to-transparent'
   }
 ]
+
+// 动态画廊逻辑
+import { useImages } from '@/api/queries'
+import type { ImageResponse } from '@/types'
+
+const galleryParams = ref({
+  page: 1,
+  size: 30, // 获取足够多的图片以供滚动
+})
+
+const { data: galleryData } = useImages(galleryParams)
+
+const images = computed(() => (galleryData.value?.data || []) as ImageResponse[])
+
+const showGallery = computed(() => {
+  return images.value.length >= 6
+})
+
+// 将图片分为两行
+const galleryRow1 = computed(() => images.value.slice(0, Math.ceil(images.value.length / 2)))
+const galleryRow2 = computed(() => images.value.slice(Math.ceil(images.value.length / 2)))
+
 </script>
 
 <template>
@@ -105,13 +126,8 @@ const features = [
           </template>
           <template v-else>
             <RouterLink to="/login">
-              <Button size="sm" variant="outline" class="rounded-full px-5 hover:bg-muted/50">
-                登录
-              </Button>
-            </RouterLink>
-            <RouterLink to="/login">
               <Button size="sm" class="rounded-full px-5 shadow-sm shadow-primary/20">
-                开始使用
+                登录
               </Button>
             </RouterLink>
           </template>
@@ -162,8 +178,71 @@ const features = [
             </a>
           </div>
 
-          <!-- 视觉展示区 - 模拟应用界面 -->
-          <div class="mt-20 relative max-w-5xl mx-auto opacity-0 animate-enter delay-500 duration-1000">
+          <!-- 动态画廊 (已登录且有图片) -->
+          <div v-if="showGallery" class="mt-20 relative full-width-gallery opacity-0 animate-enter delay-500 duration-1000">
+             <!-- 遮罩 -->
+            <div class="absolute inset-y-0 left-0 w-32 bg-gradient-to-r from-background to-transparent z-10 pointer-events-none"></div>
+            <div class="absolute inset-y-0 right-0 w-32 bg-gradient-to-l from-background to-transparent z-10 pointer-events-none"></div>
+
+            <div class="flex flex-col gap-4 -rotate-1 scale-105 hover:scale-100 transition-transform duration-700">
+              <!-- 第一行：向左滚动 -->
+              <div class="marquee-container flex overflow-hidden w-full">
+                <div class="marquee-content animate-marquee flex gap-4 min-w-max">
+                  <div 
+                    v-for="img in galleryRow1" 
+                    :key="img.id" 
+                    class="relative group w-64 h-48 flex-shrink-0 rounded-xl overflow-hidden border border-border/50 bg-muted/30"
+                  >
+                    <img :src="img.image_url" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" loading="lazy" />
+                    <!-- Hover Info -->
+                    <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-3">
+                      <p class="text-white text-xs font-medium truncate">{{ img.description || 'Image #' + img.id }}</p>
+                      <div class="flex gap-1 mt-1 flex-wrap">
+                        <span v-for="tag in img.tags.slice(0, 2)" :key="tag.id" class="text-[10px] bg-white/20 text-white px-1.5 py-0.5 rounded backdrop-blur-sm">
+                          {{ tag.name }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <!-- Duplicate for smooth loop -->
+                  <div 
+                    v-for="img in galleryRow1" 
+                    :key="`dup-${img.id}`" 
+                    class="relative group w-64 h-48 flex-shrink-0 rounded-xl overflow-hidden border border-border/50 bg-muted/30"
+                  >
+                    <img :src="img.image_url" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" loading="lazy" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- 第二行：向右滚动 -->
+              <div class="marquee-container flex overflow-hidden w-full">
+                <div class="marquee-content animate-marquee-reverse flex gap-4 min-w-max">
+                  <div 
+                    v-for="img in galleryRow2" 
+                    :key="img.id" 
+                    class="relative group w-64 h-48 flex-shrink-0 rounded-xl overflow-hidden border border-border/50 bg-muted/30"
+                  >
+                    <img :src="img.image_url" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" loading="lazy" />
+                    <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-3">
+                       <p class="text-white text-xs font-medium truncate">{{ img.description || 'Image #' + img.id }}</p>
+                    </div>
+                  </div>
+                  <!-- Duplicate -->
+                   <div 
+                    v-for="img in galleryRow2" 
+                    :key="`dup-${img.id}`" 
+                    class="relative group w-64 h-48 flex-shrink-0 rounded-xl overflow-hidden border border-border/50 bg-muted/30"
+                  >
+                    <img :src="img.image_url" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" loading="lazy" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 视觉展示区 - 模拟应用界面 (Fallback) -->
+          <div v-else class="mt-20 relative max-w-5xl mx-auto opacity-0 animate-enter delay-500 duration-1000">
             <div class="absolute -inset-1 bg-gradient-to-r from-primary/30 to-violet-500/30 rounded-xl blur opacity-30"></div>
             <div class="relative rounded-xl border border-border/50 bg-card/80 backdrop-blur shadow-2xl overflow-hidden aspect-[16/9] sm:aspect-[2/1] group">
               <!-- 模拟 Header -->
@@ -217,7 +296,7 @@ const features = [
 
           <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 lg:gap-6 auto-rows-fr">
             <div
-              v-for="(feature, idx) in features"
+              v-for="feature in features"
               :key="feature.title"
               :class="[
                 'group relative rounded-3xl border border-border/50 bg-card/50 p-6 sm:p-8 overflow-hidden transition-all hover:border-primary/20 hover:shadow-lg',
@@ -260,12 +339,12 @@ const features = [
         <div class="max-w-7xl mx-auto px-4 sm:px-6 flex flex-col md:flex-row items-center justify-between gap-6">
           <div class="flex items-center gap-2">
             <img src="/logo.png" alt="ImgTag" class="w-6 h-6 grayscale opacity-50" />
-            <span class="text-sm text-muted-foreground">© 2024 ImgTag. Open Source.</span>
+            <span class="text-sm text-muted-foreground">© 2025 ImgTag. Open Source.</span>
           </div>
 
           <div class="flex items-center gap-6 text-sm text-muted-foreground">
-            <a href="#" class="hover:text-foreground transition-colors">文档</a>
-            <a href="#" class="hover:text-foreground transition-colors">API</a>
+            <a href="https://github.com/127Wzc/ImgTag/blob/main/README.md" class="hover:text-foreground transition-colors">文档</a>
+            <a href="https://github.com/127Wzc/ImgTag/blob/main/docs/external-api.md" class="hover:text-foreground transition-colors">外部API</a>
             <a href="https://github.com/127Wzc/ImgTag" class="hover:text-foreground transition-colors">GitHub</a>
           </div>
         </div>
@@ -295,6 +374,38 @@ const features = [
 .delay-200 { animation-delay: 200ms; }
 .delay-300 { animation-delay: 300ms; }
 .delay-500 { animation-delay: 500ms; }
+
+/* Marquee Animations */
+@keyframes marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+@keyframes marquee-reverse {
+  0% { transform: translateX(-50%); }
+  100% { transform: translateX(0); }
+}
+
+@keyframes marquee-reverse {
+  0% { transform: translateX(-50%); }
+  100% { transform: translateX(0); }
+}
+
+.marquee-container {
+  mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent);
+}
+
+.animate-marquee {
+  animation: marquee 40s linear infinite;
+}
+
+.animate-marquee-reverse {
+  animation: marquee-reverse 45s linear infinite;
+}
+
+.marquee-content:hover {
+  animation-play-state: paused;
+}
 
 /* 确保背景网格在暗黑模式下更明显 */
 .dark .bg-grid-white\/5 {

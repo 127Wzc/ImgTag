@@ -287,10 +287,10 @@ function isAnyOpPending(imageId: number): boolean {
            <div
              class="w-6 h-6 rounded-full flex items-center justify-center transition-all duration-300 shadow-lg backdrop-blur-md"
              :class="selectedIds.has(image.id)
-               ? 'bg-primary text-primary-foreground scale-100'
+               ? 'bg-white text-green-600 scale-100 shadow-md'
                : 'bg-black/30 text-white/50 hover:bg-black/50 hover:text-white scale-90 hover:scale-100'"
            >
-             <Check v-if="selectedIds.has(image.id)" class="w-3.5 h-3.5" stroke-width="3" />
+             <Check v-if="selectedIds.has(image.id)" class="w-3.5 h-3.5" stroke-width="5" />
              <div v-else class="w-2 h-2 rounded-full bg-current opacity-50" />
            </div>
         </div>

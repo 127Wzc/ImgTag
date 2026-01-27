@@ -334,27 +334,31 @@ onUnmounted(() => {
           />
         </div>
 
-        <!-- 顶部操作栏 (悬浮胶囊 - 收起状态) -->
+        <!-- 顶部操作栏 (悬浮感应区) -->
         <Transition name="scale-fade">
           <div
             v-if="!showInfoPanel"
-            class="absolute top-4 right-4 z-50 flex items-center p-1.5 rounded-full bg-black/20 backdrop-blur-3xl shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)] hover:bg-black/30 transition-all origin-top-right"
+            class="absolute top-0 right-0 z-50 p-6 group/top"
           >
-            <button
-              class="p-2.5 rounded-full text-white/70 hover:text-white hover:bg-white/10 transition-all active:scale-95"
-              @click.stop="showInfoPanel = true"
-              title="显示信息"
+            <div
+              class="flex items-center p-1.5 rounded-full bg-black/20 backdrop-blur-3xl shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)] hover:bg-black/30 transition-all origin-top-right md:opacity-0 md:group-hover/top:opacity-100 duration-300"
             >
-              <Info class="w-5 h-5" />
-            </button>
-            <div class="w-px h-4 bg-white/10 mx-1" />
-            <button
-              class="p-2.5 rounded-full text-white/70 hover:text-white hover:bg-white/10 transition-all active:scale-95"
-              @click.stop="handleBackdropClick"
-              title="关闭 (Esc)"
-            >
-              <X class="w-5 h-5" />
-            </button>
+              <button
+                class="p-2.5 rounded-full text-white/70 hover:text-white hover:bg-white/10 transition-all active:scale-95"
+                @click.stop="showInfoPanel = true"
+                title="显示信息"
+              >
+                <Info class="w-5 h-5" />
+              </button>
+              <div class="w-px h-4 bg-white/10 mx-1" />
+              <button
+                class="p-2.5 rounded-full text-white/70 hover:text-white hover:bg-white/10 transition-all active:scale-95"
+                @click.stop="handleBackdropClick"
+                title="关闭 (Esc)"
+              >
+                <X class="w-5 h-5" />
+              </button>
+            </div>
           </div>
         </Transition>
 
@@ -385,9 +389,14 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <!-- 底部页码 -->
-        <div v-if="totalCount" class="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 px-4 py-1.5 rounded-full bg-black/20 backdrop-blur-md text-white/40 text-sm font-medium tabular-nums border border-white/5 opacity-40 hover:opacity-100 transition-opacity">
-          {{ (currentIndex ?? 0) + 1 }} <span class="text-white/20 mx-1">/</span> {{ totalCount }}
+        <!-- 底部页码 (底部感应区) -->
+        <div
+          v-if="totalCount"
+          class="absolute bottom-0 left-0 right-0 h-24 z-20 flex items-end justify-center pb-8 group/bottom"
+        >
+           <div class="text-white/60 text-sm font-medium tabular-nums drop-shadow-md transition-opacity duration-300 md:opacity-0 md:group-hover/bottom:opacity-100">
+             <span class="text-white shadow-black drop-shadow-md">{{ (currentIndex ?? 0) + 1 }}</span> <span class="opacity-50 mx-1">/</span> {{ totalCount }}
+           </div>
         </div>
 
         <!-- 信息侧边栏 (悬浮卡片风格 - 高透明度玻璃拟态) -->
