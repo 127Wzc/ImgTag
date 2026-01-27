@@ -1,21 +1,21 @@
 <script setup lang="ts">
 /**
- * Dashboard - 仪表盘页面
- * 展示图片统计、今日数据、队列状态、标签统计
+ * Dashboard - 仪表盘页面 (Linear Style)
+ * 极简数据可视化，Bento Grid 布局
  */
 import { computed, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useDashboardStats, useTagsByLevel } from '@/api/queries'
 import { useUserStore } from '@/stores'
-import { Loader2, Image, ImagePlus, Sparkles, Clock, Activity, TrendingUp, FolderOpen, Tags, Folder, Box, Search } from 'lucide-vue-next'
+import { Loader2, Search, ArrowRight, Activity, Database, Clock, Server, Layers, Hash, Image as ImageIcon } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 
 const userStore = useUserStore()
 
-// API 查询（进入页面时请求一次）
+// API 查询
 const { data: stats, isLoading: statsLoading } = useDashboardStats()
 
-// 标签查询（各级别）
+// 标签查询
 const level0 = ref(0)
 const level1 = ref(1)
 const level2 = ref(2)
@@ -24,23 +24,23 @@ const { data: resolutionsData } = useTagsByLevel(level1, 50)
 const { data: tagsData } = useTagsByLevel(level2, 50)
 
 // 处理标签数据：按 usage_count 倒序
-const topCategories = computed(() => 
+const topCategories = computed(() =>
   (categoriesData.value || [])
     .filter(t => (t.usage_count ?? 0) > 0)
     .sort((a, b) => (b.usage_count ?? 0) - (a.usage_count ?? 0))
-    .slice(0, 5)
+    .slice(0, 6)
 )
-const topResolutions = computed(() => 
+const topResolutions = computed(() =>
   (resolutionsData.value || [])
     .filter(t => (t.usage_count ?? 0) > 0)
     .sort((a, b) => (b.usage_count ?? 0) - (a.usage_count ?? 0))
-    .slice(0, 5)
+    .slice(0, 6)
 )
-const topTags = computed(() => 
+const topTags = computed(() =>
   (tagsData.value || [])
     .filter(t => (t.usage_count ?? 0) > 0)
     .sort((a, b) => (b.usage_count ?? 0) - (a.usage_count ?? 0))
-    .slice(0, 10)
+    .slice(0, 12)
 )
 
 const isLoading = computed(() => statsLoading.value && !stats.value)
@@ -53,220 +53,188 @@ const analysisProgress = computed(() => {
 
 // 格式化数字
 function formatNumber(num: number) {
-  if (num >= 10000) return (num / 10000).toFixed(1) + '万'
-  return num.toString()
+  return new Intl.NumberFormat('en-US').format(num)
 }
 </script>
 
 <template>
-  <div class="p-6 lg:p-8 space-y-6">
-    <!-- 页面标题 -->
-    <div class="flex items-center justify-between">
+  <div class="p-6 lg:p-10 max-w-[1600px] mx-auto space-y-8">
+    <!-- Header -->
+    <div class="flex items-center justify-between pb-6 border-b border-border/40">
       <div>
-        <h1 class="text-2xl font-bold text-foreground">仪表盘</h1>
-        <p class="text-muted-foreground text-sm mt-1">数据概览与统计</p>
+        <h1 class="text-2xl font-semibold tracking-tight">概览</h1>
+        <p class="text-sm text-muted-foreground mt-1 font-mono text-xs opacity-70">
+          系统状态: {{ stats?.queue?.running ? '在线' : '空闲' }}
+        </p>
       </div>
-      <!-- 根据登录状态显示不同按钮 -->
-      <div class="flex items-center gap-2">
+      <div class="flex gap-3">
         <RouterLink to="/search">
-          <Button variant="outline" class="gap-2">
-            <Search class="w-4 h-4" />
-            图片探索
+          <Button variant="outline" size="sm" class="gap-2 h-9">
+            <Search class="w-3.5 h-3.5" />
+            搜索
           </Button>
         </RouterLink>
         <RouterLink v-if="userStore.isLoggedIn" to="/my-files">
-          <Button class="gap-2">
-            <FolderOpen class="w-4 h-4" />
-            我的图库
-          </Button>
-        </RouterLink>
-        <RouterLink v-else to="/login">
-          <Button class="gap-2">
-            登录
+          <Button size="sm" class="gap-2 h-9 bg-primary text-primary-foreground shadow-sm">
+            我的文件
+            <ArrowRight class="w-3.5 h-3.5" />
           </Button>
         </RouterLink>
       </div>
     </div>
 
-    <!-- 加载状态 -->
-    <div v-if="isLoading" class="flex items-center justify-center py-20">
-      <Loader2 class="w-8 h-8 animate-spin text-muted-foreground" />
+    <!-- Loading State -->
+    <div v-if="isLoading" class="flex items-center justify-center py-40">
+      <Loader2 class="w-6 h-6 animate-spin text-muted-foreground" />
     </div>
 
     <template v-else>
-      <!-- 第一行：图片统计卡片 -->
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <!-- 图片总数 -->
-        <div class="bg-gradient-to-br from-violet-500/10 to-purple-500/10 border border-violet-500/20 rounded-2xl p-5">
-          <div class="flex items-center justify-between">
-            <div class="w-10 h-10 bg-violet-500/20 rounded-xl flex items-center justify-center">
-              <Image class="w-5 h-5 text-violet-500" />
-            </div>
-            <span class="text-xs font-medium text-violet-500 bg-violet-500/10 px-2 py-1 rounded-full">总计</span>
+      <!-- Stats Grid -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <!-- Total Images -->
+        <div class="p-5 rounded-xl border border-border/50 bg-card/50 hover:bg-card hover:border-border transition-all group">
+          <div class="flex items-center justify-between mb-4">
+            <span class="text-sm font-medium text-muted-foreground">图片总数</span>
+            <ImageIcon class="w-4 h-4 text-muted-foreground group-hover:text-foreground transition-colors" />
           </div>
-          <div class="mt-4">
-            <div class="text-3xl font-bold text-foreground">{{ formatNumber(stats?.images?.total ?? 0) }}</div>
-            <div class="text-sm text-muted-foreground mt-1">图片总数</div>
+          <div class="text-3xl font-mono font-medium tracking-tighter">
+            {{ formatNumber(stats?.images?.total ?? 0) }}
           </div>
         </div>
 
-        <!-- 待分析 -->
-        <div class="bg-gradient-to-br from-amber-500/10 to-orange-500/10 border border-amber-500/20 rounded-2xl p-5">
-          <div class="flex items-center justify-between">
-            <div class="w-10 h-10 bg-amber-500/20 rounded-xl flex items-center justify-center">
-              <Clock class="w-5 h-5 text-amber-500" />
-            </div>
-            <span class="text-xs font-medium text-amber-500 bg-amber-500/10 px-2 py-1 rounded-full">待处理</span>
+        <!-- Pending Analysis -->
+        <div class="p-5 rounded-xl border border-border/50 bg-card/50 hover:bg-card hover:border-border transition-all group">
+          <div class="flex items-center justify-between mb-4">
+            <span class="text-sm font-medium text-muted-foreground">待处理</span>
+            <Clock class="w-4 h-4 text-muted-foreground group-hover:text-amber-500 transition-colors" />
           </div>
-          <div class="mt-4">
-            <div class="text-3xl font-bold text-foreground">{{ formatNumber(stats?.images?.pending ?? 0) }}</div>
-            <div class="text-sm text-muted-foreground mt-1">待分析</div>
+          <div class="text-3xl font-mono font-medium tracking-tighter flex items-end gap-2">
+            {{ formatNumber(stats?.images?.pending ?? 0) }}
+            <span v-if="(stats?.images?.pending ?? 0) > 0" class="text-xs text-amber-500 mb-1 font-sans font-medium">处理中</span>
           </div>
         </div>
 
-        <!-- 今日上传 -->
-        <div class="bg-gradient-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 rounded-2xl p-5">
-          <div class="flex items-center justify-between">
-            <div class="w-10 h-10 bg-blue-500/20 rounded-xl flex items-center justify-center">
-              <ImagePlus class="w-5 h-5 text-blue-500" />
-            </div>
-            <span class="text-xs font-medium text-blue-500 bg-blue-500/10 px-2 py-1 rounded-full">今日</span>
+        <!-- Today Uploads -->
+        <div class="p-5 rounded-xl border border-border/50 bg-card/50 hover:bg-card hover:border-border transition-all group">
+          <div class="flex items-center justify-between mb-4">
+            <span class="text-sm font-medium text-muted-foreground">今日上传</span>
+            <Database class="w-4 h-4 text-muted-foreground group-hover:text-blue-500 transition-colors" />
           </div>
-          <div class="mt-4">
-            <div class="text-3xl font-bold text-foreground">{{ stats?.today?.uploaded ?? 0 }}</div>
-            <div class="text-sm text-muted-foreground mt-1">今日上传</div>
+          <div class="text-3xl font-mono font-medium tracking-tighter text-blue-500">
+            +{{ formatNumber(stats?.today?.uploaded ?? 0) }}
           </div>
         </div>
 
-        <!-- 今日分析 -->
-        <div class="bg-gradient-to-br from-emerald-500/10 to-green-500/10 border border-emerald-500/20 rounded-2xl p-5">
-          <div class="flex items-center justify-between">
-            <div class="w-10 h-10 bg-emerald-500/20 rounded-xl flex items-center justify-center">
-              <Sparkles class="w-5 h-5 text-emerald-500" />
+        <!-- Queue Status -->
+        <div class="p-5 rounded-xl border border-border/50 bg-card/50 hover:bg-card hover:border-border transition-all group relative overflow-hidden">
+          <div class="flex items-center justify-between mb-4 relative z-10">
+            <span class="text-sm font-medium text-muted-foreground">队列状态</span>
+            <div class="flex items-center gap-1.5">
+              <span class="relative flex h-2 w-2">
+                <span v-if="stats?.queue?.running" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span class="relative inline-flex rounded-full h-2 w-2" :class="stats?.queue?.running ? 'bg-emerald-500' : 'bg-zinc-500'"></span>
+              </span>
+              <span class="text-xs font-mono" :class="stats?.queue?.running ? 'text-emerald-500' : 'text-muted-foreground'">
+                {{ stats?.queue?.running ? '运行中' : '空闲' }}
+              </span>
             </div>
-            <span class="text-xs font-medium text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded-full">今日</span>
           </div>
-          <div class="mt-4">
-            <div class="text-3xl font-bold text-foreground">{{ stats?.today?.analyzed ?? 0 }}</div>
-            <div class="text-sm text-muted-foreground mt-1">今日分析</div>
+          <div class="relative z-10">
+             <div class="text-3xl font-mono font-medium tracking-tighter">
+                {{ stats?.queue?.processing ?? 0 }}
+             </div>
+             <div class="text-xs text-muted-foreground mt-1">活跃任务</div>
           </div>
+          <!-- Background Decoration -->
+          <Activity v-if="stats?.queue?.running" class="absolute -right-2 -bottom-2 w-24 h-24 text-emerald-500/5 stroke-[1]" />
         </div>
       </div>
 
-      <!-- 第二行：分析进度 & 队列状态 -->
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <!-- 分析进度 -->
-        <div class="bg-card border border-border rounded-2xl p-6">
-          <div class="flex items-center justify-between mb-4">
-            <h3 class="font-semibold text-foreground flex items-center gap-2">
-              <TrendingUp class="w-4 h-4 text-primary" />
-              分析进度
-            </h3>
-            <span class="text-2xl font-bold text-primary">{{ analysisProgress }}%</span>
-          </div>
-          <div class="h-3 bg-muted rounded-full overflow-hidden">
-            <div 
-              class="h-full bg-gradient-to-r from-primary to-purple-500 rounded-full transition-all duration-500"
-              :style="{ width: `${analysisProgress}%` }"
-            />
-          </div>
-          <div class="flex justify-between text-sm text-muted-foreground mt-3">
-            <span>已分析 {{ formatNumber(stats?.images?.analyzed ?? 0) }}</span>
-            <span>共 {{ formatNumber(stats?.images?.total ?? 0) }} 张</span>
-          </div>
+      <!-- Analysis Progress (Full Width) -->
+      <div class="p-6 rounded-xl border border-border/50 bg-card/30">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-sm font-medium">分析进度</h3>
+          <span class="text-sm font-mono text-muted-foreground">{{ analysisProgress }}%</span>
         </div>
+        <div class="h-1.5 w-full bg-secondary/50 rounded-full overflow-hidden">
+          <div
+            class="h-full bg-foreground rounded-full transition-all duration-1000 ease-out"
+            :style="{ width: `${analysisProgress}%` }"
+          />
+        </div>
+        <div class="mt-2 flex justify-between text-xs text-muted-foreground font-mono">
+          <span>{{ formatNumber(stats?.images?.analyzed ?? 0) }} 已分析</span>
+          <span>{{ formatNumber(stats?.images?.total ?? 0) }} 总计</span>
+        </div>
+      </div>
 
-        <!-- 队列状态 -->
-        <div class="bg-card border border-border rounded-2xl p-6">
-          <div class="flex items-center justify-between mb-4">
-            <h3 class="font-semibold text-foreground flex items-center gap-2">
-              <Activity class="w-4 h-4 text-primary" />
-              分析队列
-            </h3>
-            <span 
-              class="text-xs font-medium px-2.5 py-1 rounded-full"
-              :class="stats?.queue?.running 
-                ? 'text-emerald-500 bg-emerald-500/10' 
-                : 'text-muted-foreground bg-muted'"
+      <!-- Bottom Grid: Tags & Distributions -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Categories -->
+        <div class="lg:col-span-1 p-6 rounded-xl border border-border/50 bg-card/30 flex flex-col">
+          <div class="flex items-center gap-2 mb-6">
+            <Layers class="w-4 h-4 text-muted-foreground" />
+            <h3 class="text-sm font-medium">热门分类</h3>
+          </div>
+          <div class="space-y-3 flex-1">
+            <div
+              v-for="(cat, i) in topCategories"
+              :key="cat.id"
+              class="group flex items-center justify-between text-sm"
             >
-              {{ stats?.queue?.running ? '运行中' : '已停止' }}
-            </span>
-          </div>
-          <div class="grid grid-cols-2 gap-4">
-            <div class="bg-muted/50 rounded-xl p-4 text-center">
-              <div class="text-2xl font-bold text-foreground">{{ stats?.queue?.pending ?? 0 }}</div>
-              <div class="text-xs text-muted-foreground mt-1">等待中</div>
+              <div class="flex items-center gap-3">
+                <span class="font-mono text-xs text-muted-foreground w-4">{{ i + 1 }}</span>
+                <span class="text-foreground/80 group-hover:text-foreground transition-colors">{{ cat.name }}</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <div class="w-16 h-1 bg-secondary rounded-full overflow-hidden">
+                   <div class="h-full bg-violet-500/50" :style="{ width: `${(cat.usage_count! / (topCategories[0]?.usage_count || 1)) * 100}%` }" />
+                </div>
+                <span class="font-mono text-xs text-muted-foreground w-8 text-right">{{ cat.usage_count }}</span>
+              </div>
             </div>
-            <div class="bg-muted/50 rounded-xl p-4 text-center">
-              <div class="text-2xl font-bold text-amber-500">{{ stats?.queue?.processing ?? 0 }}</div>
-              <div class="text-xs text-muted-foreground mt-1">处理中</div>
-            </div>
+            <div v-if="!topCategories.length" class="text-sm text-muted-foreground py-4">暂无数据</div>
           </div>
         </div>
-      </div>
 
-      <!-- 第三行：标签统计（紧凑横向布局） -->
-      <div class="bg-card border border-border rounded-2xl p-6">
-        <h3 class="font-semibold text-foreground flex items-center gap-2 mb-4">
-          <Tags class="w-4 h-4 text-primary" />
-          标签统计
-        </h3>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <!-- 主分类 -->
-          <div class="space-y-2">
-            <div class="flex items-center gap-2 text-sm text-muted-foreground mb-2">
-              <Folder class="w-3.5 h-3.5 text-violet-500" />
-              <span>主分类 Top 5</span>
-            </div>
-            <div v-if="topCategories.length" class="flex flex-wrap gap-2">
-              <span 
-                v-for="tag in topCategories" 
-                :key="tag.id"
-                class="inline-flex items-center gap-1 px-2.5 py-1 bg-violet-500/10 text-violet-500 rounded-full text-xs"
-              >
-                {{ tag.name }}
-                <span class="font-semibold">{{ tag.usage_count }}</span>
-              </span>
-            </div>
-            <div v-else class="text-xs text-muted-foreground">暂无数据</div>
+        <!-- Resolutions -->
+        <div class="lg:col-span-1 p-6 rounded-xl border border-border/50 bg-card/30 flex flex-col">
+          <div class="flex items-center gap-2 mb-6">
+            <Server class="w-4 h-4 text-muted-foreground" />
+            <h3 class="text-sm font-medium">分辨率分布</h3>
           </div>
-
-          <!-- 分辨率 -->
-          <div class="space-y-2">
-            <div class="flex items-center gap-2 text-sm text-muted-foreground mb-2">
-              <Box class="w-3.5 h-3.5 text-blue-500" />
-              <span>分辨率 Top 5</span>
+          <div class="space-y-3 flex-1">
+            <div
+              v-for="(res, i) in topResolutions"
+              :key="res.id"
+              class="group flex items-center justify-between text-sm"
+            >
+              <div class="flex items-center gap-3">
+                <span class="font-mono text-xs text-muted-foreground w-4">{{ i + 1 }}</span>
+                <span class="text-foreground/80 group-hover:text-foreground transition-colors">{{ res.name }}</span>
+              </div>
+              <span class="font-mono text-xs text-muted-foreground">{{ res.usage_count }}</span>
             </div>
-            <div v-if="topResolutions.length" class="flex flex-wrap gap-2">
-              <span 
-                v-for="tag in topResolutions" 
-                :key="tag.id"
-                class="inline-flex items-center gap-1 px-2.5 py-1 bg-blue-500/10 text-blue-500 rounded-full text-xs"
-              >
-                {{ tag.name }}
-                <span class="font-semibold">{{ tag.usage_count }}</span>
-              </span>
-            </div>
-            <div v-else class="text-xs text-muted-foreground">暂无数据</div>
+            <div v-if="!topResolutions.length" class="text-sm text-muted-foreground py-4">暂无数据</div>
           </div>
+        </div>
 
-          <!-- 热门标签 -->
-          <div class="space-y-2">
-            <div class="flex items-center gap-2 text-sm text-muted-foreground mb-2">
-              <Tags class="w-3.5 h-3.5 text-emerald-500" />
-              <span>热门标签 Top 10</span>
-            </div>
-            <div v-if="topTags.length" class="flex flex-wrap gap-2">
-              <span 
-                v-for="tag in topTags" 
-                :key="tag.id"
-                class="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-500/10 text-emerald-500 rounded-full text-xs"
-              >
-                {{ tag.name }}
-                <span class="font-semibold">{{ tag.usage_count }}</span>
-              </span>
-            </div>
-            <div v-else class="text-xs text-muted-foreground">暂无数据</div>
+        <!-- Trending Tags -->
+        <div class="lg:col-span-1 p-6 rounded-xl border border-border/50 bg-card/30 flex flex-col">
+          <div class="flex items-center gap-2 mb-6">
+            <Hash class="w-4 h-4 text-muted-foreground" />
+            <h3 class="text-sm font-medium">热门标签</h3>
+          </div>
+          <div class="flex flex-wrap gap-2 content-start">
+            <span
+              v-for="tag in topTags"
+              :key="tag.id"
+              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-border/50 bg-secondary/30 text-xs text-foreground/80 hover:bg-secondary/50 hover:text-foreground hover:border-border transition-all cursor-default"
+            >
+              {{ tag.name }}
+              <span class="text-[10px] text-muted-foreground border-l border-border/50 pl-1.5 ml-0.5">{{ tag.usage_count }}</span>
+            </span>
+            <div v-if="!topTags.length" class="text-sm text-muted-foreground py-4 w-full">暂无数据</div>
           </div>
         </div>
       </div>

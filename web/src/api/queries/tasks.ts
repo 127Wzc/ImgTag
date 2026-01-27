@@ -12,7 +12,7 @@ export function useTasks(params: Ref<{
     size?: number
 }>) {
     return useQuery({
-        queryKey: ['tasks', params],
+        queryKey: computed(() => ['tasks', params.value]),
         queryFn: async () => {
             const searchParams = new URLSearchParams()
             if (params.value.status) searchParams.append('status', params.value.status)

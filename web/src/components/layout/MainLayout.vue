@@ -33,7 +33,7 @@ watch(() => route.path, () => {
     <!-- 带侧边栏的布局（登录后） -->
     <template v-if="showSidebar">
       <Sidebar />
-      <main 
+      <main
         class="min-h-screen transition-all duration-300 pt-14 lg:pt-0"
         :class="themeStore.sidebarCollapsed ? 'lg:ml-16' : 'lg:ml-56'"
       >

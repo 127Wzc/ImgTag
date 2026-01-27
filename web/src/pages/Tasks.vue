@@ -168,47 +168,51 @@ const canDelete = (status: string) => status === 'completed' || status === 'fail
 
 <template>
   <div class="p-6 lg:p-8">
-    <div class="max-w-5xl mx-auto">
-      <!-- 标题 -->
-      <div class="flex items-center justify-between mb-8">
+      <!-- 标题区 -->
+      <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 class="text-2xl font-bold text-foreground">任务队列</h1>
-          <p class="text-muted-foreground mt-1">查看后台任务处理状态</p>
+          <h1 class="text-xl font-bold text-foreground flex items-center gap-2">
+            <Clock class="w-5 h-5 text-primary" />任务队列
+          </h1>
+          <p class="text-sm text-muted-foreground mt-1">查看后台任务处理状态与执行结果</p>
         </div>
-        <div class="flex gap-2">
-          <Button 
-            variant="outline" 
-            size="sm" 
-            @click="() => refetch()"
-            :disabled="isLoading"
-          >
-            <RefreshCw class="w-4 h-4 mr-2" :class="isLoading && 'animate-spin'" />
-            刷新
-          </Button>
+        <div class="flex items-center gap-2">
           <Button 
             v-if="selectedIds.length > 0"
             variant="destructive" 
             size="sm"
+            class="h-9"
             @click="handleBatchDelete"
             :disabled="deleteMutation.isPending.value"
           >
             <Trash2 class="w-4 h-4 mr-2" />
             删除选中 ({{ selectedIds.length }})
           </Button>
+          <Button 
+            variant="ghost" 
+            size="sm" 
+            class="h-9"
+            @click="() => refetch()"
+            :disabled="isLoading"
+          >
+            <RefreshCw class="w-4 h-4 mr-2" :class="isLoading && 'animate-spin'" />
+            刷新
+          </Button>
         </div>
       </div>
 
+      <div class="max-w-6xl mx-auto">
       <!-- 状态筛选 -->
-      <div class="flex gap-2 mb-6">
+      <div class="flex items-center p-1 bg-muted/30 rounded-lg w-full sm:w-fit mb-6 border border-border/50">
         <button
           v-for="option in statusOptions"
           :key="option.value"
           @click="setStatusFilter(option.value)"
-          class="px-4 py-2 text-sm rounded-lg border transition-colors"
+          class="flex-1 sm:flex-none px-4 py-1.5 text-sm font-medium rounded-md transition-all"
           :class="[
             statusFilter === option.value
-              ? 'bg-primary text-primary-foreground border-primary'
-              : 'bg-background text-muted-foreground border-border hover:border-primary/50'
+              ? 'bg-background text-foreground shadow-sm ring-1 ring-border/50'
+              : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
           ]"
         >
           {{ option.label }}

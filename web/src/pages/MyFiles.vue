@@ -1,11 +1,19 @@
 <script setup lang="ts">
+/**
+ * MyFiles - 我的图库页面 (Linear Style)
+ * 支持批量选择、悬浮操作栏、现代化分页
+ */
 import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores'
 import { useMyImages } from '@/api/queries'
 import apiClient from '@/api/client'
 import type { ImageResponse, ImageSearchRequest, TagWithSource } from '@/types'
-import { Loader2, Filter, CheckSquare, Trash2, Tags, Sparkles, LayoutGrid, ChevronDown, ChevronLeft, ChevronRight, FolderOpen, ArrowUpDown, Tag } from 'lucide-vue-next'
+import {
+  Loader2, Filter, CheckSquare, Trash2, Tags, Sparkles, LayoutGrid,
+  ChevronDown, ChevronLeft, ChevronRight, FolderOpen, ArrowUpDown, Tag,
+  X, Check, Plus
+} from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -30,25 +38,25 @@ const showUploadDialog = ref(false)
 
 if (!userStore.isLoggedIn) router.push('/login?redirect=/my-files')
 
-// 筛选状态（整合所有筛选条件）
-const filters = ref({ 
-  category: 'all', 
-  resolution: 'all', 
+// 筛选状态
+const filters = ref({
+  category: 'all',
+  resolution: 'all',
   keyword: '',
   pendingOnly: false,
   duplicatesOnly: false,
 })
-const showFilters = ref(true)
+const showFilters = ref(false)
 
 // 分页
 const pageSize = ref(40)
 const currentPage = ref(1)
 const sortBy = ref('id') // 排序字段
 const sortDesc = ref(true) // 是否倒序
-const jumpPage = ref('')  // 跳转页码输入
+const jumpPage = ref('')
 
 // 显示模式
-const showLabelsAlways = ref(false)  // 是否始终显示标签
+const showLabelsAlways = ref(false)
 
 // 搜索参数
 const searchParams = ref<ImageSearchRequest>({ size: pageSize.value, page: 1, sort_by: sortBy.value, sort_desc: sortDesc.value })
@@ -57,14 +65,14 @@ const searchParams = ref<ImageSearchRequest>({ size: pageSize.value, page: 1, so
 const { data: imageData, isLoading, isError, refetch } = useMyImages(searchParams)
 const { data: categoriesData } = useCategories()
 
-// 标签局部更新覆盖层（用于避免刷新整个列表）
+// 标签局部更新覆盖层
 const tagOverrides = ref<Map<number, TagWithSource[]>>(new Map())
 
 // 合并原始数据和覆盖层
 const images = computed(() => {
   const original = imageData.value?.data || []
   if (tagOverrides.value.size === 0) return original
-  
+
   return original.map((img: ImageResponse) => {
     const override = tagOverrides.value.get(img.id)
     return override ? { ...img, tags: override } : img
@@ -108,8 +116,7 @@ function handleReset() {
 }
 
 // 排序变更
-function changeSort(value: unknown) {
-  if (typeof value !== 'string') return
+function changeSort(value: string) {
   const [field, desc] = value.split('-')
   sortBy.value = field
   sortDesc.value = desc === 'desc'
@@ -127,11 +134,11 @@ const currentSort = computed(() => `${sortBy.value}-${sortDesc.value ? 'desc' : 
 function changePage(page: number) {
   currentPage.value = page
   searchParams.value = { ...searchParams.value, page: page }
+  window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-function changePageSize(size: unknown) {
-  if (!size) return
-  const newSize = typeof size === 'string' ? parseInt(size) : Number(size)
+function changePageSize(size: string) {
+  const newSize = parseInt(size)
   if (isNaN(newSize)) return
   pageSize.value = newSize
   currentPage.value = 1
@@ -187,24 +194,24 @@ async function handleBatchAnalyze() {
 
 async function handleBatchDelete() {
   if (!selectedIds.value.size) return
-  
+
   const result = await confirm({
     title: '批量删除',
-    message: `确定要删除 ${selectedIds.value.size} 张图片吗？此操作不可恢复！`,
+    message: `确定要删除 ${selectedIds.value.size} 张图片吗？`,
     variant: 'danger',
     confirmText: '删除',
     checkboxLabel: '同时删除物理文件',
     checkboxDefault: false,
   })
   if (!result.confirmed) return
-  
+
   batchLoading.value = true
   try {
     await apiClient.post('/images/batch/delete', {
       image_ids: Array.from(selectedIds.value),
       delete_files: result.checkboxChecked,
     })
-    toast.success(`已删除 ${selectedIds.value.size} 张图片${result.checkboxChecked ? '（含物理文件）' : ''}`)
+    toast.success(`已删除 ${selectedIds.value.size} 张图片`)
     clearSelection()
     refetch()
   } catch (e: any) { toast.error(getErrorMessage(e)) }
@@ -222,7 +229,7 @@ async function handleBatchTag() {
   try {
     const tags = batchTags.value.split(',').map(t => t.trim()).filter(Boolean)
     await apiClient.post('/images/batch/update-tags', { image_ids: Array.from(selectedIds.value), tags, mode: batchTagMode.value })
-    toast.success(`已为 ${selectedIds.value.size} 张图片${batchTagMode.value === 'add' ? '添加' : '替换'}标签`)
+    toast.success(`操作成功`)
     showBatchTagDialog.value = false
     batchTags.value = ''
     clearSelection()
@@ -240,7 +247,7 @@ async function handleBatchCategory() {
   batchLoading.value = true
   try {
     await apiClient.post('/images/batch/set-category', { image_ids: Array.from(selectedIds.value), category_id: parseInt(batchCategoryId.value) })
-    toast.success(`已为 ${selectedIds.value.size} 张图片设置分类`)
+    toast.success(`分类设置成功`)
     showBatchCategoryDialog.value = false
     batchCategoryId.value = ''
     clearSelection()
@@ -270,31 +277,46 @@ function nextImage() {
 </script>
 
 <template>
-  <div class="min-h-screen">
-    <main class="py-6 px-6">
+  <div class="min-h-screen pb-20">
+    <main class="py-4 px-4 md:py-6 md:px-6 max-w-[1800px] mx-auto">
       <div>
         <!-- 标题区 -->
-        <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div>
+        <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 overflow-hidden">
+          <div class="shrink-0">
             <h1 class="text-xl font-bold text-foreground flex items-center gap-2">
               <FolderOpen class="w-5 h-5 text-primary" />我的图库
             </h1>
-            <p class="text-sm text-muted-foreground mt-1">共 {{ total }} 张图片</p>
+            <p class="text-sm text-muted-foreground mt-1">管理与组织您的图片资产</p>
           </div>
-          <div class="flex items-center gap-2">
-            <!-- 标签显示开关 -->
-            <Button 
-              variant="outline" 
-              size="sm" 
-              @click="showLabelsAlways = !showLabelsAlways"
-              :class="{ 'bg-primary text-primary-foreground': showLabelsAlways }"
-            >
-              <Tag class="w-4 h-4 mr-1" />{{ showLabelsAlways ? '隐藏标签' : '显示标签' }}
-            </Button>
-            <!-- 排序选择 -->
+
+          <div class="flex items-center gap-2 overflow-x-auto no-scrollbar -mx-4 px-4 sm:mx-0 sm:px-0 sm:overflow-visible w-[calc(100%+2rem)] sm:w-auto pb-1 sm:pb-0">
+            <!-- 视图控制组 -->
+            <div class="flex items-center bg-muted/40 p-1 rounded-lg border border-border/40 shrink-0">
+              <Button
+                variant="ghost"
+                size="sm"
+                @click="showLabelsAlways = !showLabelsAlways"
+                class="h-7 px-3 text-xs rounded-md transition-all"
+                :class="showLabelsAlways ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'"
+              >
+                <Tag class="w-3.5 h-3.5 mr-1.5" />{{ showLabelsAlways ? '隐藏标签' : '显示标签' }}
+              </Button>
+              <div class="w-px h-3 bg-border/50 mx-1"></div>
+              <Button
+                variant="ghost"
+                size="sm"
+                @click="toggleSelectMode"
+                class="h-7 px-3 text-xs rounded-md transition-all"
+                :class="selectMode ? 'bg-background shadow-sm text-primary' : 'text-muted-foreground hover:text-foreground'"
+              >
+                <CheckSquare class="w-3.5 h-3.5 mr-1.5" />{{ selectMode ? '退出选择' : '批量选择' }}
+              </Button>
+            </div>
+
+            <!-- 排序 -->
             <Select :model-value="currentSort" @update:model-value="changeSort">
-              <SelectTrigger class="w-[140px]">
-                <ArrowUpDown class="w-4 h-4 mr-1" />
+              <SelectTrigger class="w-[130px] h-9 text-xs">
+                <ArrowUpDown class="w-3.5 h-3.5 mr-2 text-muted-foreground" />
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -303,169 +325,203 @@ function nextImage() {
                 <SelectItem value="analyzed_at-desc">最近分析</SelectItem>
               </SelectContent>
             </Select>
-            <Button variant="outline" size="sm" @click="showFilters = !showFilters">
-              <Filter class="w-4 h-4 mr-1" />筛选
-              <ChevronDown class="w-4 h-4 ml-1 transition-transform" :class="{ 'rotate-180': showFilters }" />
-            </Button>
-            <Button variant="outline" size="sm" @click="toggleSelectMode" :class="{ 'bg-primary text-primary-foreground': selectMode }">
-              <CheckSquare class="w-4 h-4 mr-1" />{{ selectMode ? '退出选择' : '批量选择' }}
+
+            <!-- 上传按钮 -->
+            <Button size="sm" class="h-9 gap-1.5" @click="showUploadDialog = true">
+              <Plus class="w-4 h-4" />
+              上传
             </Button>
           </div>
         </div>
 
-        <!-- 筛选栏 -->
-        <Transition name="slide">
-          <ImageFilterBar 
-            v-if="showFilters" 
-            v-model="filters" 
-            class="mb-6"
-            auto-search
-            show-pending-filter
-            show-duplicates-filter
-            @search="handleSearch" 
-            @reset="handleReset"
-          />
-        </Transition>
-
-        <!-- 批量操作栏 -->
-        <div v-if="selectMode && selectedIds.size > 0" class="mb-4 p-4 bg-gradient-to-r from-primary/10 to-primary/5 rounded-xl border border-primary/20">
-          <div class="flex flex-wrap items-center justify-between gap-4">
-            <div class="flex items-center gap-4">
-              <div class="flex items-center gap-2">
-                <div class="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
-                  <span class="text-primary font-bold text-sm">{{ selectedIds.size }}</span>
-                </div>
-                <span class="text-sm text-muted-foreground">张已选</span>
-              </div>
-              <div class="flex items-center gap-1 border-l border-border pl-4">
-                <Button variant="ghost" size="sm" @click="selectAll" :disabled="isAllSelected" class="h-7 px-2 text-xs">全选</Button>
-                <Button variant="ghost" size="sm" @click="invertSelection" class="h-7 px-2 text-xs">反选</Button>
-                <Button variant="ghost" size="sm" @click="clearSelection" class="h-7 px-2 text-xs">取消</Button>
-              </div>
-            </div>
-            <div class="flex items-center gap-2">
-              <div class="flex items-center gap-1 bg-background/80 rounded-lg p-1">
-                <Button size="sm" variant="ghost" @click="showBatchTagDialog = true" class="h-8 gap-1.5"><Tags class="w-4 h-4" /><span class="hidden sm:inline">标签</span></Button>
-                <Button size="sm" variant="ghost" @click="showBatchCategoryDialog = true" class="h-8 gap-1.5"><LayoutGrid class="w-4 h-4" /><span class="hidden sm:inline">分类</span></Button>
-                <Button size="sm" variant="ghost" @click="handleBatchAnalyze" :disabled="batchLoading" class="h-8 gap-1.5"><Sparkles class="w-4 h-4" /><span class="hidden sm:inline">分析</span></Button>
-              </div>
-              <Button size="sm" variant="destructive" @click="handleBatchDelete" :disabled="batchLoading" class="h-8 gap-1.5"><Trash2 class="w-4 h-4" /><span class="hidden sm:inline">删除</span></Button>
-            </div>
-          </div>
+        <!-- 筛选栏 (可折叠) -->
+        <div class="mb-6">
+           <Button
+             variant="ghost"
+             size="sm"
+             class="mb-2 px-0 hover:bg-transparent text-muted-foreground hover:text-foreground"
+             @click="showFilters = !showFilters"
+           >
+             <ChevronDown class="w-4 h-4 mr-1 transition-transform" :class="{ '-rotate-90': !showFilters }" />
+             {{ showFilters ? '收起筛选' : '展开筛选' }}
+           </Button>
+           <Transition name="slide">
+            <ImageFilterBar
+              v-show="showFilters"
+              v-model="filters"
+              class="mb-6"
+              auto-search
+              show-pending-filter
+              show-duplicates-filter
+              @search="handleSearch"
+              @reset="handleReset"
+            />
+          </Transition>
         </div>
 
         <!-- 状态显示 -->
-        <div v-if="isLoading && !images.length" class="flex items-center justify-center py-20">
+        <div v-if="isLoading && !images.length" class="flex items-center justify-center py-40">
           <Loader2 class="w-8 h-8 animate-spin text-muted-foreground" />
         </div>
-        <div v-else-if="isError" class="text-center py-20">
-          <p class="text-destructive mb-4">加载失败</p>
-          <Button @click="() => refetch()">重试</Button>
-        </div>
-        <div v-else-if="!images.length" class="text-center py-20">
-          <FolderOpen class="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-          <p class="text-muted-foreground">暂无上传的图片</p>
-          <Button variant="outline" class="mt-4" @click="showUploadDialog = true">上传图片</Button>
+
+        <div v-else-if="!images.length" class="flex flex-col items-center justify-center py-40 border-2 border-dashed border-border/50 rounded-xl bg-muted/10">
+          <div class="w-16 h-16 rounded-full bg-muted/30 flex items-center justify-center mb-4">
+            <FolderOpen class="w-8 h-8 text-muted-foreground" />
+          </div>
+          <h3 class="text-lg font-medium text-foreground">暂无图片</h3>
+          <p class="text-muted-foreground mt-1 mb-6">上传图片开始构建您的图库</p>
+          <Button @click="showUploadDialog = true">上传图片</Button>
         </div>
 
         <!-- 图片网格 -->
-        <ImageGrid 
-          v-else 
-          :images="images" 
-          :select-mode="selectMode" 
+        <ImageGrid
+          v-else
+          :images="images"
+          :select-mode="selectMode"
           :selected-ids="selectedIds"
           :show-pending-badge="true"
           :show-labels-always="showLabelsAlways"
           :editable="showLabelsAlways"
-          @select="openImage" 
+          @select="openImage"
           @toggle-select="toggleSelect"
           @tags-updated="handleTagsUpdated"
         />
 
-        <!-- 分页 (Apple 风格简洁设计) -->
-        <div v-if="total > 0" class="mt-8 flex items-center justify-center gap-3 max-w-7xl mx-auto">
-          <!-- 每页数量 -->
+        <!-- 分页 -->
+        <div v-if="total > 0" class="mt-12 flex items-center justify-center gap-4">
           <Select :model-value="String(pageSize)" @update:model-value="changePageSize">
-            <SelectTrigger class="w-20 h-8 text-xs border-0 bg-muted/50 hover:bg-muted">
+            <SelectTrigger class="w-24 h-8 text-xs border-0 bg-secondary/50 hover:bg-secondary">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="20">20 张</SelectItem>
-              <SelectItem value="40">40 张</SelectItem>
-              <SelectItem value="60">60 张</SelectItem>
-              <SelectItem value="100">100 张</SelectItem>
+              <SelectItem value="20">20 / 页</SelectItem>
+              <SelectItem value="40">40 / 页</SelectItem>
+              <SelectItem value="60">60 / 页</SelectItem>
+              <SelectItem value="100">100 / 页</SelectItem>
             </SelectContent>
           </Select>
 
-          <div class="flex items-center gap-1 bg-muted/50 rounded-lg p-1">
-            <!-- 上一页 -->
+          <div class="flex items-center bg-secondary/50 rounded-lg p-1">
             <button
-              class="w-8 h-8 flex items-center justify-center rounded-md transition-colors"
-              :class="currentPage <= 1 ? 'text-muted-foreground/30 cursor-not-allowed' : 'text-foreground hover:bg-background'"
+              class="w-8 h-8 flex items-center justify-center rounded-md transition-colors disabled:opacity-30 disabled:cursor-not-allowed hover:bg-background"
               :disabled="currentPage <= 1"
               @click="changePage(currentPage - 1)"
             >
               <ChevronLeft class="w-4 h-4" />
             </button>
 
-            <!-- 可编辑页码 -->
-            <div class="flex items-center gap-1 px-2">
-              <input
-                v-model="jumpPage"
-                type="text"
-                class="w-10 h-7 text-center text-sm bg-background border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
-                :placeholder="String(currentPage)"
-                @keyup.enter="handleJump"
-                @blur="handleJump"
-              />
-              <span class="text-muted-foreground text-sm">/</span>
-              <span class="text-muted-foreground text-sm">{{ totalPages }}</span>
+            <div class="flex items-center gap-1 px-3 text-sm font-medium font-mono">
+              <span class="text-foreground">{{ currentPage }}</span>
+              <span class="text-muted-foreground">/</span>
+              <span class="text-muted-foreground">{{ totalPages }}</span>
             </div>
 
-            <!-- 下一页 -->
             <button
-              class="w-8 h-8 flex items-center justify-center rounded-md transition-colors"
-              :class="currentPage >= totalPages ? 'text-muted-foreground/30 cursor-not-allowed' : 'text-foreground hover:bg-background'"
+              class="w-8 h-8 flex items-center justify-center rounded-md transition-colors disabled:opacity-30 disabled:cursor-not-allowed hover:bg-background"
               :disabled="currentPage >= totalPages"
               @click="changePage(currentPage + 1)"
             >
               <ChevronRight class="w-4 h-4" />
             </button>
           </div>
-
-          <!-- 总数提示 -->
-          <span class="text-xs text-muted-foreground">共 {{ total }} 张</span>
         </div>
       </div>
     </main>
 
+    <!-- 底部悬浮批量操作栏 -->
+    <Transition name="slide-up">
+      <div v-if="selectMode && selectedIds.size > 0" class="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 max-w-[calc(100vw-32px)] w-max">
+        <div class="flex items-center gap-1 p-1.5 bg-zinc-900/90 backdrop-blur-xl border border-white/10 rounded-full shadow-2xl text-white pl-2 pr-1.5 overflow-x-auto no-scrollbar whitespace-nowrap">
+          <!-- 计数器 (仅展示) -->
+          <div class="shrink-0 flex items-center justify-center w-8 h-8 rounded-full bg-white text-zinc-950 font-bold text-xs mr-2 shadow-sm">
+            {{ selectedIds.size }}
+          </div>
 
-    <ImageDetailModal 
-      v-if="selectedImage" 
-      :image="selectedImage" 
-      :can-navigate-prev="selectedIndex > 0" 
-      :can-navigate-next="selectedIndex < images.length - 1" 
+          <!-- 操作按钮组 -->
+          <button
+            @click="selectAll"
+            class="shrink-0 px-3 py-1.5 rounded-full hover:bg-white/10 text-xs font-medium transition-colors"
+          >
+            全选
+          </button>
+
+          <button
+            @click="invertSelection"
+            class="shrink-0 px-3 py-1.5 rounded-full hover:bg-white/10 text-xs font-medium transition-colors"
+          >
+            反选
+          </button>
+
+          <button
+            @click="clearSelection"
+            class="shrink-0 px-3 py-1.5 rounded-full hover:bg-white/10 text-xs font-medium transition-colors"
+          >
+            清空
+          </button>
+
+          <div class="shrink-0 h-4 w-px bg-white/10 mx-1"></div>
+
+          <button
+            @click="showBatchTagDialog = true"
+            class="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full hover:bg-white/10 text-xs font-medium transition-colors"
+          >
+            <Tags class="w-3.5 h-3.5" />
+            标签
+          </button>
+
+          <button
+            @click="showBatchCategoryDialog = true"
+            class="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full hover:bg-white/10 text-xs font-medium transition-colors"
+          >
+            <LayoutGrid class="w-3.5 h-3.5" />
+            分类
+          </button>
+
+          <button
+            @click="handleBatchAnalyze"
+            class="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full hover:bg-white/10 text-xs font-medium transition-colors text-blue-400 hover:text-blue-300"
+          >
+            <Sparkles class="w-3.5 h-3.5" />
+            分析
+          </button>
+
+          <button
+            @click="handleBatchDelete"
+            class="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full hover:bg-red-500/20 text-xs font-medium transition-colors text-red-400 hover:text-red-300 ml-1"
+          >
+            <Trash2 class="w-3.5 h-3.5" />
+            删除
+          </button>
+        </div>
+      </div>
+    </Transition>
+
+    <ImageDetailModal
+      v-if="selectedImage"
+      :image="selectedImage"
+      :can-navigate-prev="selectedIndex > 0"
+      :can-navigate-next="selectedIndex < images.length - 1"
       :current-index="selectedIndex"
       :total-count="images.length"
-      @close="closeImage" 
-      @prev="prevImage" 
-      @next="nextImage" 
+      @close="closeImage"
+      @prev="prevImage"
+      @next="nextImage"
     />
 
     <!-- 批量打标签弹窗 -->
     <Dialog v-model:open="showBatchTagDialog">
       <DialogContent>
-        <DialogHeader><DialogTitle>批量打标签</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>批量编辑标签</DialogTitle></DialogHeader>
         <div class="space-y-4 py-4">
-          <div><label class="text-sm font-medium mb-2 block">标签（逗号分隔）</label><Input v-model="batchTags" placeholder="标签1, 标签2, 标签3" /></div>
+          <div><label class="text-sm font-medium mb-2 block">标签 (逗号分隔)</label><Input v-model="batchTags" placeholder="Landscape, HD, ..." /></div>
           <div class="flex gap-4">
-            <label class="flex items-center gap-2 cursor-pointer"><input type="radio" v-model="batchTagMode" value="add" class="accent-primary" /><span class="text-sm">追加标签</span></label>
-            <label class="flex items-center gap-2 cursor-pointer"><input type="radio" v-model="batchTagMode" value="replace" class="accent-primary" /><span class="text-sm">替换标签</span></label>
+            <label class="flex items-center gap-2 cursor-pointer"><input type="radio" v-model="batchTagMode" value="add" class="accent-primary" /><span class="text-sm">追加</span></label>
+            <label class="flex items-center gap-2 cursor-pointer"><input type="radio" v-model="batchTagMode" value="replace" class="accent-primary" /><span class="text-sm">覆盖</span></label>
           </div>
         </div>
         <DialogFooter>
           <Button variant="outline" @click="showBatchTagDialog = false">取消</Button>
-          <Button @click="handleBatchTag" :disabled="batchLoading">确定</Button>
+          <Button @click="handleBatchTag" :disabled="batchLoading">确认</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -485,7 +541,7 @@ function nextImage() {
         </div>
         <DialogFooter>
           <Button variant="outline" @click="showBatchCategoryDialog = false">取消</Button>
-          <Button @click="handleBatchCategory" :disabled="batchLoading">确定</Button>
+          <Button @click="handleBatchCategory" :disabled="batchLoading">确认</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -512,6 +568,13 @@ function nextImage() {
 </template>
 
 <style scoped>
-.slide-enter-active, .slide-leave-active { transition: all 0.2s ease; }
-.slide-enter-from, .slide-leave-to { opacity: 0; transform: translateY(-10px); }
+.slide-enter-active, .slide-leave-active { transition: all 0.3s ease; max-height: 100px; opacity: 1; }
+.slide-enter-from, .slide-leave-to { max-height: 0; opacity: 0; overflow: hidden; }
+
+.slide-up-enter-active, .slide-up-leave-active { transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+.slide-up-enter-from, .slide-up-leave-to { transform: translate(-50%, 100%); opacity: 0; }
+
+/* 隐藏滚动条但保留功能 */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 </style>

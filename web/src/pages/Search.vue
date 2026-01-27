@@ -10,9 +10,10 @@ import ImageDetailModal from '@/components/ImageDetailModal.vue'
 import { useImages, useTags, useSimilarSearch, useCategories, useResolutions } from '@/api/queries'
 import { useUserStore } from '@/stores'
 import type { ImageResponse, ImageWithSimilarity, SimilarSearchRequest, ImageSearchRequest, Tag } from '@/types'
-import { 
-  Search as SearchIcon, X, Image as ImageIcon, Loader2, Sparkles, 
-  ChevronDown, Tag as TagIcon, Check, FolderOpen, Filter, SlidersHorizontal 
+import {
+  Search as SearchIcon, X, Image as ImageIcon, Loader2, Sparkles,
+  ChevronDown, Tag as TagIcon, Check, FolderOpen, Filter, SlidersHorizontal,
+  Command, ArrowRight
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 
@@ -23,25 +24,26 @@ const isLoggedIn = computed(() => userStore.isLoggedIn)
 
 // Tab 切换
 type SearchMode = 'gallery' | 'smart'
-const activeMode = ref<SearchMode>('gallery')
+const activeMode = ref<SearchMode>('gallery') // 默认改为图库浏览
 
 // 监听 URL query 参数
 watch(() => route.query.mode, (mode) => {
-  activeMode.value = mode === 'smart' ? 'smart' : 'gallery'
+  if (mode === 'gallery' || mode === 'smart') {
+    activeMode.value = mode
+  }
 }, { immediate: true })
 
 // 切换模式时更新 URL
 function switchMode(mode: SearchMode) {
   activeMode.value = mode
-  router.replace({ query: { mode } })
+  router.replace({ query: { ...route.query, mode } })
 }
 
 // ==================== 图库浏览模式 ====================
 const galleryFilters = ref({ category: 'all', resolution: 'all', keyword: '' })
-const showGalleryFilters = ref(false)
-const galleryPageSize = ref(20)
+const galleryPageSize = ref(40) // 默认更多
 const galleryCurrentPage = ref(1)
-const gallerySearchParams = ref<ImageSearchRequest>({ size: 20, page: 1, sort_by: 'id', sort_desc: true })
+const gallerySearchParams = ref<ImageSearchRequest>({ size: 40, page: 1, sort_by: 'id', sort_desc: true })
 
 const { data: galleryData, isLoading: galleryLoading, isError: galleryError, refetch: galleryRefetch } = useImages(gallerySearchParams)
 const galleryImages = computed(() => galleryData.value?.data || [])
@@ -68,11 +70,11 @@ function handleGalleryReset() {
 function galleryGoToPage(page: number) {
   galleryCurrentPage.value = page
   gallerySearchParams.value = { ...gallerySearchParams.value, page: page }
+  window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-function galleryChangePageSize(size: unknown) {
-  if (!size) return
-  const newSize = typeof size === 'string' ? parseInt(size) : Number(size)
+function galleryChangePageSize(size: string) {
+  const newSize = parseInt(size)
   if (isNaN(newSize)) return
   galleryPageSize.value = newSize
   galleryCurrentPage.value = 1
@@ -86,9 +88,9 @@ const selectedCategoryId = ref<number | null>(null)
 const selectedResolutionId = ref<number | null>(null)
 const tagSearchKeyword = ref('')
 const showTagDropdown = ref(false)
-const similarityThreshold = ref([0.15])  // 相似度阈值，范围 0.05 - 0.50
+const showSimilarityPopover = ref(false)
+const similarityThreshold = ref([0.15])
 
-// 未登录用户限流
 const RATE_LIMIT_KEY = 'imgtag_smart_search_last_time'
 const RATE_LIMIT_SECONDS = 30
 
@@ -116,10 +118,10 @@ const smartResults = computed<ImageWithSimilarity[]>(() => smartData.value?.data
 const smartTotal = computed(() => smartData.value?.total || 0)
 const hasVectorSearch = computed(() => !!smartSearchParams.value?.text)
 
-const hasAnySmartFilter = computed(() => 
-  smartQuery.value || 
-  selectedTagIds.value.size > 0 || 
-  selectedCategoryId.value !== null || 
+const hasAnySmartFilter = computed(() =>
+  smartQuery.value ||
+  selectedTagIds.value.size > 0 ||
+  selectedCategoryId.value !== null ||
   selectedResolutionId.value !== null
 )
 
@@ -137,21 +139,19 @@ function removeTag(tagId: number) {
 
 function handleSmartSearch() {
   if (!hasAnySmartFilter.value) return
-  
-  // 未登录用户限流检查
+
   if (!isLoggedIn.value) {
     const lastTime = localStorage.getItem(RATE_LIMIT_KEY)
     if (lastTime) {
       const elapsed = (Date.now() - parseInt(lastTime)) / 1000
       if (elapsed < RATE_LIMIT_SECONDS) {
-        const remaining = Math.ceil(RATE_LIMIT_SECONDS - elapsed)
-        toast.warning(`请等待 ${remaining} 秒后再次搜索`)
+        toast.warning(`请等待 ${Math.ceil(RATE_LIMIT_SECONDS - elapsed)} 秒后再次搜索`)
         return
       }
     }
     localStorage.setItem(RATE_LIMIT_KEY, String(Date.now()))
   }
-  
+
   const tagNames = selectedTags.value.map(t => t.name)
   smartSearchParams.value = {
     text: smartQuery.value || '',
@@ -172,7 +172,6 @@ function clearSmartSearch() {
   selectedCategoryId.value = null
   selectedResolutionId.value = null
   tagSearchKeyword.value = ''
-  similarityThreshold.value = [0.15]
   smartSearchParams.value = null
 }
 
@@ -195,7 +194,7 @@ function closeImage() { selectedImage.value = null }
 function prevImage() {
   if (selectedIndex.value > 0) {
     selectedIndex.value--
-    selectedImage.value = activeMode.value === 'gallery' 
+    selectedImage.value = activeMode.value === 'gallery'
       ? galleryImages.value[selectedIndex.value]
       : smartResults.value[selectedIndex.value]
   }
@@ -209,20 +208,19 @@ function nextImage() {
   }
 }
 
-// 点击外部关闭下拉
+// 下拉关闭逻辑
 function handleClickOutside(e: MouseEvent) {
   const target = e.target as HTMLElement
   if (!target.closest('.tag-dropdown-container')) {
     showTagDropdown.value = false
   }
-}
-
-watch(showTagDropdown, (show) => {
-  if (show) {
-    document.addEventListener('click', handleClickOutside)
-  } else {
-    document.removeEventListener('click', handleClickOutside)
+  if (!target.closest('.similarity-popover-container')) {
+    showSimilarityPopover.value = false
   }
+}
+watch([showTagDropdown, showSimilarityPopover], ([showTag, showSim]) => {
+  if (showTag || showSim) document.addEventListener('click', handleClickOutside)
+  else document.removeEventListener('click', handleClickOutside)
 })
 
 const currentImageList = computed(() => activeMode.value === 'gallery' ? galleryImages.value : smartResults.value)
@@ -230,296 +228,240 @@ const currentImageList = computed(() => activeMode.value === 'gallery' ? gallery
 
 <template>
   <div class="min-h-screen">
-    <!-- 未登录时显示公共头部 -->
     <PublicHeader v-if="!isLoggedIn" />
 
-    <main :class="isLoggedIn ? 'py-6 px-6' : 'pt-20 pb-12 px-4 sm:px-6 lg:px-8'">
-      <div :class="isLoggedIn ? '' : 'max-w-7xl mx-auto'">
-        <!-- 标题和模式切换 -->
-        <div class="mb-6">
-          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div>
-              <h1 class="text-xl font-bold text-foreground flex items-center gap-2">
-                <SearchIcon class="w-5 h-5 text-primary" />
-                图片探索
-              </h1>
-              <p class="text-sm text-muted-foreground mt-1">浏览图库或使用 AI 智能搜索</p>
-            </div>
-            
-            <!-- 模式切换 Tab -->
-            <div class="flex items-center bg-muted/50 rounded-full p-1">
-              <button
-                @click="switchMode('gallery')"
-                class="flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-full transition-all"
-                :class="activeMode === 'gallery' 
-                  ? 'bg-background text-foreground shadow-sm' 
-                  : 'text-muted-foreground hover:text-foreground'"
-              >
-                <FolderOpen class="w-4 h-4" />
-                图库浏览
-              </button>
-              <button
-                @click="switchMode('smart')"
-                class="flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-full transition-all"
-                :class="activeMode === 'smart' 
-                  ? 'bg-gradient-to-r from-violet-500 to-purple-600 text-white shadow-sm' 
-                  : 'text-muted-foreground hover:text-foreground'"
-              >
-                <Sparkles class="w-4 h-4" />
-                智能搜索
-              </button>
-            </div>
-          </div>
+    <main class="py-6 px-6 max-w-[1800px] mx-auto" :class="isLoggedIn ? '' : 'max-w-7xl pt-24'">
+
+      <!-- 顶部模式切换与标题 -->
+      <div class="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 class="text-xl font-bold text-foreground flex items-center gap-2">
+            <SearchIcon class="w-5 h-5 text-primary" />探索
+          </h1>
+          <p class="text-sm text-muted-foreground mt-1">发现与检索图片灵感</p>
         </div>
 
-        <!-- ==================== 图库浏览模式 ==================== -->
-        <template v-if="activeMode === 'gallery'">
-          <!-- 筛选按钮 -->
-          <div class="flex items-center justify-between mb-4">
-            <p class="text-sm text-muted-foreground">共 {{ galleryTotal }} 张图片</p>
-            <Button variant="outline" size="sm" @click="showGalleryFilters = !showGalleryFilters">
-              <Filter class="w-4 h-4 mr-1" />筛选
-              <ChevronDown class="w-4 h-4 ml-1 transition-transform" :class="{ 'rotate-180': showGalleryFilters }" />
-            </Button>
-          </div>
+        <div class="inline-flex items-center p-1 rounded-lg bg-muted/40 border border-border/40">
+          <button
+            @click="switchMode('gallery')"
+            class="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium transition-all duration-300"
+            :class="activeMode === 'gallery'
+              ? 'bg-background text-foreground shadow-sm'
+              : 'text-muted-foreground hover:text-foreground'"
+          >
+            <FolderOpen class="w-3.5 h-3.5" />
+            图库浏览
+          </button>
+          <button
+            @click="switchMode('smart')"
+            class="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium transition-all duration-300"
+            :class="activeMode === 'smart'
+              ? 'bg-background text-foreground shadow-sm'
+              : 'text-muted-foreground hover:text-foreground'"
+          >
+            <Sparkles class="w-3.5 h-3.5" />
+            智能搜索
+          </button>
+        </div>
+      </div>
 
-          <!-- 筛选栏 -->
-          <Transition name="slide">
-            <ImageFilterBar 
-              v-if="showGalleryFilters" 
-              v-model="galleryFilters" 
-              class="mb-6"
-              auto-search
-              @search="handleGallerySearch" 
-              @reset="handleGalleryReset" 
-            />
-          </Transition>
-
-          <!-- 加载状态 -->
-          <div v-if="galleryLoading && !galleryImages.length" class="flex items-center justify-center py-20">
-            <Loader2 class="w-8 h-8 animate-spin text-muted-foreground" />
-          </div>
-          <div v-else-if="galleryError" class="text-center py-20">
-            <p class="text-destructive mb-4">加载失败</p>
-            <Button @click="() => galleryRefetch()">重试</Button>
-          </div>
-          <div v-else-if="!galleryImages.length" class="text-center py-20">
-            <ImageIcon class="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-            <p class="text-muted-foreground">暂无图片</p>
-          </div>
-
-          <!-- 图片网格 -->
-          <ImageGrid v-else :images="galleryImages" @select="openGalleryImage" />
-
-          <!-- 分页 -->
-          <div v-if="galleryTotal > 0" class="mt-8 flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div class="text-sm text-muted-foreground">第 {{ galleryCurrentPage }} / {{ galleryTotalPages }} 页</div>
-            <div class="flex items-center gap-2">
-              <Select :model-value="String(galleryPageSize)" @update:model-value="galleryChangePageSize">
-                <SelectTrigger class="w-24"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="20">20 张</SelectItem>
-                  <SelectItem value="40">40 张</SelectItem>
-                  <SelectItem value="60">60 张</SelectItem>
-                  <SelectItem value="100">100 张</SelectItem>
-                </SelectContent>
-              </Select>
-              <Button variant="outline" size="sm" @click="galleryGoToPage(galleryCurrentPage - 1)" :disabled="galleryCurrentPage <= 1">上一页</Button>
-              <Button variant="outline" size="sm" @click="galleryGoToPage(galleryCurrentPage + 1)" :disabled="galleryCurrentPage >= galleryTotalPages">下一页</Button>
-            </div>
-          </div>
-        </template>
-
-        <!-- ==================== 智能搜索模式 ==================== -->
-        <template v-else>
-          <!-- 搜索卡片 -->
-          <div class="bg-card/50 border border-border/50 rounded-2xl p-5 mb-6">
-            <!-- 主搜索框 -->
-            <div class="relative mb-4">
-              <SearchIcon class="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
+      <!-- ==================== 智能搜索视图 ==================== -->
+      <Transition name="fade" mode="out-in">
+        <div v-if="activeMode === 'smart'" class="max-w-5xl mx-auto w-full space-y-8">
+          <!-- 搜索区域 -->
+          <div class="relative w-full max-w-2xl mx-auto group">
+            <div class="absolute inset-0 bg-gradient-to-r from-violet-500/20 to-purple-500/20 rounded-2xl blur-xl opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none"></div>
+            <div class="relative bg-background border border-border/50 rounded-2xl shadow-lg shadow-primary/5 transition-all duration-300 focus-within:shadow-xl focus-within:shadow-primary/10 focus-within:border-primary/30">
+              <SearchIcon class="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground group-focus-within:text-primary transition-colors" />
               <input
                 v-model="smartQuery"
                 type="text"
-                placeholder="输入描述文字，如：蓝天白云、城市夜景..."
-                class="w-full pl-12 pr-12 py-3 bg-muted/50 border border-border/50 rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                placeholder="描述画面，例如：夕阳下的海边城市..."
+                class="w-full pl-14 pr-16 py-4 text-base bg-transparent border-none focus:outline-none focus:ring-0 placeholder:text-muted-foreground/70"
                 @keyup.enter="handleSmartSearch"
               />
-              <button
-                v-if="smartQuery"
-                @click="smartQuery = ''"
-                class="absolute right-4 top-1/2 -translate-y-1/2 p-1 hover:bg-accent rounded-lg"
-              >
-                <X class="w-4 h-4 text-muted-foreground" />
-              </button>
+              <div class="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2 pointer-events-none">
+                 <span class="text-xs text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded border border-border/50">↵</span>
+              </div>
             </div>
+          </div>
 
-            <!-- 筛选：分类 + 分辨率 + 标签 -->
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
-              <div>
-                <label class="block text-xs text-muted-foreground mb-1.5">主分类</label>
-                <select
-                  v-model="selectedCategoryId"
-                  class="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-                >
-                  <option :value="null">全部</option>
-                  <option v-for="cat in categoryTags" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
-                </select>
-              </div>
-              <div>
-                <label class="block text-xs text-muted-foreground mb-1.5">分辨率</label>
-                <select
-                  v-model="selectedResolutionId"
-                  class="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-                >
-                  <option :value="null">全部</option>
-                  <option v-for="res in resolutionTags" :key="res.id" :value="res.id">{{ res.name }}</option>
-                </select>
-              </div>
-              <div class="tag-dropdown-container">
-                <label class="block text-xs text-muted-foreground mb-1.5">标签</label>
+          <!-- 筛选控制栏 (Smart Mode) -->
+          <div class="flex flex-wrap items-center justify-center gap-3">
+             <!-- 分类 -->
+             <Select :model-value="selectedCategoryId ? String(selectedCategoryId) : 'all'" @update:model-value="v => selectedCategoryId = v === 'all' ? null : Number(v)">
+               <SelectTrigger class="w-[140px] h-9 bg-muted/30 border-border/50 hover:bg-muted/50 rounded-full text-xs">
+                 <SelectValue placeholder="全部分类" />
+               </SelectTrigger>
+               <SelectContent>
+                 <SelectItem value="all">全部分类</SelectItem>
+                 <SelectItem v-for="cat in categoryTags" :key="cat.id" :value="String(cat.id)">{{ cat.name }}</SelectItem>
+               </SelectContent>
+             </Select>
+
+             <!-- 分辨率 -->
+             <Select :model-value="selectedResolutionId ? String(selectedResolutionId) : 'all'" @update:model-value="v => selectedResolutionId = v === 'all' ? null : Number(v)">
+               <SelectTrigger class="w-[140px] h-9 bg-muted/30 border-border/50 hover:bg-muted/50 rounded-full text-xs">
+                 <SelectValue placeholder="全部分辨率" />
+               </SelectTrigger>
+               <SelectContent>
+                 <SelectItem value="all">全部分辨率</SelectItem>
+                 <SelectItem v-for="res in resolutionTags" :key="res.id" :value="String(res.id)">{{ res.name }}</SelectItem>
+               </SelectContent>
+             </Select>
+
+             <!-- 相似度 (Slider Popover) -->
+             <div class="relative similarity-popover-container">
+               <button
+                 @click="showSimilarityPopover = !showSimilarityPopover"
+                 class="h-9 px-4 flex items-center gap-2 bg-muted/30 border border-border/50 hover:bg-muted/50 rounded-full text-xs text-muted-foreground hover:text-foreground transition-colors"
+                 :class="similarityThreshold[0] !== 0.15 && 'text-primary bg-primary/5 border-primary/20'"
+               >
+                 <SlidersHorizontal class="w-3.5 h-3.5" />
+                 <span>相似度 {{ Math.round(similarityThreshold[0] * 100) }}%</span>
+               </button>
+
+               <div v-if="showSimilarityPopover" class="absolute z-50 top-full mt-2 w-64 bg-popover border border-border rounded-xl shadow-xl p-4">
+                 <div class="flex items-center justify-between mb-4">
+                   <span class="text-xs font-medium text-foreground">匹配阈值</span>
+                   <span class="text-xs font-mono text-muted-foreground">{{ Math.round(similarityThreshold[0] * 100) }}%</span>
+                 </div>
+                 <div class="relative flex items-center h-4">
+                   <input
+                     type="range"
+                     min="0.1"
+                     max="0.9"
+                     step="0.05"
+                     v-model.number="similarityThreshold[0]"
+                     class="w-full h-1.5 bg-secondary rounded-full appearance-none cursor-pointer accent-primary hover:accent-primary/80 transition-all"
+                   />
+                 </div>
+                 <div class="flex justify-between text-[10px] text-muted-foreground mt-2 px-0.5">
+                   <span>广泛</span>
+                   <span>平衡</span>
+                   <span>严格</span>
+                 </div>
+               </div>
+             </div>
+
+             <!-- 标签选择器 -->
+             <div class="relative tag-dropdown-container">
                 <button
-                  @click.stop="showTagDropdown = !showTagDropdown"
-                  class="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-left text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 flex items-center justify-between"
+                  @click="showTagDropdown = !showTagDropdown"
+                  class="h-9 px-4 flex items-center gap-2 bg-muted/30 border border-border/50 hover:bg-muted/50 rounded-full text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  :class="selectedTagIds.size > 0 && 'text-primary bg-primary/5 border-primary/20'"
                 >
-                  <span :class="selectedTagIds.size === 0 ? 'text-muted-foreground' : 'text-foreground'">
-                    {{ selectedTagIds.size === 0 ? '选择标签...' : `已选 ${selectedTagIds.size} 个` }}
-                  </span>
-                  <ChevronDown class="w-4 h-4 text-muted-foreground" :class="{ 'rotate-180': showTagDropdown }" />
+                  <TagIcon class="w-3.5 h-3.5" />
+                  {{ selectedTagIds.size === 0 ? '选择标签' : `已选 ${selectedTagIds.size}` }}
                 </button>
-                
-                <!-- 标签下拉 -->
-                <div
-                  v-if="showTagDropdown"
-                  class="absolute z-50 mt-1 w-72 bg-popover border border-border rounded-xl shadow-xl max-h-64 overflow-hidden"
-                >
-                  <div class="p-2 border-b border-border">
-                    <div class="relative">
-                      <SearchIcon class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-                      <input
-                        v-model="tagSearchKeyword"
-                        type="text"
-                        placeholder="搜索标签..."
-                        class="w-full pl-8 pr-3 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-xs focus:outline-none"
-                        @click.stop
-                      />
+                <!-- 下拉省略，保持原逻辑但优化样式 -->
+                <div v-if="showTagDropdown" class="absolute z-50 top-full mt-2 w-64 bg-popover border border-border rounded-xl shadow-xl p-2 max-h-64 overflow-hidden flex flex-col">
+                   <input
+                      v-model="tagSearchKeyword"
+                      placeholder="搜索..."
+                      class="w-full px-2 py-1.5 bg-muted/50 rounded-lg text-xs mb-2 focus:outline-none"
+                    />
+                    <div class="overflow-y-auto flex-1 space-y-0.5">
+                       <button
+                         v-for="tag in availableTags"
+                         :key="tag.id"
+                         @click="toggleTagSelection(tag)"
+                         class="w-full flex items-center justify-between px-2 py-1.5 rounded-md hover:bg-accent text-xs text-left"
+                       >
+                         <span>{{ tag.name }}</span>
+                         <Check v-if="selectedTagIds.has(tag.id)" class="w-3 h-3 text-primary" />
+                       </button>
                     </div>
-                  </div>
-                  <div class="overflow-y-auto max-h-48 p-1.5">
-                    <button
-                      v-for="tag in availableTags"
-                      :key="tag.id"
-                      @click.stop="toggleTagSelection(tag)"
-                      class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-accent text-left text-sm"
-                    >
-                      <div class="w-4 h-4 rounded border flex items-center justify-center"
-                        :class="selectedTagIds.has(tag.id) ? 'bg-primary border-primary' : 'border-border'"
-                      >
-                        <Check v-if="selectedTagIds.has(tag.id)" class="w-3 h-3 text-primary-foreground" />
-                      </div>
-                      <span class="flex-1 truncate">{{ tag.name }}</span>
-                    </button>
-                  </div>
                 </div>
-              </div>
-            </div>
+             </div>
 
-            <!-- 已选标签 -->
-            <div v-if="selectedTags.length > 0" class="flex flex-wrap gap-1.5 mb-4">
-              <div
-                v-for="tag in selectedTags"
-                :key="tag.id"
-                class="inline-flex items-center gap-1 px-2 py-1 bg-primary/10 text-primary rounded-full text-xs"
-              >
-                <TagIcon class="w-3 h-3" />
-                {{ tag.name }}
-                <button @click="removeTag(tag.id)" class="hover:bg-primary/20 rounded-full">
-                  <X class="w-3 h-3" />
-                </button>
-              </div>
-            </div>
-
-            <!-- 相似度阈值滑块 -->
-            <div class="mb-4">
-              <div class="flex items-center justify-between mb-2">
-                <div class="flex items-center gap-1.5">
-                  <SlidersHorizontal class="w-3.5 h-3.5 text-muted-foreground" />
-                  <span class="text-xs text-muted-foreground">匹配程度</span>
-                </div>
-                <span class="text-xs font-medium" :class="similarityThreshold[0] <= 0.15 ? 'text-green-500' : similarityThreshold[0] >= 0.35 ? 'text-amber-500' : 'text-blue-500'">
-                  {{ similarityThreshold[0] <= 0.15 ? '宽松' : similarityThreshold[0] >= 0.35 ? '精确' : '标准' }}
-                  ({{ Math.round(similarityThreshold[0] * 100) }}%)
-                </span>
-              </div>
-              <input
-                type="range"
-                v-model.number="similarityThreshold[0]"
-                min="0.05"
-                max="0.50"
-                step="0.05"
-                class="w-full h-2 bg-muted rounded-full appearance-none cursor-pointer
-                  [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 
-                  [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-primary [&::-webkit-slider-thumb]:cursor-pointer
-                  [&::-webkit-slider-thumb]:shadow-md [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-background
-                  [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:rounded-full 
-                  [&::-moz-range-thumb]:bg-primary [&::-moz-range-thumb]:cursor-pointer [&::-moz-range-thumb]:border-0"
-              />
-              <div class="flex justify-between text-[10px] text-muted-foreground mt-1">
-                <span>更多结果</span>
-                <span>更精确</span>
-              </div>
-            </div>
-
-            <!-- 搜索按钮 -->
-            <div class="flex gap-2">
-              <Button 
+             <Button
                 size="sm"
-                class="gap-1.5 bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700"
-                :disabled="smartLoading || smartFetching || !hasAnySmartFilter"
+                class="rounded-full h-9 px-6 bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg shadow-primary/20"
                 @click="handleSmartSearch"
+                :disabled="smartLoading"
               >
-                <Loader2 v-if="smartLoading || smartFetching" class="w-4 h-4 animate-spin" />
-                <Sparkles v-else class="w-4 h-4" />
-                智能搜索
-              </Button>
-              <Button 
-                v-if="smartSearchParams || hasAnySmartFilter"
-                variant="outline" 
-                size="sm"
-                @click="clearSmartSearch"
-              >
-                清除
-              </Button>
-            </div>
+                <Loader2 v-if="smartLoading" class="w-4 h-4 mr-2 animate-spin" />
+                <Sparkles v-else class="w-4 h-4 mr-2" />
+                开始搜索
+             </Button>
           </div>
 
-          <!-- 搜索结果 -->
-          <div v-if="smartResults.length > 0">
-            <p class="text-sm text-muted-foreground mb-4">找到 {{ smartTotal }} 张相关图片</p>
-            <ImageGrid 
-              :images="smartResults"
-              :show-similarity="hasVectorSearch"
-              @select="openSmartImage"
-            />
+          <!-- 搜索结果展示 -->
+          <div v-if="smartResults.length > 0" class="space-y-4">
+             <div class="flex items-center justify-between px-2">
+               <h3 class="text-lg font-semibold flex items-center gap-2">
+                 搜索结果
+                 <span class="text-xs font-normal text-muted-foreground bg-muted px-2 py-0.5 rounded-full">{{ smartTotal }}</span>
+               </h3>
+               <Button variant="ghost" size="sm" class="text-muted-foreground" @click="clearSmartSearch">清除结果</Button>
+             </div>
+             <ImageGrid :images="smartResults" :show-similarity="hasVectorSearch" @select="openSmartImage" />
           </div>
 
-          <!-- 空状态 -->
-          <div v-else-if="smartSearchParams && !smartLoading" class="text-center py-16">
-            <ImageIcon class="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-            <p class="text-muted-foreground">未找到匹配的图片</p>
+          <!-- 初始/空状态 -->
+          <div v-else-if="!smartLoading" class="flex flex-col items-center justify-center py-20 text-center space-y-4 opacity-50">
+             <div class="w-16 h-16 rounded-3xl bg-muted/30 flex items-center justify-center">
+               <Command class="w-8 h-8 text-muted-foreground" />
+             </div>
+             <p class="text-muted-foreground">输入描述，开始 AI 探索之旅</p>
           </div>
+        </div>
 
-          <!-- 初始提示 -->
-          <div v-else-if="!smartLoading" class="text-center py-16">
-            <div class="w-16 h-16 bg-gradient-to-br from-violet-500/10 to-purple-600/10 rounded-2xl flex items-center justify-center mx-auto mb-4">
-              <Sparkles class="w-8 h-8 text-violet-500" />
-            </div>
-            <p class="text-muted-foreground">输入描述或选择筛选条件，AI 将匹配最相关的图片</p>
-          </div>
-        </template>
-      </div>
+        <!-- ==================== 图库浏览视图 ==================== -->
+        <div v-else class="space-y-6">
+           <!-- 筛选栏 (自动展开) -->
+           <ImageFilterBar
+             v-model="galleryFilters"
+             auto-search
+             @search="handleGallerySearch"
+             @reset="handleGalleryReset"
+           />
+
+           <div v-if="galleryLoading && !galleryImages.length" class="flex justify-center py-20">
+              <Loader2 class="w-8 h-8 animate-spin text-muted-foreground" />
+           </div>
+
+           <ImageGrid v-else :images="galleryImages" @select="openGalleryImage" />
+
+           <!-- 分页 -->
+           <div v-if="galleryTotal > 0" class="flex flex-col sm:flex-row items-center justify-between gap-4 py-4 border-t border-border/40">
+             <div class="text-sm text-muted-foreground">
+               显示 {{ (galleryCurrentPage - 1) * galleryPageSize + 1 }} - {{ Math.min(galleryCurrentPage * galleryPageSize, galleryTotal) }} 共 {{ galleryTotal }}
+             </div>
+             <div class="flex items-center gap-2">
+               <Select :model-value="String(galleryPageSize)" @update:model-value="galleryChangePageSize">
+                  <SelectTrigger class="w-[100px] h-8 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="20">20 / 页</SelectItem>
+                    <SelectItem value="40">40 / 页</SelectItem>
+                    <SelectItem value="60">60 / 页</SelectItem>
+                    <SelectItem value="100">100 / 页</SelectItem>
+                  </SelectContent>
+               </Select>
+               <div class="flex items-center rounded-md border border-border/50 overflow-hidden">
+                 <button
+                   class="px-3 py-1.5 hover:bg-muted disabled:opacity-50 border-r border-border/50 transition-colors"
+                   :disabled="galleryCurrentPage <= 1"
+                   @click="galleryGoToPage(galleryCurrentPage - 1)"
+                 >
+                   上一页
+                 </button>
+                 <button
+                   class="px-3 py-1.5 hover:bg-muted disabled:opacity-50 transition-colors"
+                   :disabled="galleryCurrentPage >= galleryTotalPages"
+                   @click="galleryGoToPage(galleryCurrentPage + 1)"
+                 >
+                   下一页
+                 </button>
+               </div>
+             </div>
+           </div>
+        </div>
+      </Transition>
+
     </main>
 
-    <!-- 图片详情弹窗 -->
     <ImageDetailModal
       :image="selectedImage"
       :can-navigate-prev="selectedIndex > 0"
@@ -534,6 +476,18 @@ const currentImageList = computed(() => activeMode.value === 'gallery' ? gallery
 </template>
 
 <style scoped>
-.slide-enter-active, .slide-leave-active { transition: all 0.2s ease; }
-.slide-enter-from, .slide-leave-to { opacity: 0; transform: translateY(-10px); }
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.fade-enter-from {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.fade-leave-to {
+  opacity: 0;
+  transform: translateY(-10px);
+}
 </style>

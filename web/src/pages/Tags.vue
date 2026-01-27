@@ -17,6 +17,7 @@ import {
   Folder,
   Layers,
   Tag as TagIcon,
+  Tags as TagsIcon,
   Pencil,
   X,
   Check,
@@ -205,40 +206,49 @@ const isLoading = computed(() => statsLoading.value || tagsLoading.value)
 
 <template>
   <div class="p-6 lg:p-8">
-    <div class="max-w-4xl mx-auto">
-      <!-- 操作栏 -->
-      <div class="flex items-center justify-end gap-2 mb-4">
-        <Button 
-          variant="ghost" 
-          size="icon"
-          @click="updateCountsMutation.mutateAsync()"
-          :disabled="updateCountsMutation.isPending.value"
-          title="同步"
-        >
-          <RefreshCw class="w-4 h-4" :class="updateCountsMutation.isPending.value && 'animate-spin'" />
-        </Button>
-        <Button size="sm" @click="showCreateDialog = true">
-          <Plus class="w-4 h-4 mr-1" />
-          新建
-        </Button>
+      <!-- 标题区 -->
+      <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 class="text-xl font-bold text-foreground flex items-center gap-2">
+            <TagsIcon class="w-5 h-5 text-primary" />标签管理
+          </h1>
+          <p class="text-sm text-muted-foreground mt-1">管理系统标签、分类与分辨率规则</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <Button 
+            variant="ghost" 
+            size="sm"
+            @click="updateCountsMutation.mutateAsync()"
+            :disabled="updateCountsMutation.isPending.value"
+            class="h-9"
+          >
+            <RefreshCw class="w-4 h-4 mr-2" :class="updateCountsMutation.isPending.value && 'animate-spin'" />
+            同步计数
+          </Button>
+          <Button size="sm" class="h-9 gap-1.5" @click="showCreateDialog = true">
+            <Plus class="w-4 h-4" />
+            新建标签
+          </Button>
+        </div>
       </div>
 
-      <!-- Tabs -->
-      <div class="flex border-b border-border mb-4">
+      <div class="max-w-6xl mx-auto">
+      <!-- 分类 Tabs -->
+      <div class="flex items-center p-1 bg-muted/30 rounded-lg w-full sm:w-fit mb-6 border border-border/50">
         <button
           v-for="tab in tabs"
           :key="tab.level"
           @click="activeLevel = tab.level"
-          class="flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors"
+          class="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-1.5 text-sm font-medium rounded-md transition-all"
           :class="[
             activeLevel === tab.level
-              ? 'border-primary text-foreground'
-              : 'border-transparent text-muted-foreground hover:text-foreground'
+              ? 'bg-background text-foreground shadow-sm ring-1 ring-border/50'
+              : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
           ]"
         >
-          <component :is="tab.icon" class="w-4 h-4" :class="tab.color" />
+          <component :is="tab.icon" class="w-4 h-4" :class="activeLevel === tab.level ? tab.color : 'opacity-70'" />
           <span>{{ tab.label }}</span>
-          <span class="px-1.5 py-0.5 text-xs rounded-full bg-muted">{{ tab.count }}</span>
+          <span class="ml-1.5 bg-muted-foreground/10 px-1.5 py-0.5 rounded-full text-[10px]">{{ tab.count }}</span>
         </button>
       </div>
 
@@ -470,4 +480,3 @@ const isLoading = computed(() => statsLoading.value || tagsLoading.value)
   opacity: 0;
 }
 </style>
-

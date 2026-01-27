@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import type { ImageResponse, ImageWithSimilarity, TagWithSource } from '@/types'
-import { Copy, X, Plus, Loader2 } from 'lucide-vue-next'
+import { Copy, X, Plus, Loader2, Check } from 'lucide-vue-next'
 import CopyToast from '@/components/ui/CopyToast.vue'
 import { useAddImageTag, useRemoveImageTag, useTags } from '@/api/queries'
 import { toast } from 'vue-sonner'
@@ -74,17 +74,7 @@ async function copyImageUrl(event: Event, url: string) {
   }
 }
 
-function getImageSizeClass(image: ImageItem): string {
-  const w = image.width || 0
-  const h = image.height || 0
-  const ratio = w / (h || 1)
-  
-  if (ratio > 2) return 'max-h-48'
-  if (ratio > 1.5) return 'max-h-56'
-  if (ratio >= 0.7) return ''
-  if (ratio >= 0.5) return 'max-h-80'
-  return 'max-h-96'
-}
+
 
 function isPending(image: ImageItem): boolean {
   return !image.description && (!image.tags || image.tags.length === 0)
@@ -95,32 +85,30 @@ function getSimilarity(image: ImageItem): number | undefined {
 }
 
 function getSimilarityColor(sim: number): string {
-  if (sim >= 0.8) return 'bg-emerald-500'
-  if (sim >= 0.6) return 'bg-green-500'
-  if (sim >= 0.4) return 'bg-yellow-500'
-  return 'bg-orange-500'
+  if (sim >= 0.8) return 'bg-emerald-500 shadow-emerald-500/20'
+  if (sim >= 0.6) return 'bg-green-500 shadow-green-500/20'
+  if (sim >= 0.4) return 'bg-yellow-500 shadow-yellow-500/20'
+  return 'bg-orange-500 shadow-orange-500/20'
 }
 
-// 标签样式
+// 标签样式 - Linear 风格优化
 function getTagClass(tag: TagWithSource): string {
   if (tag.level === 0) {
-    return 'bg-violet-500/80 text-white'
+    return 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-200/50 dark:border-violet-500/20'
   } else if (tag.level === 1) {
-    return 'bg-sky-500/80 text-white'
+    return 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-200/50 dark:border-blue-500/20'
   }
-  return 'bg-muted text-muted-foreground hover:bg-muted/80'
+  return 'bg-muted/50 text-muted-foreground border-border/50 hover:bg-muted hover:text-foreground'
 }
 
 function isEditableTag(tag: TagWithSource): boolean {
   return tag.level === 2 || tag.level === undefined
 }
 
-// 检查是否正在操作某个标签
 function isTagPending(imageId: number, tagId: number): boolean {
   return pendingTagOps.value.has(`${imageId}-${tagId}`)
 }
 
-// 开始编辑标签
 async function startEditTag(event: Event, imageId: number) {
   event.stopPropagation()
   editingImageId.value = imageId
@@ -129,31 +117,26 @@ async function startEditTag(event: Event, imageId: number) {
   tagInputRef.value?.focus()
 }
 
-// 取消编辑
 function cancelEdit(event: Event) {
   event.stopPropagation()
   editingImageId.value = null
   newTagInput.value = ''
 }
 
-// 删除标签（单条删除）
 async function removeTag(event: Event, image: ImageItem, tag: TagWithSource) {
   event.stopPropagation()
   if (!props.editable || !tag.id) return
-  
+
   const opKey = `${image.id}-${tag.id}`
-  if (pendingTagOps.value.has(opKey)) return  // 防止重复提交
-  
+  if (pendingTagOps.value.has(opKey)) return
+
   pendingTagOps.value.add(opKey)
-  
+
   try {
     await removeTagMutation.mutateAsync({ imageId: image.id, tagId: tag.id })
-    
-    // 局部更新：移除标签
     const currentTags = image.tags || []
     const newTags = currentTags.filter(t => t.id !== tag.id)
     emit('tagsUpdated', image.id, newTags)
-    
     toast.success(`标签 "${tag.name}" 已移除`)
   } catch (e: any) {
     toast.error(getErrorMessage(e))
@@ -162,28 +145,26 @@ async function removeTag(event: Event, image: ImageItem, tag: TagWithSource) {
   }
 }
 
-// 添加标签
 async function addTag(event: Event, image: ImageItem) {
   event.stopPropagation()
   if (isComposing.value) return
-  
+
   const tagName = newTagInput.value.trim()
   if (!tagName) return
-  
+
   const currentTags = image.tags || []
   if (currentTags.some(t => t.name.toLowerCase() === tagName.toLowerCase())) {
     newTagInput.value = ''
     toast.warning('标签已存在')
     return
   }
-  
+
   const opKey = `${image.id}-add-${tagName}`
   if (pendingTagOps.value.has(opKey)) return
-  
+
   pendingTagOps.value.add(opKey)
-  
+
   try {
-    // 直接使用 tagName，后端会自动解析/创建标签
     const result = await addTagMutation.mutateAsync({ imageId: image.id, tagName })
     handleAddTagSuccess(image, result)
   } catch (e: any) {
@@ -193,9 +174,8 @@ async function addTag(event: Event, image: ImageItem) {
   }
 }
 
-// 公共：处理标签添加成功
 function handleAddTagSuccess(
-  image: ImageItem, 
+  image: ImageItem,
   result: { tag_id: number; tag_name: string; is_new: boolean }
 ) {
   const currentTags = image.tags || []
@@ -206,10 +186,10 @@ function handleAddTagSuccess(
     level: 2
   }
   emit('tagsUpdated', image.id, [...currentTags, newTag])
-  
+
   newTagInput.value = ''
   editingImageId.value = null
-  
+
   if (result.is_new) {
     toast.success(`新标签 "${result.tag_name}" 已创建并添加`)
   } else {
@@ -217,27 +197,25 @@ function handleAddTagSuccess(
   }
 }
 
-// 标签建议
 const tagSuggestions = computed(() => {
   if (!allTags.value || !newTagInput.value || editingImageId.value === null) return []
   const input = newTagInput.value.toLowerCase()
   const image = props.images.find(i => i.id === editingImageId.value)
   const existingNames = new Set((image?.tags || []).map(t => t.name.toLowerCase()))
-  
+
   return allTags.value
     .filter(t => t.level === 2 && t.name.toLowerCase().includes(input) && !existingNames.has(t.name.toLowerCase()))
     .slice(0, 5)
 })
 
-// 选择建议标签
 async function selectSuggestion(event: Event, image: ImageItem, tag: { id: number; name: string }) {
   event.stopPropagation()
-  
+
   const opKey = `${image.id}-${tag.id}`
   if (pendingTagOps.value.has(opKey)) return
-  
+
   pendingTagOps.value.add(opKey)
-  
+
   try {
     const result = await addTagMutation.mutateAsync({ imageId: image.id, tagId: tag.id })
     handleAddTagSuccess(image, result)
@@ -248,7 +226,6 @@ async function selectSuggestion(event: Event, image: ImageItem, tag: { id: numbe
   }
 }
 
-// 检查是否有任何操作进行中
 function isAnyOpPending(imageId: number): boolean {
   for (const key of pendingTagOps.value) {
     if (key.startsWith(`${imageId}-`)) return true
@@ -258,116 +235,132 @@ function isAnyOpPending(imageId: number): boolean {
 </script>
 
 <template>
-  <div class="columns-2 sm:columns-3 md:columns-4 lg:columns-5 xl:columns-6 2xl:columns-7 min-[1920px]:columns-8 gap-4 space-y-4">
-    <div 
-      v-for="(image, index) in images" 
+  <div class="columns-2 sm:columns-3 md:columns-4 lg:columns-5 xl:columns-6 2xl:columns-7 min-[1920px]:columns-8 gap-2 md:gap-4 space-y-2 md:space-y-4 pb-12">
+    <div
+      v-for="(image, index) in images"
       :key="image.id"
-      class="break-inside-avoid relative group cursor-pointer transition-transform duration-200"
-      :class="{ 
-        'scale-[0.97]': selectMode && selectedIds.has(image.id),
-        'hover:scale-[0.98]': selectMode && !selectedIds.has(image.id)
-      }"
+      class="break-inside-avoid relative group cursor-pointer w-full"
       @click="handleClick(image, index)"
     >
-      <!-- 选择框 -->
-      <div 
-        v-if="selectMode"
-        class="absolute top-2 left-2 z-10"
-        @click.stop="emit('toggleSelect', image.id)"
-      >
-        <div 
-          class="w-6 h-6 rounded-lg flex items-center justify-center transition-all shadow-lg"
-          :class="selectedIds.has(image.id) 
-            ? 'bg-green-500 text-white' 
-            : 'bg-black/50 border-2 border-white/60 text-transparent hover:border-green-400'"
-        >
-          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-            <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
-          </svg>
-        </div>
-      </div>
-
-      <!-- 待分析标记 -->
-      <div 
-        v-if="showPendingBadge && isPending(image)"
-        class="absolute top-2 right-2 z-10 px-2 py-0.5 bg-amber-500 text-white text-xs rounded-full"
-      >
-        待分析
-      </div>
-
-      <!-- 相似度徽章 -->
-      <div 
-        v-if="showSimilarity && getSimilarity(image) !== undefined"
-        class="absolute top-2 left-2 z-10 px-2 py-0.5 text-white text-xs rounded-full font-medium shadow-lg"
-        :class="getSimilarityColor(getSimilarity(image)!)"
-        :title="`相似度: ${(getSimilarity(image)! * 100).toFixed(1)}%`"
-      >
-        {{ (getSimilarity(image)! * 100).toFixed(0) }}%
-      </div>
-
-      <div 
-        class="overflow-hidden rounded-xl bg-muted"
-        :class="getImageSizeClass(image)"
+      <!-- 卡片容器 -->
+      <div
+        class="relative overflow-hidden rounded-2xl bg-black/5 dark:bg-white/5 transition-all duration-500 ease-out"
+        :class="[
+          selectMode && selectedIds.has(image.id)
+            ? 'scale-[0.98] brightness-110'
+            : 'hover:shadow-xl hover:scale-[1.02]'
+        ]"
         :style="image.width && image.height ? { aspectRatio: `${image.width}/${image.height}` } : undefined"
       >
-        <img 
-          :src="getImageUrl(image.image_url)" 
+        <!-- 图片 -->
+        <img
+          :src="getImageUrl(image.image_url)"
           :alt="image.description || '图片'"
-          class="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+          class="w-full h-full object-cover transition-transform duration-700 ease-out group-hover:scale-105"
           loading="lazy"
         />
-      </div>
 
-      <!-- Hover 遮罩 -->
-      <div 
-        v-if="!selectMode && !showLabelsAlways"
-        class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl"
-      >
-        <button
-          class="absolute bottom-3 right-3 p-1.5 bg-black/60 hover:bg-primary hover:scale-110 rounded-lg transition-all z-10"
-          title="复制图片地址"
-          @click="copyImageUrl($event, image.image_url)"
+        <!-- 遮罩层 (Hover or Selected) -->
+        <div
+          class="absolute inset-0 transition-colors duration-300 pointer-events-none"
+          :class="[
+            selectMode && selectedIds.has(image.id) ? 'bg-primary/20 backdrop-blur-[1px]' : 'opacity-0 group-hover:opacity-100 bg-gradient-to-t from-black/60 via-transparent to-transparent'
+          ]"
+        ></div>
+
+        <!-- 左上角选择指示器 (Select Mode) -->
+        <div
+          v-if="selectMode"
+          class="absolute top-3 left-3 z-20"
+          @click.stop="emit('toggleSelect', image.id)"
         >
-          <Copy class="w-4 h-4 text-white" />
-        </button>
-        <div class="absolute inset-x-0 bottom-0 p-3 pr-12">
-          <p v-if="image.description" class="text-white text-sm font-medium truncate">
+           <div
+             class="w-6 h-6 rounded-full flex items-center justify-center transition-all duration-300 shadow-lg backdrop-blur-md"
+             :class="selectedIds.has(image.id)
+               ? 'bg-white text-green-600 scale-100 shadow-md'
+               : 'bg-black/30 text-white/50 hover:bg-black/50 hover:text-white scale-90 hover:scale-100'"
+           >
+             <Check v-if="selectedIds.has(image.id)" class="w-3.5 h-3.5" stroke-width="5" />
+             <div v-else class="w-2 h-2 rounded-full bg-current opacity-50" />
+           </div>
+        </div>
+
+        <!-- 右上角状态徽章 -->
+        <div class="absolute top-2 right-2 flex flex-col gap-1.5 items-end z-20 pointer-events-none">
+           <!-- 待分析 -->
+           <div
+            v-if="showPendingBadge && isPending(image)"
+            class="px-2 py-0.5 bg-amber-500/90 backdrop-blur-sm text-white text-[10px] font-medium rounded-full shadow-sm"
+          >
+            待分析
+          </div>
+
+          <!-- 相似度 -->
+          <div
+            v-if="showSimilarity && getSimilarity(image) !== undefined"
+            class="px-2 py-0.5 text-white text-[10px] font-bold rounded-full shadow-sm backdrop-blur-sm"
+            :class="getSimilarityColor(getSimilarity(image)!)"
+          >
+            {{ (getSimilarity(image)! * 100).toFixed(0) }}%
+          </div>
+        </div>
+
+        <!-- Hover Actions (Top Left/Right if not select mode) -->
+        <div
+          v-if="!selectMode"
+          class="absolute top-2 right-2 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-20"
+        >
+          <button
+            class="p-1.5 rounded-md bg-black/50 backdrop-blur border border-white/10 text-white hover:bg-black/70 hover:scale-105 transition-all shadow-sm"
+            title="复制链接"
+            @click="copyImageUrl($event, image.image_url)"
+          >
+            <Copy class="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <!-- 底部信息 (Hover) -->
+        <div
+          v-if="!selectMode && !showLabelsAlways"
+          class="absolute inset-x-0 bottom-0 p-3 pt-6 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex flex-col justify-end pointer-events-none"
+        >
+          <p v-if="image.description" class="text-white text-xs font-medium line-clamp-2 mb-1.5 drop-shadow-md">
             {{ image.description }}
           </p>
-          <div class="flex flex-wrap gap-1 mt-1">
-            <span 
-              v-for="tag in image.tags?.slice(0, 3)" 
+          <div class="flex flex-wrap gap-1">
+            <span
+              v-for="tag in image.tags?.slice(0, 3)"
               :key="tag.name"
-              class="px-1.5 py-0.5 bg-white/20 text-white text-xs rounded-full"
+              class="px-1.5 py-0.5 bg-white/20 backdrop-blur-sm border border-white/10 text-white text-[10px] rounded-md shadow-sm"
             >
               {{ tag.name }}
+            </span>
+            <span v-if="(image.tags?.length || 0) > 3" class="px-1.5 py-0.5 bg-black/40 backdrop-blur text-white text-[10px] rounded-md">
+               +{{ (image.tags?.length || 0) - 3 }}
             </span>
           </div>
         </div>
       </div>
 
-      <!-- 始终显示的标签区域 -->
-      <div v-if="showLabelsAlways && !selectMode" class="mt-2 px-1">
-        <p v-if="image.description" class="text-sm text-foreground line-clamp-2" :title="image.description">
-          {{ image.description }}
-        </p>
-        <div class="flex flex-wrap gap-1 mt-1.5 items-center">
+      <!-- 始终显示的标签区域 (Inline Edit) -->
+      <div v-if="showLabelsAlways && !selectMode" class="mt-2.5 px-0.5">
+        <div class="flex flex-wrap gap-1.5 items-center">
           <template v-for="tag in image.tags" :key="tag.id || tag.name">
-            <!-- 不可编辑的标签 -->
-            <span 
+            <!-- 不可编辑标签 -->
+            <span
               v-if="!isEditableTag(tag)"
-              class="px-1.5 py-0.5 text-xs rounded-full font-medium"
+              class="px-2 py-0.5 text-[10px] border rounded-md font-medium"
               :class="getTagClass(tag)"
             >
               {{ tag.name }}
             </span>
-            <!-- 可编辑的标签 -->
-            <span 
+            <!-- 可编辑标签 -->
+            <span
               v-else
-              class="inline-flex items-center px-1.5 py-0.5 text-xs rounded-full transition-colors group/tag"
+              class="group/tag inline-flex items-center px-2 py-0.5 text-[10px] border rounded-md transition-colors"
               :class="[
                 getTagClass(tag),
-                editable ? 'pr-0.5' : '',
+                editable ? 'pr-1' : '',
                 isTagPending(image.id, tag.id) ? 'opacity-50' : ''
               ]"
             >
@@ -375,21 +368,21 @@ function isAnyOpPending(imageId: number): boolean {
               <button
                 v-if="editable && !isTagPending(image.id, tag.id)"
                 @click="removeTag($event, image, tag)"
-                class="ml-0.5 p-0.5 rounded-full opacity-0 group-hover/tag:opacity-100 hover:bg-black/20 transition-all"
-                title="删除标签"
+                class="ml-1 p-0.5 rounded-full hover:bg-red-500/10 hover:text-red-500 opacity-0 group-hover/tag:opacity-100 transition-all"
+                title="删除"
               >
-                <X class="w-3 h-3" />
+                <X class="w-2.5 h-2.5" />
               </button>
-              <Loader2 
-                v-if="editable && isTagPending(image.id, tag.id)" 
-                class="w-3 h-3 ml-0.5 animate-spin" 
+              <Loader2
+                v-if="editable && isTagPending(image.id, tag.id)"
+                class="w-2.5 h-2.5 ml-1 animate-spin"
               />
             </span>
           </template>
-          
-          <!-- 添加标签 -->
+
+          <!-- 添加标签按钮 -->
           <template v-if="editable">
-            <div v-if="editingImageId === image.id" class="relative" @click.stop>
+            <div v-if="editingImageId === image.id" class="relative z-30" @click.stop>
               <div class="flex items-center gap-1">
                 <input
                   ref="tagInputRef"
@@ -398,43 +391,47 @@ function isAnyOpPending(imageId: number): boolean {
                   @keyup.escape="cancelEdit($event)"
                   @compositionstart="isComposing = true"
                   @compositionend="isComposing = false"
-                  placeholder="输入标签"
-                  class="w-20 px-1.5 py-0.5 text-xs bg-background border border-border rounded-full focus:outline-none focus:ring-1 focus:ring-primary"
+                  placeholder="新标签..."
+                  class="w-20 px-2 py-0.5 text-[10px] bg-background border border-primary/30 rounded-md focus:outline-none focus:ring-1 focus:ring-primary shadow-sm"
                   :disabled="isAnyOpPending(image.id)"
                 />
                 <button
                   @click="addTag($event, image)"
                   :disabled="isAnyOpPending(image.id) || !newTagInput.trim()"
-                  class="p-0.5 rounded-full bg-primary text-primary-foreground disabled:opacity-50"
+                  class="p-0.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
                 >
                   <Loader2 v-if="isAnyOpPending(image.id)" class="w-3 h-3 animate-spin" />
                   <Plus v-else class="w-3 h-3" />
                 </button>
                 <button
                   @click="cancelEdit($event)"
-                  class="p-0.5 rounded-full hover:bg-muted"
+                  class="p-0.5 rounded-md hover:bg-muted text-muted-foreground"
                 >
-                  <X class="w-3 h-3 text-muted-foreground" />
+                  <X class="w-3 h-3" />
                 </button>
               </div>
-              <div 
-                v-if="tagSuggestions.length" 
-                class="absolute top-full left-0 mt-1 w-32 bg-popover border border-border rounded-lg shadow-lg z-20 py-1"
+
+              <!-- 建议列表 -->
+              <div
+                v-if="tagSuggestions.length"
+                class="absolute top-full left-0 mt-1 w-32 bg-popover border border-border rounded-md shadow-lg overflow-hidden py-0.5"
               >
                 <button
                   v-for="sug in tagSuggestions"
                   :key="sug.id"
                   @click="selectSuggestion($event, image, sug)"
-                  class="block w-full text-left px-2 py-1 text-xs text-foreground hover:bg-muted"
+                  class="block w-full text-left px-2 py-1.5 text-[10px] text-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
                 >
                   {{ sug.name }}
                 </button>
               </div>
             </div>
+
             <button
               v-else
               @click="startEditTag($event, image.id)"
-              class="inline-flex items-center px-1.5 py-0.5 text-xs rounded-full border border-dashed border-muted-foreground/50 text-muted-foreground hover:border-primary hover:text-primary transition-colors"
+              class="inline-flex items-center justify-center w-5 h-5 rounded-md border border-dashed border-border text-muted-foreground hover:border-primary/50 hover:text-primary hover:bg-primary/5 transition-all"
+              title="添加标签"
             >
               <Plus class="w-3 h-3" />
             </button>
