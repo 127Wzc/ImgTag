@@ -5,8 +5,8 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch, nextTick } from 'vue'
 import {
-  X, ChevronLeft, ChevronRight, Info, Ruler, HardDrive, Hash,
-  Plus, Pencil, Loader2, Save, Link, Download, Share2, Tag as TagIcon,
+  X, ChevronLeft, ChevronRight, Info, Hash,
+  Plus, Pencil, Loader2, Save, Link, Download,
   PanelRightClose
 } from 'lucide-vue-next'
 import { useUpdateImage, useTags, useCategories, useResolveTag } from '@/api/queries'
@@ -53,7 +53,7 @@ const showUnsavedConfirm = ref(false)
 
 // 用户权限
 const userStore = useUserStore()
-const isLoggedIn = computed(() => !!userStore.user)
+
 const canEdit = computed(() => {
   if (!props.image) return false
   if (userStore.isAdmin) return true

@@ -74,17 +74,7 @@ async function copyImageUrl(event: Event, url: string) {
   }
 }
 
-function getImageSizeClass(image: ImageItem): string {
-  const w = image.width || 0
-  const h = image.height || 0
-  const ratio = w / (h || 1)
 
-  if (ratio > 2) return 'max-h-48'
-  if (ratio > 1.5) return 'max-h-56'
-  if (ratio >= 0.7) return ''
-  if (ratio >= 0.5) return 'max-h-80'
-  return 'max-h-96'
-}
 
 function isPending(image: ImageItem): boolean {
   return !image.description && (!image.tags || image.tags.length === 0)
