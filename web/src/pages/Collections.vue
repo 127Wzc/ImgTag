@@ -14,7 +14,6 @@ import {
   Image as ImageIcon,
   Loader2,
   FolderOpen,
-  MoreVertical,
   ArrowRight
 } from 'lucide-vue-next'
 import type { Collection } from '@/types'

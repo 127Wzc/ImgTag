@@ -11,9 +11,8 @@ import { useImages, useTags, useSimilarSearch, useCategories, useResolutions } f
 import { useUserStore } from '@/stores'
 import type { ImageResponse, ImageWithSimilarity, SimilarSearchRequest, ImageSearchRequest, Tag } from '@/types'
 import {
-  Search as SearchIcon, X, Image as ImageIcon, Loader2, Sparkles,
-  ChevronDown, Tag as TagIcon, Check, FolderOpen, Filter, SlidersHorizontal,
-  Command, ArrowRight
+  Search as SearchIcon, Loader2, Sparkles, Check, FolderOpen, SlidersHorizontal,
+  Command,
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 
@@ -45,7 +44,7 @@ const galleryPageSize = ref(40) // 默认更多
 const galleryCurrentPage = ref(1)
 const gallerySearchParams = ref<ImageSearchRequest>({ size: 40, page: 1, sort_by: 'id', sort_desc: true })
 
-const { data: galleryData, isLoading: galleryLoading, isError: galleryError, refetch: galleryRefetch } = useImages(gallerySearchParams)
+const { data: galleryData, isLoading: galleryLoading } = useImages(gallerySearchParams)
 const galleryImages = computed(() => galleryData.value?.data || [])
 const galleryTotal = computed(() => galleryData.value?.total || 0)
 const galleryTotalPages = computed(() => Math.ceil(galleryTotal.value / galleryPageSize.value))
@@ -73,8 +72,8 @@ function galleryGoToPage(page: number) {
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-function galleryChangePageSize(size: string) {
-  const newSize = parseInt(size)
+function galleryChangePageSize(size: any) {
+  const newSize = parseInt(size as string)
   if (isNaN(newSize)) return
   galleryPageSize.value = newSize
   galleryCurrentPage.value = 1
@@ -113,7 +112,7 @@ const selectedTags = computed<Tag[]>(() => {
 })
 
 const smartSearchParams = ref<SimilarSearchRequest | null>(null)
-const { data: smartData, isLoading: smartLoading, isFetching: smartFetching } = useSimilarSearch(smartSearchParams)
+const { data: smartData, isLoading: smartLoading } = useSimilarSearch(smartSearchParams)
 const smartResults = computed<ImageWithSimilarity[]>(() => smartData.value?.data || [])
 const smartTotal = computed(() => smartData.value?.total || 0)
 const hasVectorSearch = computed(() => !!smartSearchParams.value?.text)
@@ -131,11 +130,7 @@ function toggleTagSelection(tag: Tag) {
   selectedTagIds.value = newSet
 }
 
-function removeTag(tagId: number) {
-  const newSet = new Set(selectedTagIds.value)
-  newSet.delete(tagId)
-  selectedTagIds.value = newSet
-}
+
 
 function handleSmartSearch() {
   if (!hasAnySmartFilter.value) return
@@ -351,7 +346,7 @@ const currentImageList = computed(() => activeMode.value === 'gallery' ? gallery
                   class="h-9 px-4 flex items-center gap-2 bg-muted/30 border border-border/50 hover:bg-muted/50 rounded-full text-xs text-muted-foreground hover:text-foreground transition-colors"
                   :class="selectedTagIds.size > 0 && 'text-primary bg-primary/5 border-primary/20'"
                 >
-                  <TagIcon class="w-3.5 h-3.5" />
+                  <Sparkles class="w-3.5 h-3.5" />
                   {{ selectedTagIds.size === 0 ? '选择标签' : `已选 ${selectedTagIds.size}` }}
                 </button>
                 <!-- 下拉省略，保持原逻辑但优化样式 -->

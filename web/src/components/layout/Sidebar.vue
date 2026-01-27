@@ -16,11 +16,9 @@ import {
   ChevronRight,
   Menu,
   X,
-  Sparkles,
   ChevronUp,
   Activity,
   HardDrive,
-  Database,
   Search
 } from 'lucide-vue-next'
 
@@ -268,7 +266,7 @@ function handleNavClick() {
             >
                <div class="px-3 py-2 border-b border-border/40 mb-1 lg:hidden">
                   <div class="font-medium text-sm">{{ userStore.username }}</div>
-                  <div class="text-xs text-muted-foreground">{{ userStore.email }}</div>
+                  <div class="text-xs text-muted-foreground">{{ userStore.user?.email }}</div>
                </div>
               <RouterLink
                 to="/user-center"

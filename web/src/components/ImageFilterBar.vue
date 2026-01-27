@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { watch, nextTick } from 'vue'
-import { Search, X, Filter } from 'lucide-vue-next'
+import { Search, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { FilterCheckbox } from '@/components/ui/filter-checkbox'

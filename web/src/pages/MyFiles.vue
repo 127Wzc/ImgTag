@@ -10,9 +10,9 @@ import { useMyImages } from '@/api/queries'
 import apiClient from '@/api/client'
 import type { ImageResponse, ImageSearchRequest, TagWithSource } from '@/types'
 import {
-  Loader2, Filter, CheckSquare, Trash2, Tags, Sparkles, LayoutGrid,
+  Loader2, CheckSquare, Trash2, Tags, Sparkles, LayoutGrid,
   ChevronDown, ChevronLeft, ChevronRight, FolderOpen, ArrowUpDown, Tag,
-  X, Check, Plus
+  Plus
 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -53,7 +53,7 @@ const pageSize = ref(40)
 const currentPage = ref(1)
 const sortBy = ref('id') // 排序字段
 const sortDesc = ref(true) // 是否倒序
-const jumpPage = ref('')
+
 
 // 显示模式
 const showLabelsAlways = ref(false)
@@ -62,7 +62,7 @@ const showLabelsAlways = ref(false)
 const searchParams = ref<ImageSearchRequest>({ size: pageSize.value, page: 1, sort_by: sortBy.value, sort_desc: sortDesc.value })
 
 // 查询数据
-const { data: imageData, isLoading, isError, refetch } = useMyImages(searchParams)
+const { data: imageData, isLoading, refetch } = useMyImages(searchParams)
 const { data: categoriesData } = useCategories()
 
 // 标签局部更新覆盖层
@@ -116,8 +116,8 @@ function handleReset() {
 }
 
 // 排序变更
-function changeSort(value: string) {
-  const [field, desc] = value.split('-')
+function changeSort(value: any) {
+  const [field, desc] = (value as string).split('-')
   sortBy.value = field
   sortDesc.value = desc === 'desc'
   currentPage.value = 1
@@ -137,24 +137,15 @@ function changePage(page: number) {
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-function changePageSize(size: string) {
-  const newSize = parseInt(size)
+function changePageSize(size: any) {
+  const newSize = parseInt(size as string)
   if (isNaN(newSize)) return
   pageSize.value = newSize
   currentPage.value = 1
   searchParams.value = { ...searchParams.value, size: newSize, page: 1 }
 }
 
-// 跳转到指定页码
-function handleJump() {
-  const page = parseInt(jumpPage.value)
-  if (isNaN(page) || page < 1 || page > totalPages.value) {
-    toast.error(`请输入 1-${totalPages.value} 之间的页码`)
-    return
-  }
-  changePage(page)
-  jumpPage.value = ''
-}
+
 
 // 批量选择
 const selectMode = ref(false)
@@ -176,7 +167,6 @@ function invertSelection() {
   selectedIds.value = new Set(images.value.filter(img => !selectedIds.value.has(img.id)).map(img => img.id))
 }
 function clearSelection() { selectedIds.value = new Set() }
-const isAllSelected = computed(() => images.value.length > 0 && selectedIds.value.size === images.value.length)
 
 // 批量操作
 const batchLoading = ref(false)
