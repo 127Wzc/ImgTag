@@ -159,6 +159,12 @@ cd web && pnpm install && pnpm dev
 
 ---
 
+## 📊 分析统计
+
+支持 Umami / Google Analytics 等多平台分析，详见 [前端配置说明](web/README.zh.md#分析统计)。
+
+---
+
 ## 🚀 前后端分离部署
 
 如需将前端托管到 CDN（Vercel / Cloudflare Pages）：

@@ -154,7 +154,13 @@ Manage via Web UI "System Settings":
 
 ---
 
-## � Decoupled Deployment
+## 📊 Analytics
+
+Supports Umami / Google Analytics. See [Frontend Configuration](web/README.md#analytics) for details.
+
+---
+
+## 🚀 Decoupled Deployment
 
 To host frontend on CDN (Vercel / Cloudflare Pages):
 

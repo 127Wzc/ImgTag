@@ -9,8 +9,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@analytics/google-analytics": "^1.1.0",
     "@tanstack/vue-query": "^5.92.1",
     "@vueuse/core": "^14.1.0",
+    "analytics": "^0.8.19",
     "axios": "^1.13.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

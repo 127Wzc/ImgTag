@@ -8,12 +8,18 @@ importers:
 
   .:
     dependencies:
+      '@analytics/google-analytics':
+        specifier: ^1.1.0
+        version: 1.1.0
       '@tanstack/vue-query':
         specifier: ^5.92.1
         version: 5.92.1(vue@3.5.26(typescript@5.6.3))
       '@vueuse/core':
         specifier: ^14.1.0
         version: 14.1.0(vue@3.5.26(typescript@5.6.3))
+      analytics:
+        specifier: ^0.8.19
+        version: 0.8.19(@types/dlv@1.1.5)
       axios:
         specifier: ^1.13.2
         version: 1.13.2
@@ -83,6 +89,30 @@ importers:
         version: 2.2.12(typescript@5.6.3)
 
 packages:
+
+  '@analytics/cookie-utils@0.2.14':
+    resolution: {integrity: sha512-x51x2cLqvP5Fb1ydgNvTCX+SVv0ALK/yTNwp/53++yk4kLhxb850krWtQ4aASN0612oXrIGotwfmdJIttnLiPQ==}
+
+  '@analytics/core@0.13.2':
+    resolution: {integrity: sha512-ejvfoPP8TEh2hA2szMEq9c4TdeX8FAeY1j/7MxJVZjzDaq8BDHOyaAAQzTFiLMHvV0WcU2YC0smJ5Ids5Ll5ng==}
+
+  '@analytics/global-storage-utils@0.1.9':
+    resolution: {integrity: sha512-+xm6CDnWsVOQIKkqbPRPRdYDXKk3PNgr/bCZWSI+7tEDT5PCDgI0QSBZe+FqCVkCRtTkgOrjFOY7wOM8Gq+ndA==}
+
+  '@analytics/google-analytics@1.1.0':
+    resolution: {integrity: sha512-i8uGyELMtwEUAf3GNWNLNBzhRvReDn1RUxvMdMhjUA7+GNGxPOM4kkzFfv3giQXKNxTEjfsh75kqNcscbJsuaA==}
+
+  '@analytics/localstorage-utils@0.1.12':
+    resolution: {integrity: sha512-BL3vuZUwWgMqdkQsE0GKsED5SPLC6daI4K4LE0a/BkKv+4Cae5JLLqpO5gju2HUGOjJxIvw8U/G5EcglNY5+1w==}
+
+  '@analytics/session-storage-utils@0.0.9':
+    resolution: {integrity: sha512-fhP9QCpyq45rZKsXaAxyz+VTmOUWljIW08CWSkFzpwOHkDM4Xy5tymc1YcWqSBBaLjHldo3HlY4qfqEIS4Aj1A==}
+
+  '@analytics/storage-utils@0.4.4':
+    resolution: {integrity: sha512-873P4wDIunbOnBqADc2AhTVsLbluUv1dP6k9UrK8FIeV8WXv5+fG12HdwwaniUIxq6QLgZJfKEaCwtWSKrrV0g==}
+
+  '@analytics/type-utils@0.6.4':
+    resolution: {integrity: sha512-Ou1gQxFakOWLcPnbFVsrPb8g1wLLUZYYJXDPjHkG07+5mustGs5yqACx42UAu4A6NszNN6Z5gGxhyH45zPWRxw==}
 
   '@babel/helper-string-parser@7.27.1':
     resolution: {integrity: sha512-qMlSxKbpRlAridDExk92nSobyDdpPijUq2DW6oDnUqd0iOGxmQjyqhMIihI9+zv4LPyZdRje2cavWPbCbWm3eA==}
@@ -515,6 +545,9 @@ packages:
     peerDependencies:
       vue: ^2.7.0 || ^3.0.0
 
+  '@types/dlv@1.1.5':
+    resolution: {integrity: sha512-JHOWNfiWepAhfwlSw17kiWrWrk6od2dEQgHltJw9AS0JPFoLZJBge5+Dnil2NfdjAvJ/+vGSX60/BRW20PpUXw==}
+
   '@types/estree@1.0.8':
     resolution: {integrity: sha512-dWHzHa2WqEXI/O1E9OjrocMTKJl2mSrEolh1Iomrv6U+JuNwaHXsXx9bLu5gG7BUWFIN0skIQJQ/L1rIex4X6w==}
 
@@ -629,6 +662,14 @@ packages:
   alien-signals@1.0.13:
     resolution: {integrity: sha512-OGj9yyTnJEttvzhTUWuscOvtqxq5vrhF7vL9oS0xJ2mK0ItPYP1/y+vCFebfxoEyAz0++1AIwJ5CMr+Fk3nDmg==}
 
+  analytics-utils@1.1.1:
+    resolution: {integrity: sha512-nRybjTpRAcHVhWb1cvYaOLJaI3R79r8XjMbu5c0wd2jKmANNqSrYwybiU0X3mp+CQQdm4YiAggTXb2cIA8XhUg==}
+    peerDependencies:
+      '@types/dlv': ^1.0.0
+
+  analytics@0.8.19:
+    resolution: {integrity: sha512-JFgasxpWFiAoqm5UHaGQv9j9OGz+f1KAeQkABYr3Z7YGhiqhQrBpPhIVAIEyttBRJZmew1QwMhN9/bOGGBnpJA==}
+
   aria-hidden@1.2.6:
     resolution: {integrity: sha512-ik3ZgC9dY/lYVVM++OISsaYDeg1tb0VtP5uL3ouh1koGOaUMDPpbFIei4JkFimWUFPn90sbMNMXQAIVOlnYKJA==}
     engines: {node: '>=10'}
@@ -705,6 +746,9 @@ packages:
   detect-libc@2.1.2:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
+
+  dlv@1.1.3:
+    resolution: {integrity: sha512-+HlytyjlPKnIG8XuRG8WvmBP8xs8P71y+SKKS6ZXWoEgLuePxtDoUEiH7WkdePWrQ5JBpE6aoVqfZfJUQkjXwA==}
 
   dunder-proto@1.0.1:
     resolution: {integrity: sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==}
@@ -1109,6 +1153,42 @@ packages:
 
 snapshots:
 
+  '@analytics/cookie-utils@0.2.14':
+    dependencies:
+      '@analytics/global-storage-utils': 0.1.9
+
+  '@analytics/core@0.13.2(@types/dlv@1.1.5)':
+    dependencies:
+      '@analytics/global-storage-utils': 0.1.9
+      '@analytics/type-utils': 0.6.4
+      analytics-utils: 1.1.1(@types/dlv@1.1.5)
+    transitivePeerDependencies:
+      - '@types/dlv'
+
+  '@analytics/global-storage-utils@0.1.9':
+    dependencies:
+      '@analytics/type-utils': 0.6.4
+
+  '@analytics/google-analytics@1.1.0': {}
+
+  '@analytics/localstorage-utils@0.1.12':
+    dependencies:
+      '@analytics/global-storage-utils': 0.1.9
+
+  '@analytics/session-storage-utils@0.0.9':
+    dependencies:
+      '@analytics/global-storage-utils': 0.1.9
+
+  '@analytics/storage-utils@0.4.4':
+    dependencies:
+      '@analytics/cookie-utils': 0.2.14
+      '@analytics/global-storage-utils': 0.1.9
+      '@analytics/localstorage-utils': 0.1.12
+      '@analytics/session-storage-utils': 0.0.9
+      '@analytics/type-utils': 0.6.4
+
+  '@analytics/type-utils@0.6.4': {}
+
   '@babel/helper-string-parser@7.27.1': {}
 
   '@babel/helper-validator-identifier@7.28.5': {}
@@ -1397,6 +1477,8 @@ snapshots:
       '@tanstack/virtual-core': 3.13.13
       vue: 3.5.26(typescript@5.6.3)
 
+  '@types/dlv@1.1.5': {}
+
   '@types/estree@1.0.8': {}
 
   '@types/node@25.0.3':
@@ -1567,6 +1649,19 @@ snapshots:
 
   alien-signals@1.0.13: {}
 
+  analytics-utils@1.1.1(@types/dlv@1.1.5):
+    dependencies:
+      '@analytics/type-utils': 0.6.4
+      '@types/dlv': 1.1.5
+      dlv: 1.1.3
+
+  analytics@0.8.19(@types/dlv@1.1.5):
+    dependencies:
+      '@analytics/core': 0.13.2(@types/dlv@1.1.5)
+      '@analytics/storage-utils': 0.4.4
+    transitivePeerDependencies:
+      - '@types/dlv'
+
   aria-hidden@1.2.6:
     dependencies:
       tslib: 2.8.1
@@ -1640,6 +1735,8 @@ snapshots:
   delayed-stream@1.0.0: {}
 
   detect-libc@2.1.2: {}
+
+  dlv@1.1.3: {}
 
   dunder-proto@1.0.1:
     dependencies:
