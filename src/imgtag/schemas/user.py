@@ -15,6 +15,7 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str = Field(..., min_length=6)
     role: Optional[str] = Field(default="user", description="user 或 admin")
+    permissions: Optional[int] = Field(default=1, description="权限位掩码")
 
 
 class UserLogin(BaseModel):
@@ -28,6 +29,7 @@ class UserResponse(BaseSchema):
     email: Optional[str] = None
     role: str
     is_active: bool
+    permissions: int
     created_at: datetime
     last_login_at: Optional[datetime] = None
 

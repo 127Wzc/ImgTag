@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.core.logging_config import get_logger
 from imgtag.core.config_cache import config_cache
+from imgtag.core.permissions import Permission, check_permission
 from imgtag.db import get_async_session
 from imgtag.db.repositories import user_repository
 from imgtag.models.user import User
@@ -42,6 +43,7 @@ def _user_to_dict(user: User) -> dict[str, Any]:
         "email": user.email,
         "role": user.role,
         "is_active": user.is_active,
+        "permissions": user.permissions,
         "password_hash": user.password_hash,
         "api_key": user.api_key,
         "created_at": user.created_at,
@@ -123,6 +125,35 @@ async def require_admin(
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return user
+
+
+def require_permission(permission: Permission):
+    """FastAPI 依赖注入：权限检查。
+
+    使用方式：
+        from imgtag.api.endpoints.auth import require_permission
+        from imgtag.core.permissions import Permission
+
+        @router.post("/upload")
+        async def upload(user: dict = Depends(require_permission(Permission.UPLOAD_IMAGE))):
+            ...
+
+    Args:
+        permission: 需要的权限（Permission 枚举值）。
+
+    Returns:
+        FastAPI Depends 依赖函数。
+    """
+
+    async def check(user: dict = Depends(get_current_user)) -> dict:
+        if not check_permission(user, permission):
+            raise HTTPException(
+                status_code=403,
+                detail=f"缺少权限: {permission.name}",
+            )
+        return user
+
+    return check
 
 
 @router.post("/login", response_model=Token)
@@ -231,6 +262,7 @@ async def get_me(user: dict = Depends(get_current_user)):
         email=user.get("email"),
         role=user["role"],
         is_active=user.get("is_active", True),
+        permissions=user.get("permissions", 1),
         created_at=user["created_at"],
         last_login_at=user.get("last_login_at"),
     )
@@ -275,6 +307,7 @@ async def update_user(
     user_id: int,
     is_active: Optional[bool] = None,
     role: Optional[str] = None,
+    permissions: Optional[int] = None,
     admin: dict = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
@@ -284,6 +317,7 @@ async def update_user(
         user_id: Target user ID.
         is_active: Active status to set.
         role: Role to set.
+        permissions: Permission bitmask to set.
         admin: Current admin user.
         session: Database session.
 
@@ -308,6 +342,8 @@ async def update_user(
         await user_repository.set_active(session, user, is_active)
     if role is not None:
         await user_repository.set_role(session, user, role)
+    if permissions is not None:
+        await user_repository.update(session, user, permissions=permissions)
 
     return {"message": "更新成功"}
 

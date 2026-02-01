@@ -6,7 +6,7 @@ Stores user credentials, roles, and API keys.
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, DateTime, String, func
+from sqlalchemy import BigInteger, Boolean, DateTime, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from imgtag.models.base import Base
@@ -25,6 +25,7 @@ class User(Base):
         password_hash: Hashed password (salt$hash format).
         role: User role ('admin' or 'user').
         is_active: Whether the account is active.
+        permissions: Permission bitmask (only effective for 'user' role).
         api_key: Optional API key for external access.
         created_at: Account creation timestamp.
         last_login_at: Last successful login timestamp.
@@ -53,6 +54,12 @@ class User(Base):
     )
     is_active: Mapped[bool] = mapped_column(
         Boolean, server_default="true", nullable=False, comment="是否激活"
+    )
+    permissions: Mapped[int] = mapped_column(
+        BigInteger,
+        server_default="1",  # 默认 UPLOAD_IMAGE 权限
+        nullable=False,
+        comment="权限位掩码(仅对user角色生效)",
     )
 
     # API access

@@ -36,6 +36,9 @@ const userStore = useUserStore()
 // 上传弹窗
 const showUploadDialog = ref(false)
 
+// 上传权限检查
+const canUpload = computed(() => userStore.canUpload)
+
 if (!userStore.isLoggedIn) router.push('/login?redirect=/my-files')
 
 // 筛选状态
@@ -317,7 +320,13 @@ function nextImage() {
             </Select>
 
             <!-- 上传按钮 -->
-            <Button size="sm" class="h-9 gap-1.5" @click="showUploadDialog = true">
+            <Button 
+              size="sm" 
+              class="h-9 gap-1.5" 
+              @click="showUploadDialog = true"
+              :disabled="!canUpload"
+              :title="canUpload ? '' : '暂无上传权限'"
+            >
               <Plus class="w-4 h-4" />
               上传
             </Button>
@@ -360,7 +369,11 @@ function nextImage() {
           </div>
           <h3 class="text-lg font-medium text-foreground">暂无图片</h3>
           <p class="text-muted-foreground mt-1 mb-6">上传图片开始构建您的图库</p>
-          <Button @click="showUploadDialog = true">上传图片</Button>
+          <Button 
+            @click="showUploadDialog = true" 
+            :disabled="!canUpload"
+            :title="canUpload ? '' : '暂无上传权限'"
+          >上传图片</Button>
         </div>
 
         <!-- 图片网格 -->

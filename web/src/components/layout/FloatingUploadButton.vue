@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * FloatingUploadButton - 悬浮上传按钮
- * 右下角 FAB 按钮，登录后可见，点击打开上传弹框
+ * 右下角 FAB 按钮，登录后且有上传权限时可见
  */
 import { useRoute } from 'vue-router'
 import { useUserStore } from '@/stores'
@@ -19,7 +19,10 @@ const uploadDialogOpen = ref(false)
 const hiddenRoutes = ['/upload', '/login']
 
 const isVisible = computed(() => {
-  return userStore.isLoggedIn && !hiddenRoutes.includes(route.path)
+  // 未登录或在隐藏路由时不显示
+  if (!userStore.isLoggedIn || hiddenRoutes.includes(route.path)) return false
+  // 需要有上传权限
+  return userStore.canUpload
 })
 
 function handleClick() {

@@ -28,7 +28,8 @@ import {
   Shield,
   Ban,
   Key,
-  HardDrive
+  HardDrive,
+  ListChecks
 } from 'lucide-vue-next'
 import {
   Select,
@@ -465,12 +466,15 @@ onUnmounted(() => {
 })
 
 // ========== 用户管理 ==========
+import { getAllPermissions, hasPermission, type PermissionType } from '@/constants/permissions'
+
 interface UserItem {
   id: number
   username: string
   email: string | null
   role: 'admin' | 'user'
   is_active: boolean
+  permissions: number
   created_at: string
 }
 
@@ -492,6 +496,45 @@ const creatingUser = ref(false)
 const showChangePassword = ref<number | null>(null)
 const newPassword = ref('')
 const changingPassword = ref(false)
+
+// 权限编辑
+const showPermissions = ref<number | null>(null)
+const editingPermissions = ref<number>(0)
+const savingPermissions = ref(false)
+
+// 权限选项列表
+const permissionOptions = getAllPermissions()
+
+function openPermissionsDialog(user: UserItem) {
+  showPermissions.value = user.id
+  editingPermissions.value = user.permissions || 0
+}
+
+function togglePermission(perm: PermissionType) {
+  if (hasPermission(editingPermissions.value, perm)) {
+    editingPermissions.value &= ~perm
+  } else {
+    editingPermissions.value |= perm
+  }
+}
+
+async function savePermissions() {
+  if (!showPermissions.value) return
+  savingPermissions.value = true
+  try {
+    await apiClient.put(`/auth/users/${showPermissions.value}`, null, {
+      params: { permissions: editingPermissions.value }
+    })
+    const user = userList.value.find(u => u.id === showPermissions.value)
+    if (user) user.permissions = editingPermissions.value
+    toast.success('权限已更新')
+    showPermissions.value = null
+  } catch (e: any) {
+    toast.error(e.response?.data?.detail || '保存失败')
+  } finally {
+    savingPermissions.value = false
+  }
+}
 
 async function fetchUsers() {
   usersLoading.value = true
@@ -974,6 +1017,19 @@ onMounted(() => fetchConfigs())
                           <Ban class="w-4 h-4" :class="!user.is_active ? 'text-red-500' : ''" />
                         </Button>
 
+                        <!-- 权限设置 -->
+                        <Button
+                          v-if="user.id !== currentUserId && user.id !== 1 && user.role !== 'admin'"
+                          variant="ghost"
+                          size="icon"
+                          class="w-8 h-8"
+                          @click="openPermissionsDialog(user)"
+                          :disabled="userActionLoading === user.id"
+                          title="权限设置"
+                        >
+                          <ListChecks class="w-4 h-4" :class="showPermissions === user.id ? 'text-primary' : ''" />
+                        </Button>
+
                         <!-- 删除 -->
                         <Button
                           v-if="user.id !== currentUserId && user.id !== 1"
@@ -1010,6 +1066,42 @@ onMounted(() => fetchConfigs())
                       <Button size="sm" @click="changePassword(showChangePassword!)" :disabled="changingPassword">
                         <Loader2 v-if="changingPassword" class="w-4 h-4 mr-1 animate-spin" />
                         确认修改
+                      </Button>
+                    </div>
+                  </div>
+
+                  <!-- 权限编辑弹出框 -->
+                  <div
+                    v-if="showPermissions"
+                    class="p-4 bg-muted/50 rounded-xl space-y-3 animate-in fade-in"
+                  >
+                    <div class="flex items-center gap-2 text-sm font-medium">
+                      <ListChecks class="w-4 h-4" />
+                      权限设置 - {{ userList.find(u => u.id === showPermissions)?.username }}
+                    </div>
+                    <p class="text-xs text-muted-foreground">
+                      管理员自动拥有所有权限。以下设置仅对普通用户生效。
+                    </p>
+                    <div class="space-y-2">
+                      <label
+                        v-for="perm in permissionOptions"
+                        :key="perm.value"
+                        class="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-muted/50"
+                      >
+                        <input
+                          type="checkbox"
+                          :checked="hasPermission(editingPermissions, perm.value)"
+                          @change="togglePermission(perm.value)"
+                          class="w-4 h-4 rounded accent-primary"
+                        />
+                        <span class="text-sm">{{ perm.name }}</span>
+                      </label>
+                    </div>
+                    <div class="flex justify-end gap-2">
+                      <Button variant="ghost" size="sm" @click="showPermissions = null">取消</Button>
+                      <Button size="sm" @click="savePermissions" :disabled="savingPermissions">
+                        <Loader2 v-if="savingPermissions" class="w-4 h-4 mr-1 animate-spin" />
+                        保存权限
                       </Button>
                     </div>
                   </div>

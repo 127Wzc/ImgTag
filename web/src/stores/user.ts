@@ -1,12 +1,14 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import apiClient from '@/api/client'
+import { Permission, hasPermission, type PermissionType } from '@/constants/permissions'
 
 export interface User {
     id: number
     username: string
     email: string | null
     role: 'admin' | 'user'
+    permissions: number
     api_key: string | null
 }
 
@@ -29,6 +31,20 @@ export const useUserStore = defineStore('user', () => {
     const isLoggedIn = computed(() => !!token.value && !!user.value)
     const isAdmin = computed(() => user.value?.role === 'admin')
     const username = computed(() => user.value?.username ?? '')
+
+    /**
+     * 检查用户是否拥有指定权限
+     * Admin 角色自动拥有所有权限
+     */
+    const checkPermission = (permission: PermissionType): boolean => {
+        if (user.value?.role === 'admin') return true
+        return hasPermission(user.value?.permissions ?? 0, permission)
+    }
+
+    /**
+     * 是否有上传权限
+     */
+    const canUpload = computed(() => checkPermission(Permission.UPLOAD_IMAGE))
 
     // Actions
     async function login(usernameOrEmail: string, password: string): Promise<void> {
@@ -78,6 +94,9 @@ export const useUserStore = defineStore('user', () => {
         isLoggedIn,
         isAdmin,
         username,
+        canUpload,
+        // Methods
+        checkPermission,
         // Actions
         login,
         register,

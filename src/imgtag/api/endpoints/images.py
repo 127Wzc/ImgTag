@@ -32,7 +32,8 @@ from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from imgtag.api.endpoints.auth import get_current_user, get_current_user_optional, require_admin
+from imgtag.api.endpoints.auth import get_current_user, get_current_user_optional, require_admin, require_permission
+from imgtag.core.permissions import Permission
 from imgtag.core.category_cache import get_category_code_cached
 from imgtag.core.logging_config import get_logger, get_perf_logger
 from imgtag.core.storage_constants import (
@@ -511,7 +512,7 @@ async def upload_and_analyze(
     category_id: Optional[int] = Form(default=None, description="主分类ID"),
     is_public: bool = Form(default=True, description="是否公开可见"),
     endpoint_id: Optional[int] = Form(default=None, description="目标存储端点ID"),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission(Permission.UPLOAD_IMAGE)),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Upload and analyze image file (requires login).
