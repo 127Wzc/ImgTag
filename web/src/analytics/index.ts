@@ -6,6 +6,7 @@
 import Analytics from 'analytics'
 import googleAnalytics from '@analytics/google-analytics'
 import { umamiPlugin } from './plugins/umami'
+import { getRuntimeConfig } from '@/utils/runtime-config'
 
 export type { EventProperties, PageViewEvent, AnalyticsEvent } from './types'
 export { umamiPlugin, type UmamiPluginConfig } from './plugins'
@@ -15,12 +16,12 @@ export const analytics = Analytics({
     debug: import.meta.env.DEV,
     plugins: [
         umamiPlugin({
-            websiteId: import.meta.env.VITE_UMAMI_WEBSITE_ID,
-            host: import.meta.env.VITE_UMAMI_HOST,
+            websiteId: getRuntimeConfig('VITE_UMAMI_WEBSITE_ID'),
+            host: getRuntimeConfig('VITE_UMAMI_HOST'),
             autoTrack: true,
         }),
-        ...(import.meta.env.VITE_GA_MEASUREMENT_ID
-            ? [googleAnalytics({ measurementIds: [import.meta.env.VITE_GA_MEASUREMENT_ID] })]
+        ...(getRuntimeConfig('VITE_GA_MEASUREMENT_ID')
+            ? [googleAnalytics({ measurementIds: [getRuntimeConfig('VITE_GA_MEASUREMENT_ID')!] })]
             : []),
     ],
 })
@@ -28,8 +29,8 @@ export const analytics = Analytics({
 export function initAnalytics(): void {
     if (import.meta.env.DEV) {
         console.log('[Analytics] Initialized:', {
-            umami: !!import.meta.env.VITE_UMAMI_WEBSITE_ID,
-            ga: !!import.meta.env.VITE_GA_MEASUREMENT_ID,
+            umami: !!getRuntimeConfig('VITE_UMAMI_WEBSITE_ID'),
+            ga: !!getRuntimeConfig('VITE_GA_MEASUREMENT_ID'),
         })
     }
 }

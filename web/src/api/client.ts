@@ -1,5 +1,6 @@
 import axios from 'axios'
 import type { AxiosInstance, InternalAxiosRequestConfig, AxiosResponse } from 'axios'
+import { getRuntimeConfig } from '@/utils/runtime-config'
 
 /**
  * Axios 实例配置
@@ -10,7 +11,7 @@ import type { AxiosInstance, InternalAxiosRequestConfig, AxiosResponse } from 'a
  * VITE_API_BASE_URL: 只需配置域名，如 https://api.example.com
  */
 const API_PREFIX = '/api/v1'
-const baseUrl = import.meta.env.VITE_API_BASE_URL
+const baseUrl = getRuntimeConfig('VITE_API_BASE_URL')
 const apiClient: AxiosInstance = axios.create({
     baseURL: baseUrl ? `${baseUrl.replace(/\/$/, '')}${API_PREFIX}` : API_PREFIX,
     timeout: 30000,

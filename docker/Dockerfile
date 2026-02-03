@@ -73,7 +73,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 FROM runtime-base AS slim
 COPY --from=deps-core /app/.venv /app/.venv
 COPY --from=web-builder /app/web/dist ./static
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 ENV PATH="/app/.venv/bin:$PATH" STATIC_DIR=/app/static
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["sh", "-c", "alembic upgrade head && uvicorn imgtag.main:app --host 0.0.0.0 --port 8000"]
 
 # -----------------------------------------------------------
@@ -81,7 +84,10 @@ CMD ["sh", "-c", "alembic upgrade head && uvicorn imgtag.main:app --host 0.0.0.0
 FROM runtime-base AS full
 COPY --from=deps-full /app/.venv /app/.venv
 COPY --from=web-builder /app/web/dist ./static
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 ENV PATH="/app/.venv/bin:$PATH" STATIC_DIR=/app/static
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["sh", "-c", "alembic upgrade head && uvicorn imgtag.main:app --host 0.0.0.0 --port 8000"]
 
 # -----------------------------------------------------------

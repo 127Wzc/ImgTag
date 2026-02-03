@@ -1,8 +1,15 @@
 {
-    "rewrites": [
+    "routes": [
         {
-            "source": "/:path*",
-            "destination": "/index.html"
+            "src": "/config\\.js",
+            "dest": "/api/config.js"
+        },
+        {
+            "handle": "filesystem"
+        },
+        {
+            "src": "/(.*)",
+            "dest": "/index.html"
         }
     ]
 }
