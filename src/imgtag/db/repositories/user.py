@@ -90,6 +90,7 @@ class UserRepository(BaseRepository[User]):
         *,
         email: Optional[str] = None,
         role: str = "user",
+        permissions: Optional[int] = None,
     ) -> User:
         """Create a new user.
 
@@ -99,6 +100,7 @@ class UserRepository(BaseRepository[User]):
             password_hash: Hashed password (salt$hash format).
             email: Optional email address.
             role: User role (user/admin).
+            permissions: Permission bitmask (defaults to DB default if None).
 
         Returns:
             Created User instance.
@@ -106,13 +108,19 @@ class UserRepository(BaseRepository[User]):
         Raises:
             IntegrityError: If username or email already exists.
         """
+        create_kwargs = {
+            "username": username,
+            "password_hash": password_hash,
+            "email": email,
+            "role": role,
+            "is_active": True,
+        }
+        if permissions is not None:
+            create_kwargs["permissions"] = permissions
+
         return await self.create(
             session,
-            username=username,
-            password_hash=password_hash,
-            email=email,
-            role=role,
-            is_active=True,
+            **create_kwargs,
         )
 
     async def update_password(

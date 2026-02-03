@@ -14,6 +14,7 @@ import { useUserStore } from '@/stores'
 import { toast } from 'vue-sonner'
 import { getErrorMessage } from '@/utils/api-error'
 import CopyToast from '@/components/ui/CopyToast.vue'
+import { usePermission } from '@/composables/usePermission'
 
 // 图片信息接口
 export interface ImageInfo {
@@ -53,12 +54,15 @@ const showUnsavedConfirm = ref(false)
 
 // 用户权限
 const userStore = useUserStore()
+const { canCreateTags } = usePermission()
 
 const canEdit = computed(() => {
   if (!props.image) return false
   if (userStore.isAdmin) return true
   return props.image.uploaded_by === userStore.user?.id
 })
+
+const canEditTags = computed(() => canEdit.value && canCreateTags.value)
 
 // 复制成功提示
 const showCopied = ref(false)
@@ -159,13 +163,14 @@ function autoResizeTextarea() {
 }
 
 async function showAddTag() {
-  if (!canEdit.value) return
+  if (!canEditTags.value) return
   showTagInput.value = true
   await nextTick()
   tagInputRef.value?.focus()
 }
 
 async function addTag() {
+  if (!canEditTags.value) return
   if (isComposing.value) return
 
   const tagName = newTagInput.value.trim()
@@ -200,7 +205,7 @@ function selectSuggestion(tag: { id: number; name: string }) {
 }
 
 function removeTag(tagId: number) {
-  if (!canEdit.value) return
+  if (!canEditTags.value) return
   draftNormalTags.value = draftNormalTags.value.filter(t => t.id !== tagId)
 }
 
@@ -516,7 +521,7 @@ onUnmounted(() => {
                 <div class="space-y-3">
                   <div class="flex items-center justify-between text-xs text-white/40 uppercase tracking-wider font-medium">
                     <span>标签</span>
-                    <span v-if="canEdit" class="text-[10px] bg-white/10 px-1.5 py-0.5 rounded">{{ draftNormalTags.length }}</span>
+                    <span v-if="canEditTags" class="text-[10px] bg-white/10 px-1.5 py-0.5 rounded">{{ draftNormalTags.length }}</span>
                   </div>
 
                   <div class="flex flex-wrap gap-2">
@@ -538,7 +543,7 @@ onUnmounted(() => {
                       <Hash class="w-3 h-3 mr-1 opacity-30 group-hover:opacity-50" />
                       {{ tag.name }}
                       <button
-                        v-if="canEdit"
+                        v-if="canEditTags"
                         @click.stop="removeTag(tag.id)"
                         class="ml-1.5 p-0.5 rounded-full hover:bg-white/10 text-white/20 hover:text-white/60 opacity-0 group-hover:opacity-100 transition-all"
                       >
@@ -547,7 +552,7 @@ onUnmounted(() => {
                     </div>
 
                     <!-- 添加标签 -->
-                    <div v-if="canEdit" class="relative inline-block">
+                    <div v-if="canEditTags" class="relative inline-block">
                       <div v-if="showTagInput" class="flex items-center">
                         <input
                           ref="tagInputRef"

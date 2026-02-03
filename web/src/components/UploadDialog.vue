@@ -9,6 +9,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { useUploadImage, useUploadZip, useUploadFromUrl, useCategories } from '@/api/queries'
 import apiClient from '@/api/client'
 import { useUserStore } from '@/stores/user'
+import { usePermission } from '@/composables/usePermission'
+import { Permission } from '@/constants/permissions'
 import type { UploadAnalyzeResponse } from '@/types'
 import { 
   Upload as UploadIcon, 
@@ -36,6 +38,7 @@ const emit = defineEmits<{
 
 const userStore = useUserStore()
 const isAdmin = computed(() => userStore.isAdmin)
+const { canUseAIAnalyze, checkPermissionWithToast } = usePermission()
 
 // 上传模式
 type UploadMode = 'file' | 'zip' | 'url'
@@ -119,7 +122,12 @@ const uploadMutation = useUploadImage()
 const zipMutation = useUploadZip()
 const urlMutation = useUploadFromUrl()
 
-const shouldAnalyze = computed(() => isAdmin.value && autoAnalyze.value)
+const shouldAnalyze = computed(() => canUseAIAnalyze.value && autoAnalyze.value)
+
+function toggleAutoAnalyze() {
+  if (!checkPermissionWithToast(Permission.AI_ANALYZE, 'AI 分析')) return
+  autoAnalyze.value = !autoAnalyze.value
+}
 
 // 关闭弹框时清理状态
 watch(() => props.open, (open) => {
@@ -352,17 +360,28 @@ const pendingCount = computed(() => files.value.filter(f => f.status === 'pendin
             </button>
           </div>
           <!-- AI 分析开关 -->
-          <div class="flex items-center gap-2">
+          <div
+            class="flex items-center gap-2"
+            :title="canUseAIAnalyze ? 'AI 分析' : '未开通 AI 分析权限'"
+          >
             <Sparkles class="w-4 h-4 text-muted-foreground" />
             <span class="text-muted-foreground">AI 分析</span>
+            <div v-if="!canUseAIAnalyze" class="flex items-center gap-1 text-xs text-muted-foreground">
+              <Lock class="w-3.5 h-3.5" />
+              <span>未开通</span>
+            </div>
             <button
-              @click="autoAnalyze = !autoAnalyze"
+              @click="toggleAutoAnalyze"
               class="relative w-9 h-5 rounded-full transition-colors"
-              :class="autoAnalyze ? 'bg-green-500' : 'bg-muted-foreground/30'"
+              :aria-disabled="!canUseAIAnalyze"
+              :class="[
+                autoAnalyze && canUseAIAnalyze ? 'bg-green-500' : 'bg-muted-foreground/30',
+                !canUseAIAnalyze ? 'opacity-60 cursor-not-allowed' : ''
+              ]"
             >
               <span 
                 class="absolute top-0.5 w-4 h-4 bg-white rounded-full transition-all shadow"
-                :class="autoAnalyze ? 'left-[18px]' : 'left-0.5'"
+                :class="autoAnalyze && canUseAIAnalyze ? 'left-[18px]' : 'left-0.5'"
               />
             </button>
           </div>

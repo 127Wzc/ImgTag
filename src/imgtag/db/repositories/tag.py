@@ -102,6 +102,62 @@ class TagRepository(BaseRepository[Tag]):
         )
         return new_tag, True
 
+    async def get_missing_names(
+        self,
+        session: AsyncSession,
+        names: Sequence[str],
+        *,
+        level: int | None = None,
+    ) -> list[str]:
+        """Return tag names that do not exist yet.
+
+        Args:
+            session: Database session.
+            names: Tag names to check.
+            level: 历史参数（兼容）。由于 Tag.name 全局唯一，level 不能用于“同名不同层级”的存在性判断；
+                因此即使提供该参数，也不会把“存在但 level 不匹配”的名称当作 missing。
+
+        Returns:
+            List of missing tag names (unique, sorted).
+        """
+        normalized = sorted({n.strip() for n in names if n and n.strip()})
+        if not normalized:
+            return []
+
+        # 由于 Tag.name 全局唯一，存在性应按 name 判断即可。
+        # level 参数仅用于兼容旧调用方，不参与过滤；否则会把“存在但 level 不匹配”的名称误判为 missing，
+        # 从而触发 IntegrityError / 权限误判。
+        stmt = select(Tag.name, Tag.level).where(Tag.name.in_(normalized))
+        result = await session.execute(stmt)
+        existing_levels = {row.name: row.level for row in result}
+
+        # 兼容：保留该参数，方便上层做额外校验（但这里不改变 missing 的定义）
+        _ = level
+
+        return [name for name in normalized if name not in existing_levels]
+
+    async def get_name_levels(
+        self,
+        session: AsyncSession,
+        names: Sequence[str],
+    ) -> dict[str, int]:
+        """按标签名查询已存在标签的 level。
+
+        Args:
+            session: 数据库会话。
+            names: 标签名列表。
+
+        Returns:
+            已存在标签的 {tag_name: level} 映射。
+        """
+        normalized = sorted({n.strip() for n in names if n and n.strip()})
+        if not normalized:
+            return {}
+
+        stmt = select(Tag.name, Tag.level).where(Tag.name.in_(normalized))
+        result = await session.execute(stmt)
+        return {row.name: row.level for row in result}
+
 
     async def get_all_with_count(
         self,

@@ -28,11 +28,14 @@ from fastapi import (
     UploadFile,
 )
 from pydantic import BaseModel
-from sqlalchemy import delete as sa_delete, select
+from sqlalchemy import and_, delete as sa_delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from imgtag.api.endpoints.auth import get_current_user, get_current_user_optional, require_admin
+from imgtag.api.endpoints.auth import get_current_user, get_current_user_optional, require_admin, require_permission
+from imgtag.api.permission_guards import ensure_create_tags_if_missing, ensure_permission
+from imgtag.core.permissions import Permission
 from imgtag.core.category_cache import get_category_code_cached
 from imgtag.core.logging_config import get_logger, get_perf_logger
 from imgtag.core.storage_constants import (
@@ -214,6 +217,8 @@ async def create_image_manual(
     logger.info(f"创建图像: {image.image_url}")
 
     try:
+        await ensure_create_tags_if_missing(session, user, image.tags)
+
         # Generate vector embedding
         embedding_vector = await embedding_service.get_embedding_combined(
             image.description,
@@ -247,6 +252,8 @@ async def create_image_manual(
             "message": "图像创建成功",
             "process_time": f"{total_time:.4f}秒",
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"创建图像失败: {e}")
         raise HTTPException(status_code=500, detail=f"创建图像失败: {e}")
@@ -511,7 +518,7 @@ async def upload_and_analyze(
     category_id: Optional[int] = Form(default=None, description="主分类ID"),
     is_public: bool = Form(default=True, description="是否公开可见"),
     endpoint_id: Optional[int] = Form(default=None, description="目标存储端点ID"),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission(Permission.UPLOAD_IMAGE)),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Upload and analyze image file (requires login).
@@ -541,6 +548,20 @@ async def upload_and_analyze(
     )
 
     try:
+        # 权限校验需在上传/落库前完成，避免产生副作用
+        final_tags = [t.strip() for t in tags.split(",") if t.strip()]
+        final_description = description
+
+        await ensure_create_tags_if_missing(session, user, final_tags)
+
+        requested_analysis = auto_analyze and not skip_analyze
+        if requested_analysis:
+            has_valid_tags = bool([t for t in final_tags if t and t.strip()])
+            has_valid_description = bool(final_description and final_description.strip())
+            user_provided_full = has_valid_tags and has_valid_description
+            if not user_provided_full:
+                ensure_permission(user, Permission.AI_ANALYZE)
+
         file_content = await file.read()
 
         # Calculate hash early for object key generation
@@ -611,9 +632,6 @@ async def upload_and_analyze(
                 # 远程上传成功
                 location_object_key = full_object_key
                 access_url = None  # 远程端点无本地访问 URL
-
-        final_tags = [t.strip() for t in tags.split(",") if t.strip()]
-        final_description = description
 
         # Create image record (without legacy storage fields)
         t1 = time.time()
@@ -1183,6 +1201,7 @@ async def update_image(
             logger.info(f"标签关联更新完成: changes={changes}")
         elif image_update.tags is not None:
             # 旧流程：按名称更新（兼容）
+            await ensure_create_tags_if_missing(session, current_user, image_update.tags)
             await image_tag_repository.set_image_tags(
                 session,
                 image_id,
@@ -1293,14 +1312,46 @@ async def add_tag_to_image(
             resolved_tag = await tag_repository.get_by_id(session, tag_id)
             if not resolved_tag:
                 raise HTTPException(status_code=404, detail=f"未找到 ID 为 {tag_id} 的标签")
+            if resolved_tag.level != 2:
+                raise HTTPException(status_code=400, detail="该接口仅支持添加普通标签（level=2）")
         else:
-            # 按名称查找或创建（合并为单次操作）
-            tag_name = tag_name.strip()
-            resolved_tag, is_new = await tag_repository.get_or_create_with_flag(
-                session, tag_name, level=2, source="user"
-            )
-            if is_new:
-                logger.info(f"创建新标签: id={resolved_tag.id}, name={tag_name}")
+            # 按名称查找；不存在时才允许创建 level=2 普通标签
+            tag_name = (tag_name or "").strip()
+            if not tag_name:
+                raise HTTPException(status_code=400, detail="标签名不能为空")
+
+            existing = await tag_repository.get_by_name(session, tag_name)
+            if existing:
+                if existing.level != 2:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="标签名已被主分类/分辨率占用，不能作为普通标签使用",
+                    )
+                resolved_tag = existing
+            else:
+                # 仅当确实需要创建新标签时才要求 CREATE_TAGS 权限
+                ensure_permission(current_user, Permission.CREATE_TAGS)
+                try:
+                    resolved_tag = await tag_repository.create(
+                        session,
+                        name=tag_name,
+                        level=2,
+                        source="user",
+                    )
+                    is_new = True
+                    logger.info(f"创建新标签: id={resolved_tag.id}, name={tag_name}")
+                except IntegrityError:
+                    # 并发情况下可能已被其他请求创建，回滚后重新查询
+                    await session.rollback()
+                    existing = await tag_repository.get_by_name(session, tag_name)
+                    if not existing:
+                        raise HTTPException(status_code=500, detail="创建标签失败")
+                    if existing.level != 2:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="标签名已被主分类/分辨率占用，不能作为普通标签使用",
+                        )
+                    resolved_tag = existing
 
         # 使用 upsert 避免先查询再插入
         stmt = pg_insert(ImageTag).values(
@@ -1599,6 +1650,9 @@ async def batch_update_tags(
         }
 
     try:
+        # 无 CREATE_TAGS 权限时，禁止隐式创建新标签
+        await ensure_create_tags_if_missing(session, current_user, request.tags)
+
         # Bulk tag operation with permission filter (SQL 层过滤)
         owner_id = get_owner_filter(current_user)
         
@@ -1634,31 +1688,33 @@ async def batch_update_tags(
             "tags_updated": updated,
             "process_time": f"{process_time:.4f}秒",
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"批量更新标签失败: {e}")
         raise HTTPException(status_code=500, detail=f"批量更新标签失败: {e}")
 
 
 class BatchSetCategoryRequest(BaseModel):
-    """Request for batch category update."""
+    """批量设置主分类请求。"""
 
     image_ids: list[int]
-    category_id: int  # Target category tag_id (level=0)
+    category_id: int  # 目标主分类 tag_id（level=0）
 
 
 @router.post("/batch/set-category", response_model=dict[str, Any])
 async def batch_set_category(
     request: BatchSetCategoryRequest,
-    admin: dict = Depends(require_admin),
+    current_user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Batch set image category (admin only).
+    """批量设置主分类（谁上传谁管理，管理员不限制）。
 
-    Uses bulk WHERE IN() operations instead of N loops.
+    使用 bulk WHERE IN() 操作，避免 N 次循环查询/更新。
 
     Args:
         request: Batch category request.
-        admin: Admin user.
+        current_user: Current user.
         session: Database session.
 
     Returns:
@@ -1670,12 +1726,12 @@ async def batch_set_category(
         f"分类ID {request.category_id}"
     )
 
-    # Verify category exists and is level=0
+    # 校验分类存在且为 level=0
     category = await tag_repository.get_by_id(session, request.category_id)
     if not category:
         raise HTTPException(status_code=404, detail="目标分类不存在")
     if category.level != 0:
-        raise HTTPException(status_code=400, detail="目标标签不是主分类 (level=0)")
+        raise HTTPException(status_code=400, detail="目标标签不是主分类（level=0）")
 
     if not request.image_ids:
         return {
@@ -1686,27 +1742,51 @@ async def batch_set_category(
         }
 
     try:
-        # Bulk delete old level=0 tags: O(1) query
+        # 非管理员只能修改自己上传的图片；管理员不受限制
+        owner_id = get_owner_filter(current_user)
+        image_ids = request.image_ids
+        if owner_id is not None:
+            from imgtag.models.image import Image
+
+            owner_stmt = select(Image.id).where(
+                and_(
+                    Image.id.in_(request.image_ids),
+                    Image.uploaded_by == owner_id,
+                )
+            )
+            owner_result = await session.execute(owner_stmt)
+            image_ids = [row.id for row in owner_result]
+
+        if not image_ids:
+            return {
+                "message": "无可操作图片（仅允许修改自己上传的图片）",
+                "success_count": 0,
+                "fail_count": len(request.image_ids),
+                "process_time": f"{(time.time() - start_time):.4f}秒",
+            }
+
+        # 批量删除旧的 level=0 分类标签（O(1) query）
         del_stmt = (
             sa_delete(ImageTag)
             .where(
-                ImageTag.image_id.in_(request.image_ids),
+                ImageTag.image_id.in_(image_ids),
                 ImageTag.tag_id.in_(select(Tag.id).where(Tag.level == 0)),
             )
         )
         await session.execute(del_stmt)
 
-        # Bulk insert new category: O(1) query
+        # 批量插入新的分类标签（O(1) query）
         now = datetime.now(timezone.utc)
         insert_data = [
             {
                 "image_id": image_id,
                 "tag_id": request.category_id,
                 "source": "user",
+                "added_by": current_user.get("id"),
                 "sort_order": 0,
                 "added_at": now,
             }
-            for image_id in request.image_ids
+            for image_id in image_ids
         ]
 
         insert_stmt = pg_insert(ImageTag).values(insert_data)
@@ -1720,12 +1800,14 @@ async def batch_set_category(
         perf_logger.info(f"批量设置分类耗时: {process_time:.4f}秒")
 
         return {
-            "message": f"批量设置主分类完成: {len(request.image_ids)} 张图片",
-            "success_count": len(request.image_ids),
-            "fail_count": 0,
+            "message": f"批量设置主分类完成: {len(image_ids)} 张图片",
+            "success_count": len(image_ids),
+            "fail_count": max(0, len(request.image_ids) - len(image_ids)),
             "category_name": category.name,
             "process_time": f"{process_time:.4f}秒",
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"批量设置分类失败: {e}")
         raise HTTPException(status_code=500, detail=f"批量设置分类失败: {e}")

@@ -18,6 +18,8 @@ from imgtag.schemas import Task, TaskResponse
 from imgtag.schemas.base import PaginatedResponse
 from imgtag.services.task_queue import task_queue
 from imgtag.services.task_service import task_service
+from imgtag.api.permission_guards import ensure_permission
+from imgtag.core.permissions import Permission
 
 logger = get_logger(__name__)
 
@@ -115,6 +117,9 @@ async def retry_task(
             status_code=400, 
             detail=f"任务类型 {task.type} 不支持重试"
         )
+
+    if task.type == "analyze_image":
+        ensure_permission(user, Permission.AI_ANALYZE)
     
     # 尝试重试
     success = await task_queue.retry_task(task_id)
@@ -126,4 +131,3 @@ async def retry_task(
         )
     
     return {"message": "任务已加入重试队列", "task_id": task_id}
-

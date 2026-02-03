@@ -3,6 +3,9 @@ import { computed, ref, watch } from 'vue'
 import { useTagStats, useCreateTag, useRenameTag, useDeleteTag, useUpdateTagCounts } from '@/api/queries'
 import { useQuery } from '@tanstack/vue-query'
 import apiClient from '@/api/client'
+import { useUserStore } from '@/stores'
+import { usePermission } from '@/composables/usePermission'
+import { Permission } from '@/constants/permissions'
 import type { Tag } from '@/types'
 import { Button } from '@/components/ui/button'
 import { toast } from 'vue-sonner'
@@ -26,6 +29,8 @@ import {
 } from 'lucide-vue-next'
 
 const PAGE_SIZE = 200
+const userStore = useUserStore()
+const { canCreateTags, checkPermissionWithToast } = usePermission()
 
 // 统计数据
 const { data: stats, isLoading: statsLoading } = useTagStats()
@@ -68,6 +73,23 @@ const totalPages = computed(() => Math.ceil(totalCount.value / PAGE_SIZE))
 // 是否需要显示分页
 const showPagination = computed(() => totalCount.value > PAGE_SIZE)
 
+const canManageActiveLevel = computed(() => {
+  if (activeLevel.value === 2) return canCreateTags.value
+  return userStore.isAdmin
+})
+
+function openCreateDialog() {
+  if (activeLevel.value === 2) {
+    if (!checkPermissionWithToast(Permission.CREATE_TAGS, '新建标签')) return
+  } else {
+    if (!userStore.isAdmin) {
+      toast.error('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
+      return
+    }
+  }
+  showCreateDialog.value = true
+}
+
 // Tab 配置
 const tabs = computed(() => [
   { level: 0, label: '主分类', icon: Folder, color: 'text-primary', count: stats.value?.categories ?? 0 },
@@ -80,6 +102,14 @@ const editingTagId = ref<number | null>(null)
 const editingName = ref('')
 
 function startEdit(tag: Tag) {
+  if (!canManageActiveLevel.value) {
+    if (activeLevel.value === 2) {
+      checkPermissionWithToast(Permission.CREATE_TAGS, '修改标签')
+    } else {
+      toast.error('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
+    }
+    return
+  }
   // 对于分类(level=0)，使用弹窗编辑；否则内联编辑
   if (activeLevel.value === 0) {
     showCategoryEdit(tag)
@@ -120,6 +150,11 @@ const renameTagMutation = useRenameTag()
 async function handleRename() {
   if (!editingTagId.value || !editingName.value.trim()) return
   try {
+    if (activeLevel.value === 2 && !checkPermissionWithToast(Permission.CREATE_TAGS, '修改标签')) return
+    if (activeLevel.value !== 2 && !userStore.isAdmin) {
+      toast.error('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
+      return
+    }
     await renameTagMutation.mutateAsync({ 
       id: editingTagId.value, 
       name: editingName.value.trim() 
@@ -134,6 +169,10 @@ async function handleRename() {
 async function handleCategorySave() {
   if (!editingCategory.value) return
   try {
+    if (!userStore.isAdmin) {
+      toast.error('需要管理员权限', { description: '主分类仅管理员可管理' })
+      return
+    }
     await renameTagMutation.mutateAsync({
       id: editingCategory.value.id,
       name: categoryEditForm.value.name.trim() || undefined,
@@ -155,6 +194,11 @@ const createTagMutation = useCreateTag()
 async function handleCreateTag() {
   if (!newTagName.value.trim()) return
   try {
+    if (activeLevel.value === 2 && !checkPermissionWithToast(Permission.CREATE_TAGS, '新建标签')) return
+    if (activeLevel.value !== 2 && !userStore.isAdmin) {
+      toast.error('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
+      return
+    }
     await createTagMutation.mutateAsync({
       name: newTagName.value.trim(),
       level: activeLevel.value,
@@ -173,6 +217,11 @@ const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirm
 // 删除标签
 const deleteTagMutation = useDeleteTag()
 async function handleDeleteTag(tag: Tag) {
+  if (tag.level === 2 && !checkPermissionWithToast(Permission.CREATE_TAGS, '删除标签')) return
+  if (tag.level !== 2 && !userStore.isAdmin) {
+    toast.error('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
+    return
+  }
   const confirmed = await confirm({
     title: '删除标签',
     message: `确定删除标签 "${tag.name}" 吗？`,
@@ -225,7 +274,12 @@ const isLoading = computed(() => statsLoading.value || tagsLoading.value)
             <RefreshCw class="w-4 h-4 mr-2" :class="updateCountsMutation.isPending.value && 'animate-spin'" />
             同步计数
           </Button>
-          <Button size="sm" class="h-9 gap-1.5" @click="showCreateDialog = true">
+          <Button
+            size="sm"
+            class="h-9 gap-1.5"
+            :disabled="!canManageActiveLevel"
+            @click="openCreateDialog"
+          >
             <Plus class="w-4 h-4" />
             新建标签
           </Button>
@@ -299,7 +353,7 @@ const isLoading = computed(() => statsLoading.value || tagsLoading.value)
               <span>{{ tag.name }}</span>
               <span class="text-xs opacity-60">{{ tag.usage_count }}</span>
               
-              <div class="hidden group-hover:flex items-center gap-0.5 ml-1">
+              <div v-if="canManageActiveLevel" class="hidden group-hover:flex items-center gap-0.5 ml-1">
                 <button 
                   class="p-0.5 hover:text-foreground rounded"
                   @click.stop="startEdit(tag)"
@@ -324,7 +378,13 @@ const isLoading = computed(() => statsLoading.value || tagsLoading.value)
             class="w-10 h-10 mx-auto mb-3 opacity-50"
           />
           <p class="text-sm">暂无{{ tabs.find(t => t.level === activeLevel)?.label }}</p>
-          <Button variant="outline" size="sm" class="mt-3" @click="showCreateDialog = true">
+          <Button
+            variant="outline"
+            size="sm"
+            class="mt-3"
+            :disabled="!canManageActiveLevel"
+            @click="openCreateDialog"
+          >
             <Plus class="w-4 h-4 mr-1" />
             创建
           </Button>

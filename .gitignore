@@ -1,5 +1,7 @@
 # agen
 .agent/*
+# Claude 本地配置（包含权限白名单/历史命令等敏感信息）
+.claude/
 # 环境变量
 .env
 
@@ -43,4 +45,3 @@ dist/
 
 # 模型文件
 models/*
-

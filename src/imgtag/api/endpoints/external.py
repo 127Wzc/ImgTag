@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.dependencies import require_api_key
 from imgtag.core.logging_config import get_logger, get_perf_logger
+from imgtag.api.permission_guards import ensure_create_tags_if_missing, ensure_permission
+from imgtag.core.permissions import Permission
 from imgtag.core.storage_constants import StorageProvider
 from imgtag.db import get_async_session
 from imgtag.db.repositories import (
@@ -135,6 +137,17 @@ async def analyze_image_from_url(
     logger.info(f"[外部API] 添加图片: {request.image_url}, user={username}")
 
     try:
+        await ensure_create_tags_if_missing(session, api_user, request.tags)
+
+        # 权限校验需在上传/落库前完成，避免产生副作用
+        skip_analyze = not request.auto_analyze  # 绝对优先级
+        has_valid_tags = bool([t for t in request.tags if t and t.strip()])
+        has_valid_description = bool(request.description and request.description.strip())
+        user_provided_full = has_valid_tags and has_valid_description
+        need_analysis = request.auto_analyze and not user_provided_full
+        if need_analysis:
+            ensure_permission(api_user, Permission.AI_ANALYZE)
+
         # 获取目标端点
         target_endpoint, err = await storage_endpoint_repository.resolve_upload_endpoint(
             session, request.endpoint_id
@@ -240,17 +253,6 @@ async def analyze_image_from_url(
         )
 
         # 判断是否需要 AI 分析
-        # - auto_analyze=false 有绝对优先级，直接跳过
-        # - 若用户提供了 tags + description，无需 AI 分析，只生成向量
-        # - 若只提供 tags，需要 AI 分析补充并合并
-        # - 若都不提供，需要完整 AI 分析
-        # 注意：空字符串和空白字符串都不算有效值
-        skip_analyze = not request.auto_analyze  # 绝对优先级
-        has_valid_tags = bool([t for t in request.tags if t and t.strip()])
-        has_valid_description = bool(request.description and request.description.strip())
-        user_provided_full = has_valid_tags and has_valid_description
-        need_analysis = request.auto_analyze and not user_provided_full
-        
         if need_analysis:
             # 加入 AI 分析任务队列
             # - 如果用户提供了部分标签，AI 会补充并合并
@@ -394,4 +396,3 @@ async def get_image_info(
         "tags": [t.name for t in image.tags if t.level == 2],
         "created_at": image.created_at.isoformat() if image.created_at else None,
     }
-
