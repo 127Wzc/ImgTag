@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.core.logging_config import get_logger
 from imgtag.core.config_cache import config_cache
-from imgtag.core.permissions import Permission, check_permission
+from imgtag.core.permissions import Permission, check_permission, permission_denied_detail
 from imgtag.db import get_async_session
 from imgtag.db.repositories import user_repository
 from imgtag.models.user import User
@@ -149,7 +149,7 @@ def require_permission(permission: Permission):
         if not check_permission(user, permission):
             raise HTTPException(
                 status_code=403,
-                detail=f"缺少权限: {permission.name}",
+                detail=permission_denied_detail(permission),
             )
         return user
 
@@ -238,6 +238,8 @@ async def register(
             username=data.username,
             password_hash=password_hash,
             email=data.email,
+            role="user",
+            permissions=int(Permission.DEFAULT),
         )
         logger.info(f"用户注册成功: {data.username} (ID: {user.id})")
         return {"message": "注册成功", "user_id": user.id}
@@ -407,6 +409,7 @@ async def create_user_by_admin(
             password_hash=password_hash,
             email=data.email,
             role=data.role or "user",
+            permissions=data.permissions if data.permissions is not None else int(Permission.DEFAULT),
         )
         return {"message": "创建成功", "user_id": user.id}
     except Exception as e:

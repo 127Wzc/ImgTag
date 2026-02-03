@@ -19,8 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.dependencies import require_api_key
 from imgtag.core.logging_config import get_logger
+from imgtag.core.permissions import (
+    Permission,
+    check_permission,
+    permission_denied_detail,
+    permission_denied_with_missing_detail,
+)
 from imgtag.db import get_async_session
-from imgtag.db.repositories import image_repository
+from imgtag.db.repositories import image_repository, tag_repository
 from imgtag.services.storage_service import storage_service
 from imgtag.services.upload_service import upload_service
 from imgtag.services.task_queue import task_queue
@@ -201,7 +207,8 @@ _connections: dict[str, MCPConnection] = {}
 async def execute_tool(
     name: str, 
     arguments: dict,
-    session: AsyncSession
+    session: AsyncSession,
+    api_user: dict,
 ) -> dict:
     """执行 Tool 调用，复用现有 Repository 逻辑"""
     
@@ -291,6 +298,32 @@ async def execute_tool(
         category_id = arguments.get("category_id")  # 主分类 ID
         auto_analyze = arguments.get("auto_analyze", True)
         is_public = arguments.get("is_public", True)  # 是否公开
+
+        # 权限校验需在上传/落库前完成，避免产生副作用
+        has_valid_tags = bool([t for t in tags if t and str(t).strip()])
+        has_valid_desc = bool(description and str(description).strip())
+        need_analysis = auto_analyze and not (has_valid_tags and has_valid_desc)
+        if need_analysis and not check_permission(api_user, Permission.AI_ANALYZE):
+            raise ValueError(permission_denied_detail(Permission.AI_ANALYZE))
+
+        if tags:
+            normalized_tags = [t.strip() for t in tags if t and str(t).strip()]
+            name_levels = await tag_repository.get_name_levels(session, normalized_tags)
+            reserved = [name for name, level in name_levels.items() if level in (0, 1)]
+            if reserved:
+                preview = ", ".join(reserved[:10])
+                suffix = "..." if len(reserved) > 10 else ""
+                raise ValueError(f"标签名已被主分类/分辨率占用，不能作为普通标签使用: {preview}{suffix}")
+
+            missing = [name for name in sorted(set(normalized_tags)) if name not in name_levels]
+            if missing and not check_permission(api_user, Permission.CREATE_TAGS):
+                raise ValueError(
+                    permission_denied_with_missing_detail(
+                        Permission.CREATE_TAGS,
+                        missing,
+                        item_label="标签",
+                    )
+                )
         
         # 下载并保存图片
         import hashlib
@@ -334,7 +367,7 @@ async def execute_tool(
                 sync_status="synced",
                 synced_at=datetime.now(tz.utc),
             )
-        
+
         # 设置标签
         from imgtag.db.repositories import image_tag_repository
         if tags:
@@ -351,10 +384,6 @@ async def execute_tool(
         await session.commit()
         
         # 判断是否需要 AI 分析
-        has_valid_tags = bool([t for t in tags if t and t.strip()])
-        has_valid_desc = bool(description and description.strip())
-        need_analysis = auto_analyze and not (has_valid_tags and has_valid_desc)
-        
         if need_analysis:
             await task_queue.add_tasks([new_image.id])
             status = "已加入 AI 分析队列"
@@ -423,7 +452,7 @@ async def handle_message(
             arguments = params.get("arguments", {})
             
             try:
-                result = await execute_tool(tool_name, arguments, session)
+                result = await execute_tool(tool_name, arguments, session, connection.api_user)
                 return JsonRpcResponse(
                     id=request.id,
                     result={
@@ -559,4 +588,3 @@ async def mcp_message_endpoint(
         await connection.send(response.model_dump(exclude_none=True))
     
     return {"status": "ok"}
-

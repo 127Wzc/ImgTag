@@ -5,6 +5,7 @@
 """
 
 from enum import IntFlag
+from typing import Sequence
 
 
 class Permission(IntFlag):
@@ -15,23 +16,29 @@ class Permission(IntFlag):
 
     Attributes:
         UPLOAD_IMAGE: 允许上传图片
-        CREATE_TAGS: 允许新建标签（预留）
-        AI_ANALYZE: 允许 AI 分析（预留）
-        AI_SEARCH: 允许智能搜索（预留）
+        CREATE_TAGS: 允许新建标签
+        AI_ANALYZE: 允许 AI 分析
     """
 
     # === 图片权限 ===
     UPLOAD_IMAGE = 1 << 0  # 上传图片
 
-    # === 预留权限 ===
+    # === 功能权限 ===
     CREATE_TAGS = 1 << 1  # 新建标签
     AI_ANALYZE = 1 << 2  # AI 分析
-    AI_SEARCH = 1 << 3  # 智能搜索
 
     # === 预设组合 ===
     NONE = 0  # 无权限
-    DEFAULT = UPLOAD_IMAGE  # 默认权限（仅上传）
-    FULL = (1 << 4) - 1  # 所有当前权限 (0xF = 15)
+    FULL = (1 << 3) - 1  # 所有当前权限 (0x7 = 7)
+    DEFAULT = FULL  # 默认权限（全开）
+
+
+# 权限名称映射（用于友好的错误提示）
+PERMISSION_NAMES = {
+    Permission.UPLOAD_IMAGE: "上传图片",
+    Permission.CREATE_TAGS: "新建标签",
+    Permission.AI_ANALYZE: "AI 分析",
+}
 
 
 def has_permission(user_permissions: int, required: Permission) -> bool:
@@ -64,3 +71,34 @@ def check_permission(user: dict, required: Permission) -> bool:
         return True
     return has_permission(user.get("permissions", 0), required)
 
+
+def get_permission_name(permission: Permission) -> str:
+    """获取权限的友好名称。
+
+    Args:
+        permission: 权限枚举值。
+
+    Returns:
+        权限的中文名称，如果未找到则返回英文名称。
+    """
+    return PERMISSION_NAMES.get(permission, permission.name)
+
+
+def permission_denied_detail(permission: Permission) -> str:
+    """统一的无权限错误信息。"""
+    perm_name = get_permission_name(permission)
+    return f"暂无{perm_name}权限，请联系管理员开通"
+
+
+def permission_denied_with_missing_detail(
+    permission: Permission,
+    missing_items: Sequence[str],
+    *,
+    item_label: str = "内容",
+    limit: int = 10,
+) -> str:
+    """无权限 + 缺失项提示（用于“会隐式创建资源”的场景）。"""
+    items = [s.strip() for s in missing_items if s and str(s).strip()]
+    preview = ", ".join(items[:limit])
+    suffix = "..." if len(items) > limit else ""
+    return f"{permission_denied_detail(permission)}，无法创建新{item_label}: {preview}{suffix}"

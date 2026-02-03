@@ -1,103 +1,84 @@
 # 用户权限系统
 
-ImgTag 使用基于位掩码（Bitmask）的细粒度权限控制系统。
+ImgTag 使用位掩码（Bitmask）做细粒度权限控制；**前端仅用于 UX**，安全性以**后端校验**为准。
 
-## 概述
+## 角色与数据来源
 
-- **Admin 角色**：自动拥有所有权限，绕过权限检查
-- **User 角色**：通过 `permissions` 字段控制具体权限
+- `admin`：绕过权限检查（视为拥有全部权限）
+- `user`：由数据库字段 `users.permissions` 控制
+- 外部 API（API Key）同样会返回/携带 `permissions`，用于一致的权限判断
 
-## 权限定义
+## 权限位定义（当前仅 3 个）
 
 | 权限位 | 权限名 | 说明 | 值 |
 |--------|--------|------|-----|
-| `1 << 0` | `UPLOAD_IMAGE` | 允许上传图片 | 1 |
-| `1 << 1` | `CREATE_TAGS` | 允许新建标签 | 2 (预留) |
-| `1 << 2` | `AI_ANALYZE` | 允许 AI 分析 | 4 (预留) |
-| `1 << 3` | `AI_SEARCH` | 允许智能搜索 | 8 (预留) |
+| `1 << 0` | `UPLOAD_IMAGE` | 上传图片 | 1 |
+| `1 << 1` | `CREATE_TAGS` | 新建标签 | 2 |
+| `1 << 2` | `AI_ANALYZE` | AI 分析 | 4 |
+
+组合示例：`3=上传+新建标签`，`5=上传+AI分析`，`7=全部权限`。
 
 ## 默认权限
 
-- 新注册用户默认 `permissions = 1`（仅上传权限）
-- 管理员可通过用户管理接口修改用户权限
+- 新注册用户默认 `permissions = 7`（开启所有当前权限）
+- 管理员创建用户：未显式传 `permissions` 时同样默认 7
 
-## 权限检查
+补充说明：
+- 后端权限是**实时**的：每次请求都会通过 `Token -> users` 查询拿到最新 `permissions`
+- 前端会缓存 `user` 信息用于 UI（登录态刷新时会拉取 `/auth/me`）；若你在后台改了权限，建议刷新页面/重新登录
 
-### 后端
+## 主分类 / 分辨率（重要约束）
 
-```python
-from imgtag.api.endpoints.auth import require_permission
-from imgtag.core.permissions import Permission
+- 主分类（`level=0`）与分辨率（`level=1`）属于**系统标签**：创建/修改/删除仅管理员可做（后续可在后台管理）
+- 主分类的**赋值/调整**按“谁上传谁管理”：普通用户只能改自己上传的图片；管理员不受限制
+- 分辨率标签当前不支持由用户修改（由系统根据图片宽高自动生成/绑定）
+- 因 `tags.name` 全局唯一：普通标签（`level=2`）的新增/绑定逻辑会拒绝使用已被主分类/分辨率占用的名字
 
-# 在路由端点使用
-@router.post("/upload")
-async def upload_image(
-    user: dict = Depends(require_permission(Permission.UPLOAD_IMAGE)),
-):
-    # 只有拥有上传权限的用户才能访问
-    ...
+## 后端：权限校验与友好提示
+
+- 路由依赖（最常用）：`src/imgtag/api/endpoints/auth.py` 的 `require_permission(Permission.X)`
+  - 失败会返回 403，并使用统一文案：`src/imgtag/core/permissions.py` 的 `permission_denied_detail()`
+- 复杂场景封装（避免重复 & fail-fast）：`src/imgtag/api/permission_guards.py`
+  - `ensure_permission(user, Permission.X)`：统一抛 403
+  - `ensure_create_tags_if_missing(session, user, tag_names)`：仅当标签不存在且会“隐式创建”时才要求 `CREATE_TAGS`
+
+建议：涉及上传/落库/触发异步任务时，先 **fail-fast** 校验权限，再进行存储/事务副作用。
+
+## 前端：统一的权限检查 Composable
+
+`web/src/composables/usePermission.ts` 提供：
+
+- `checkPermissionWithToast(permission, action?)`：无权限时 toast 提示具体缺少的权限
+- `withPermission(permission, callback, action?)`：仅用于副作用型操作（回调返回 `void`）
+- `withPermissionValue(permission, callback, action?)`：需要返回值时使用（无权限返回 `undefined`）
+
+示例：
+
+```ts
+const { withPermission, withPermissionValue } = usePermission()
+
+const openUpload = withPermission(Permission.UPLOAD_IMAGE, () => {
+  showUploadDialog.value = true
+}, '上传图片')
+
+const maybeId = withPermissionValue(Permission.CREATE_TAGS, () => createTag(), '新建标签')
 ```
 
-### 前端
-
-```typescript
-import { Permission, hasPermission } from '@/constants/permissions'
-
-// 使用 Store getter
-const userStore = useUserStore()
-if (userStore.canUpload) {
-  // 有上传权限
-}
-
-// 或直接检查
-if (hasPermission(user.permissions, Permission.UPLOAD_IMAGE)) {
-  // 有上传权限
-}
-```
-
-## 权限组合
-
-权限值可以组合，例如：
-
-```python
-# 同时拥有上传和新建标签权限
-permissions = Permission.UPLOAD_IMAGE | Permission.CREATE_TAGS  # = 3
-```
-
-## 安全说明
-
-权限码本身是公开的（开源项目），这**不构成安全隐患**：
-
-1. **权限码只是标识符**：类似于 `role = "admin"` 中的 `"admin"` 字符串
-2. **安全性由后端保证**：每次 API 请求都从数据库验证用户的实际权限值
-3. **JWT 签名保护**：Token 无法被伪造（需要服务器的 `SECRET_KEY`）
-4. **前端权限仅用于 UI**：前端读取权限只用于显示优化，不作为安全依据
-
-## 管理员接口
-
-修改用户权限：
+## 管理员接口（修改权限）
 
 ```http
 PUT /api/v1/auth/users/{user_id}
-Content-Type: application/json
 Authorization: Bearer <admin_token>
+Content-Type: application/json
 
-{
-  "permissions": 1
-}
+{ "permissions": 7 }
 ```
 
-| permissions 值 | 含义 |
-|---------------|------|
-| `0` | 禁止所有操作 |
-| `1` | 仅上传 |
-| `15` | 所有当前权限 |
+常用值：`0`（全禁用）、`1`（仅上传）、`7`（全部）。
 
-## 扩展权限
+## 新增权限（扩展）
 
-如需添加新权限：
-
-1. 在 `src/imgtag/core/permissions.py` 添加新的权限位
-2. 在 `web/src/constants/permissions.ts` 添加对应常量
-3. 在需要的路由端点使用 `require_permission()`
-4. 在前端相应位置添加权限检查
+1. `src/imgtag/core/permissions.py` 增加新的 bit + `PERMISSION_NAMES`
+2. `web/src/constants/permissions.ts` 同步常量与显示名
+3. 后端端点加 `require_permission()` 或 `permission_guards` 封装
+4. 更新本文档的表格与默认值说明

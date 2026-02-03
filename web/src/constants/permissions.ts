@@ -10,14 +10,11 @@ export const Permission = {
     /** 上传图片 */
     UPLOAD_IMAGE: 1 << 0, // 1
 
-    /** 新建标签（预留） */
+    /** 新建标签 */
     CREATE_TAGS: 1 << 1, // 2
 
-    /** AI 分析（预留） */
+    /** AI 分析 */
     AI_ANALYZE: 1 << 2, // 4
-
-    /** 智能搜索（预留） */
-    AI_SEARCH: 1 << 3, // 8
 } as const
 
 export type PermissionType = (typeof Permission)[keyof typeof Permission]
@@ -42,7 +39,6 @@ export const PermissionNames: Record<PermissionType, string> = {
     [Permission.UPLOAD_IMAGE]: '上传图片',
     [Permission.CREATE_TAGS]: '新建标签',
     [Permission.AI_ANALYZE]: 'AI 分析',
-    [Permission.AI_SEARCH]: '智能搜索',
 }
 
 /**

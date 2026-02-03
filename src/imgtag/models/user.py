@@ -57,7 +57,7 @@ class User(Base):
     )
     permissions: Mapped[int] = mapped_column(
         BigInteger,
-        server_default="1",  # 默认 UPLOAD_IMAGE 权限
+        server_default="7",  # 默认 FULL 权限
         nullable=False,
         comment="权限位掩码(仅对user角色生效)",
     )

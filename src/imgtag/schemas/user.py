@@ -15,7 +15,7 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str = Field(..., min_length=6)
     role: Optional[str] = Field(default="user", description="user 或 admin")
-    permissions: Optional[int] = Field(default=1, description="权限位掩码")
+    permissions: Optional[int] = Field(default=7, description="权限位掩码")
 
 
 class UserLogin(BaseModel):

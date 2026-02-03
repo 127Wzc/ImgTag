@@ -1,16 +1,19 @@
 <script setup lang="ts">
 /**
  * FloatingUploadButton - 悬浮上传按钮
- * 右下角 FAB 按钮，登录后且有上传权限时可见
+ * 右下角 FAB 按钮，登录后可见，无权限时显示提示
  */
 import { useRoute } from 'vue-router'
 import { useUserStore } from '@/stores'
-import { Plus } from 'lucide-vue-next'
+import { usePermission } from '@/composables/usePermission'
+import { Plus, Lock } from 'lucide-vue-next'
 import { computed, ref } from 'vue'
 import UploadDialog from '@/components/UploadDialog.vue'
+import { Permission } from '@/constants/permissions'
 
 const route = useRoute()
 const userStore = useUserStore()
+const { canUpload, checkPermissionWithToast } = usePermission()
 
 // 弹框状态
 const uploadDialogOpen = ref(false)
@@ -21,12 +24,14 @@ const hiddenRoutes = ['/upload', '/login']
 const isVisible = computed(() => {
   // 未登录或在隐藏路由时不显示
   if (!userStore.isLoggedIn || hiddenRoutes.includes(route.path)) return false
-  // 需要有上传权限
-  return userStore.canUpload
+  // 登录后始终显示
+  return true
 })
 
 function handleClick() {
-  uploadDialogOpen.value = true
+  if (checkPermissionWithToast(Permission.UPLOAD_IMAGE)) {
+    uploadDialogOpen.value = true
+  }
 }
 </script>
 
@@ -36,14 +41,16 @@ function handleClick() {
     <button
       v-if="isVisible"
       @click="handleClick"
-      class="fixed right-6 bottom-20 z-50 w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-lg hover:shadow-xl hover:scale-105 active:scale-95 transition-all duration-200 flex items-center justify-center group"
-      aria-label="上传图片"
+      class="fixed right-6 bottom-20 z-50 w-14 h-14 rounded-full shadow-lg hover:shadow-xl hover:scale-105 active:scale-95 transition-all duration-200 flex items-center justify-center group"
+      :class="canUpload ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground cursor-not-allowed'"
+      :aria-label="canUpload ? '上传图片' : '暂无上传权限'"
     >
-      <Plus class="w-6 h-6 group-hover:rotate-90 transition-transform duration-200" />
-      
+      <Plus v-if="canUpload" class="w-6 h-6 group-hover:rotate-90 transition-transform duration-200" />
+      <Lock v-else class="w-5 h-5" />
+
       <!-- Tooltip -->
       <span class="absolute right-full mr-3 px-3 py-1.5 bg-popover text-popover-foreground text-sm rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
-        上传图片
+        {{ canUpload ? '上传图片' : '暂无上传权限' }}
       </span>
     </button>
   </Transition>

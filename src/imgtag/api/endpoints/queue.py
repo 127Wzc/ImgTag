@@ -12,9 +12,10 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from imgtag.api.endpoints.auth import get_current_user
+from imgtag.api.endpoints.auth import require_permission
 from imgtag.core.logging_config import get_logger
 from imgtag.core.config_cache import config_cache
+from imgtag.core.permissions import Permission
 from imgtag.db import get_async_session
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import config_repository, image_repository
@@ -51,7 +52,7 @@ async def get_queue_status():
 async def add_tasks(
     request: AddTasksRequest,
     background_tasks: BackgroundTasks,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission(Permission.AI_ANALYZE)),
 ):
     """Add tasks to queue (requires login).
 
@@ -82,7 +83,7 @@ async def add_tasks(
 @router.post("/start", response_model=dict[str, str])
 async def start_queue(
     background_tasks: BackgroundTasks,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission(Permission.AI_ANALYZE)),
 ):
     """Start queue processing (requires login).
 
@@ -101,7 +102,7 @@ async def start_queue(
 
 
 @router.post("/stop", response_model=dict[str, str])
-async def stop_queue(user: dict = Depends(get_current_user)):
+async def stop_queue(user: dict = Depends(require_permission(Permission.AI_ANALYZE))):
     """Stop queue processing (requires login).
 
     Args:
@@ -115,7 +116,7 @@ async def stop_queue(user: dict = Depends(get_current_user)):
 
 
 @router.delete("/clear", response_model=dict[str, str])
-async def clear_queue(user: dict = Depends(get_current_user)):
+async def clear_queue(user: dict = Depends(require_permission(Permission.AI_ANALYZE))):
     """Clear pending queue (requires login).
 
     Args:
@@ -129,7 +130,7 @@ async def clear_queue(user: dict = Depends(get_current_user)):
 
 
 @router.delete("/clear-completed", response_model=dict[str, str])
-async def clear_completed(user: dict = Depends(get_current_user)):
+async def clear_completed(user: dict = Depends(require_permission(Permission.AI_ANALYZE))):
     """Clear completed list (requires login).
 
     Args:
@@ -145,7 +146,7 @@ async def clear_completed(user: dict = Depends(get_current_user)):
 @router.put("/config", response_model=dict[str, Any])
 async def config_workers(
     request: ConfigWorkerRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission(Permission.AI_ANALYZE)),
 ):
     """Configure max workers (requires login).
 
@@ -174,7 +175,7 @@ async def config_workers(
 @router.post("/add-untagged", response_model=dict[str, Any])
 async def add_untagged_images(
     background_tasks: BackgroundTasks,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission(Permission.AI_ANALYZE)),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Add all untagged images to queue (requires login).

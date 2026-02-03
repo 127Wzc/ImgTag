@@ -57,6 +57,7 @@ async def verify_api_key(
             "username": user.username,
             "role": user.role,
             "is_active": user.is_active,
+            "permissions": user.permissions,
         }
     
     # 密钥无效
@@ -94,6 +95,7 @@ async def require_api_key(
             "username": user.username,
             "role": user.role,
             "is_active": user.is_active,
+            "permissions": user.permissions,
         }
     
     raise HTTPException(status_code=401, detail="无效的 API 密钥")

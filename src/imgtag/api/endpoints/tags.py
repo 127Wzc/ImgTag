@@ -15,6 +15,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin, get_current_user
+from imgtag.api.permission_guards import ensure_permission
+from imgtag.core.permissions import Permission
 from imgtag.core.logging_config import get_logger
 from imgtag.db import get_async_session
 from imgtag.db.repositories import tag_repository
@@ -70,6 +72,8 @@ async def create_tag(
     # 权限检查
     if level in (0, 1) and user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可创建主分类和分辨率标签")
+    if level == 2:
+        ensure_permission(user, Permission.CREATE_TAGS)
 
     if not name or not name.strip():
         raise HTTPException(status_code=400, detail="标签名不能为空")
@@ -117,6 +121,14 @@ async def resolve_tag(
     # 先查询是否存在
     existing = await tag_repository.get_by_name(session, name)
     if existing:
+        # 普通标签(level=2)不允许“复用”主分类/分辨率（它们有独立的管理/赋值逻辑）
+        if level == 2 and existing.level in (0, 1):
+            raise HTTPException(
+                status_code=409,
+                detail="标签名已被主分类/分辨率占用，不能作为普通标签使用",
+            )
+        if existing.level != level:
+            raise HTTPException(status_code=409, detail="标签级别不匹配")
         return {
             "id": existing.id,
             "name": existing.name,
@@ -132,6 +144,8 @@ async def resolve_tag(
             status_code=404, 
             detail=f"{'主分类' if level == 0 else '分辨率'}标签 '{name}' 不存在"
         )
+
+    ensure_permission(user, Permission.CREATE_TAGS)
 
     # Level 2: 自动创建（处理并发情况）
     try:
@@ -186,6 +200,8 @@ async def rename_tag_by_id(
     # 权限检查
     if tag.level in (0, 1) and user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可修改主分类和分辨率标签")
+    if tag.level == 2:
+        ensure_permission(user, Permission.CREATE_TAGS)
 
     updated_fields = {}
     
@@ -248,6 +264,8 @@ async def delete_tag_by_id(
     # 权限检查
     if tag.level in (0, 1) and user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可删除主分类和分辨率标签")
+    if tag.level == 2:
+        ensure_permission(user, Permission.CREATE_TAGS)
 
     # Level 0/1 检查是否在使用中
     if tag.level in (0, 1):
@@ -306,4 +324,3 @@ async def sync_tags(
         "count": count,
         "elapsed_ms": round(elapsed * 1000, 2),
     }
-

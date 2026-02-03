@@ -12,7 +12,8 @@ import type { ImageResponse, ImageSearchRequest, TagWithSource } from '@/types'
 import {
   Loader2, CheckSquare, Trash2, Tags, Sparkles, LayoutGrid,
   ChevronDown, ChevronLeft, ChevronRight, FolderOpen, ArrowUpDown, Tag,
-  Plus
+  Plus,
+  Lock,
 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -27,6 +28,8 @@ import { useCategories } from '@/api/queries'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import UploadDialog from '@/components/UploadDialog.vue'
+import { usePermission } from '@/composables/usePermission'
+import { Permission } from '@/constants/permissions'
 
 const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
 
@@ -36,8 +39,15 @@ const userStore = useUserStore()
 // 上传弹窗
 const showUploadDialog = ref(false)
 
-// 上传权限检查
-const canUpload = computed(() => userStore.canUpload)
+// 权限检查
+const { canUpload, canUseAIAnalyze, checkPermissionWithToast } = usePermission()
+
+// 处理上传按钮点击
+function handleUploadClick() {
+  if (checkPermissionWithToast(Permission.UPLOAD_IMAGE)) {
+    showUploadDialog.value = true
+  }
+}
 
 if (!userStore.isLoggedIn) router.push('/login?redirect=/my-files')
 
@@ -176,6 +186,7 @@ const batchLoading = ref(false)
 
 async function handleBatchAnalyze() {
   if (!selectedIds.value.size) return
+  if (!checkPermissionWithToast(Permission.AI_ANALYZE, 'AI 分析')) return
   batchLoading.value = true
   try {
     await apiClient.post('/queue/add', { image_ids: Array.from(selectedIds.value) })
@@ -320,12 +331,10 @@ function nextImage() {
             </Select>
 
             <!-- 上传按钮 -->
-            <Button 
-              size="sm" 
-              class="h-9 gap-1.5" 
-              @click="showUploadDialog = true"
-              :disabled="!canUpload"
-              :title="canUpload ? '' : '暂无上传权限'"
+            <Button
+              size="sm"
+              class="h-9 gap-1.5"
+              @click="handleUploadClick"
             >
               <Plus class="w-4 h-4" />
               上传
@@ -368,11 +377,12 @@ function nextImage() {
             <FolderOpen class="w-8 h-8 text-muted-foreground" />
           </div>
           <h3 class="text-lg font-medium text-foreground">暂无图片</h3>
-          <p class="text-muted-foreground mt-1 mb-6">上传图片开始构建您的图库</p>
-          <Button 
-            @click="showUploadDialog = true" 
-            :disabled="!canUpload"
-            :title="canUpload ? '' : '暂无上传权限'"
+          <p class="text-muted-foreground mt-1 mb-6">
+            {{ canUpload ? '上传图片开始构建您的图库' : '暂无上传权限，请联系管理员开通' }}
+          </p>
+          <Button
+            v-if="canUpload"
+            @click="showUploadDialog = true"
           >上传图片</Button>
         </div>
 
@@ -482,10 +492,14 @@ function nextImage() {
 
           <button
             @click="handleBatchAnalyze"
-            class="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full hover:bg-white/10 text-xs font-medium transition-colors text-blue-400 hover:text-blue-300"
+            class="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors"
+            :aria-disabled="!canUseAIAnalyze"
+            :title="canUseAIAnalyze ? '批量 AI 分析' : '未开通 AI 分析权限'"
+            :class="canUseAIAnalyze ? 'hover:bg-white/10 text-blue-400 hover:text-blue-300' : 'opacity-50 cursor-not-allowed'"
           >
             <Sparkles class="w-3.5 h-3.5" />
             分析
+            <Lock v-if="!canUseAIAnalyze" class="w-3.5 h-3.5 opacity-80" />
           </button>
 
           <button
