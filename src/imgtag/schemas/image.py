@@ -66,6 +66,7 @@ class ImageResponse(BaseSchema):
     file_type: Optional[str] = Field(default=None, description="文件类型")
     file_hash: Optional[str] = Field(default=None, description="文件哈希")
     uploaded_by: Optional[int] = Field(default=None, description="上传者用户ID")
+    uploaded_by_username: Optional[str] = Field(default=None, description="上传者用户名")
     is_public: bool = Field(default=True, description="是否公开")
     created_at: Optional[str] = Field(default=None, description="创建时间")
     updated_at: Optional[str] = Field(default=None, description="更新时间")
@@ -85,6 +86,14 @@ class ImageUpdate(BaseModel):
     description: Optional[str] = Field(default=None, description="新的描述")
     original_url: Optional[str] = Field(default=None, description="原始来源地址")
     is_public: Optional[bool] = Field(default=None, description="是否公开")
+
+class ImageUpdateSuggestion(BaseModel):
+    """图片元信息修改建议（提交后需管理员审批）。"""
+
+    description: str = Field(..., description="建议的描述（允许空串）")
+    category_id: Optional[int] = Field(..., description="建议的主分类 tag_id (level=0，可为空)")
+    normal_tag_ids: List[int] = Field(..., description="建议的普通标签 tag_id 列表（仅 level=2）")
+    comment: Optional[str] = Field(default=None, description="给管理员的备注（可选）")
 
 
 

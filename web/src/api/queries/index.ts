@@ -9,6 +9,7 @@ export {
     useBatchUpload,
     useDeleteImage,
     useUpdateImage,
+    useSuggestImageUpdate,
     useAddImageTag,
     useRemoveImageTag,
 } from './images'
@@ -43,6 +44,14 @@ export {
     useCancelTask,
     useClearCompletedTasks
 } from './tasks'
+
+// Approvals
+export {
+    useApprovals,
+    useApproveApproval,
+    useRejectApproval,
+    type ApprovalsQueryParams,
+} from './approvals'
 
 // System
 export {

@@ -5,6 +5,7 @@
 审批管理 API 端点
 """
 
+import asyncio
 from typing import Dict, Any
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -24,6 +25,8 @@ from imgtag.db.repositories import (
     audit_log_repository,
     image_repository,
 )
+from imgtag.services.suggestion_service import SUGGEST_IMAGE_UPDATE_TYPE, suggestion_service
+from imgtag.services.task_queue import task_queue
 from imgtag.utils.pagination import PageParams
 
 logger = get_logger(__name__)
@@ -57,7 +60,10 @@ async def get_pending_approvals(
 ):
     """获取待审批列表（仅管理员）"""
     approvals, total = await approval_repository.get_pending(
-        session, limit=size, offset=(page - 1) * size
+        session,
+        types=[SUGGEST_IMAGE_UPDATE_TYPE],
+        limit=size,
+        offset=(page - 1) * size,
     )
     
     params = PageParams(page=page, size=size)
@@ -93,7 +99,11 @@ async def approve_request(
         raise HTTPException(status_code=400, detail="该审批已处理")
     
     # 执行审批操作
-    success = await execute_approval(session, approval)
+    try:
+        success = await execute_approval(session, approval)
+    except Exception as e:
+        logger.error(f"执行审批操作异常: approval_id={approval_id}, error={e}")
+        raise HTTPException(status_code=500, detail=f"执行审批操作失败: {e}")
     if not success:
         raise HTTPException(status_code=500, detail="执行审批操作失败")
     
@@ -109,6 +119,24 @@ async def approve_request(
         target_id=approval_id,
         new_value={"status": "approved", "comment": data.comment},
     )
+
+    # 确保修改已提交后再触发异步任务，避免读到旧数据
+    await session.commit()
+
+    # 建议落地后触发向量重建（不走视觉分析）
+    if approval.type == SUGGEST_IMAGE_UPDATE_TYPE:
+        image_id = None
+        try:
+            if isinstance(approval.payload, dict):
+                image_id = approval.payload.get("image_id")
+            if not image_id and approval.target_ids:
+                image_id = approval.target_ids[0]
+            if image_id:
+                asyncio.create_task(
+                    task_queue.add_tasks([int(image_id)], task_type="rebuild_vector")
+                )
+        except Exception as e:
+            logger.warning(f"触发向量重建失败: approval_id={approval_id}, image_id={image_id}, error={e}")
     
     return {"message": "已批准"}
 
@@ -152,23 +180,41 @@ async def batch_approve(
     """批量批准审批请求"""
     approved_count = 0
     failed_ids = []
+    rebuild_image_ids: list[int] = []
     
     for approval_id in data.approval_ids:
         try:
-            approval = await approval_repository.get_with_relations(session, approval_id)
-            if not approval or approval.status != "pending":
-                failed_ids.append(approval_id)
-                continue
-            
-            success = await execute_approval(session, approval)
-            if success:
-                await approval_repository.approve(session, approval, admin["id"], data.comment)
+            # 每条审批使用 SAVEPOINT 保证原子性：
+            # - 单条失败不会污染后续审批处理
+            # - 单条失败时自动回滚到 savepoint，避免“部分落地修改”被最终 commit
+            approved_this = False
+            async with session.begin_nested():
+                approval = await approval_repository.get_with_relations(session, approval_id)
+                if not approval or approval.status != "pending":
+                    failed_ids.append(approval_id)
+                else:
+                    success = await execute_approval(session, approval)
+                    if not success:
+                        failed_ids.append(approval_id)
+                        raise ValueError(f"未知或不支持的审批类型: {approval.type}")
+
+                    await approval_repository.approve(session, approval, admin["id"], data.comment)
+
+                    # 建议落地后触发向量重建
+                    if approval.type == SUGGEST_IMAGE_UPDATE_TYPE:
+                        if isinstance(approval.payload, dict) and approval.payload.get("image_id"):
+                            rebuild_image_ids.append(int(approval.payload["image_id"]))
+                        elif approval.target_ids:
+                            rebuild_image_ids.append(int(approval.target_ids[0]))
+
+                    approved_this = True
+
+            if approved_this:
                 approved_count += 1
-            else:
-                failed_ids.append(approval_id)
         except Exception as e:
             logger.error(f"批量审批失败 ID {approval_id}: {str(e)}")
-            failed_ids.append(approval_id)
+            if approval_id not in failed_ids:
+                failed_ids.append(approval_id)
     
     # 记录审计日志
     await audit_log_repository.add_log(
@@ -181,6 +227,18 @@ async def batch_approve(
             "failed_ids": failed_ids,
         },
     )
+
+    # 确保审批与落地已提交后再触发向量重建
+    await session.commit()
+    if rebuild_image_ids:
+        # 去重，避免重复入队导致无意义的重复计算
+        rebuild_image_ids = list(dict.fromkeys(rebuild_image_ids))
+        try:
+            asyncio.create_task(
+                task_queue.add_tasks(rebuild_image_ids, task_type="rebuild_vector")
+            )
+        except Exception as e:
+            logger.warning(f"批量触发向量重建失败: {e}")
     
     return {
         "message": f"已批准 {approved_count} 项",
@@ -192,8 +250,13 @@ async def batch_approve(
 async def execute_approval(session: AsyncSession, approval) -> bool:
     """执行审批操作"""
     approval_type = approval.type
-    payload = approval.payload
+    payload = approval.payload if isinstance(approval.payload, dict) else {}
     
+    # 修改建议审批：必须保证失败时能回滚（由上层 savepoint 负责），因此这里不吞异常
+    if approval_type == SUGGEST_IMAGE_UPDATE_TYPE:
+        await suggestion_service.apply_image_update_suggestion(session, approval=approval)
+        return True
+
     try:
         if approval_type == "add_tags":
             # 批量添加标签

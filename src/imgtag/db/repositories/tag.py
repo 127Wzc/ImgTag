@@ -744,15 +744,19 @@ class ImageTagRepository(BaseRepository[ImageTag]):
         source: str = "user",
         added_by: Optional[int] = None,
     ) -> int:
-        """Set tags for an image by tag IDs (efficient, no tag lookup).
-        
-        Compares current associations with new IDs and performs minimal updates.
-        Preserves level 0/1 tags that are not in the new list.
+        """按 ID 设置图片的普通标签（level=2）。
+
+        语义约束：
+        - 仅管理 level=2 普通标签
+        - 不影响主分类(level=0)与分辨率(level=1)
+
+        实现：
+        - 对比当前 level=2 关联与目标 tag_ids，做最小增删
 
         Args:
             session: Database session.
             image_id: Image ID.
-            tag_ids: List of tag IDs to set.
+            tag_ids: 目标普通标签 ID 列表（仅 level=2，非法/不存在/非 level=2 会被忽略）。
             source: Source for new associations (user/ai).
             added_by: User ID if user-added.
 
@@ -760,22 +764,41 @@ class ImageTagRepository(BaseRepository[ImageTag]):
             Number of associations changed.
         """
 
-        # Filter out invalid tag IDs (id=0 or non-existent)
-        if not tag_ids:
-            tag_ids = []
+        # Filter out invalid tag IDs (id=0)
         tag_ids = [tid for tid in tag_ids if tid and tid > 0]
-
-        # Validate tag IDs exist
+        # 去重（保持输入顺序）
         if tag_ids:
-            valid_ids_stmt = select(Tag.id).where(Tag.id.in_(tag_ids))
+            seen: set[int] = set()
+            deduped: list[int] = []
+            for tid in tag_ids:
+                if tid in seen:
+                    continue
+                seen.add(tid)
+                deduped.append(tid)
+            tag_ids = deduped
+
+        # Validate tag IDs exist AND must be level=2
+        if tag_ids:
+            valid_ids_stmt = select(Tag.id).where(
+                and_(
+                    Tag.id.in_(tag_ids),
+                    Tag.level == 2,
+                )
+            )
             valid_result = await session.execute(valid_ids_stmt)
             valid_ids = {row.id for row in valid_result}
             tag_ids = [tid for tid in tag_ids if tid in valid_ids]
 
-        # Get current tag associations
+        # Get current level=2 associations only
         current_stmt = (
             select(ImageTag.tag_id)
-            .where(ImageTag.image_id == image_id)
+            .join(Tag, Tag.id == ImageTag.tag_id)
+            .where(
+                and_(
+                    ImageTag.image_id == image_id,
+                    Tag.level == 2,
+                )
+            )
         )
         current_result = await session.execute(current_stmt)
         current_tag_ids = {row.tag_id for row in current_result}
@@ -804,28 +827,76 @@ class ImageTagRepository(BaseRepository[ImageTag]):
                     session.add(new_assoc)
                     changes += 1
         
-        # Remove old associations (but preserve level 0/1 tags)
+        # Remove old level=2 associations
         if to_remove:
-            # Check which tags to remove are level 2
-            level_check_stmt = select(Tag.id).where(
+            delete_stmt = sa_delete(ImageTag).where(
                 and_(
-                    Tag.id.in_(to_remove),
-                    Tag.level == 2,  # Only remove normal tags
+                    ImageTag.image_id == image_id,
+                    ImageTag.tag_id.in_(to_remove),
                 )
             )
-            level_result = await session.execute(level_check_stmt)
-            level2_to_remove = {row.id for row in level_result}
-            
-            if level2_to_remove:
-                delete_stmt = sa_delete(ImageTag).where(
-                    and_(
-                        ImageTag.image_id == image_id,
-                        ImageTag.tag_id.in_(level2_to_remove),
-                    )
-                )
-                result = await session.execute(delete_stmt)
-                changes += result.rowcount
+            result = await session.execute(delete_stmt)
+            changes += result.rowcount or 0
         
+        await session.flush()
+        return changes
+
+    async def set_image_category(
+        self,
+        session: AsyncSession,
+        image_id: int,
+        category_id: int | None,
+        *,
+        source: str = "user",
+        added_by: Optional[int] = None,
+    ) -> int:
+        """设置图片主分类（level=0），保证唯一性。
+
+        行为：
+        - 无论 category_id 是否为空，都会先删除该图片已有的所有 level=0 分类关联
+        - 若 category_id 非空，再插入新的分类关联
+
+        Args:
+            session: 数据库会话
+            image_id: 图片 ID
+            category_id: 目标分类 tag_id（level=0），None 表示清空分类
+            source: 关联来源
+            added_by: 操作用户 ID（可为空）
+
+        Returns:
+            变更的关联数量（删除 + 新增）
+        """
+        changes = 0
+
+        # 删除旧的 level=0 分类关联
+        del_stmt = sa_delete(ImageTag).where(
+            and_(
+                ImageTag.image_id == image_id,
+                ImageTag.tag_id.in_(select(Tag.id).where(Tag.level == 0)),
+            )
+        )
+        del_result = await session.execute(del_stmt)
+        changes += del_result.rowcount or 0
+
+        # 插入新的分类关联（如果有）
+        if category_id:
+            now = datetime.now(timezone.utc)
+            insert_stmt = pg_insert(ImageTag).values(
+                {
+                    "image_id": image_id,
+                    "tag_id": category_id,
+                    "source": source,
+                    "added_by": added_by,
+                    "sort_order": 0,
+                    "added_at": now,
+                }
+            )
+            insert_stmt = insert_stmt.on_conflict_do_nothing(
+                index_elements=["image_id", "tag_id"]
+            )
+            ins_result = await session.execute(insert_stmt)
+            changes += ins_result.rowcount or 0
+
         await session.flush()
         return changes
 
@@ -977,9 +1048,14 @@ class ImageTagRepository(BaseRepository[ImageTag]):
                 return 0
 
 
-        # Delete existing tags for these images
+        # 仅替换普通标签(level=2)，保留主分类(level=0)与分辨率(level=1)
         await session.execute(
-            sa_delete(ImageTag).where(ImageTag.image_id.in_(image_ids))
+            sa_delete(ImageTag).where(
+                and_(
+                    ImageTag.image_id.in_(image_ids),
+                    ImageTag.tag_id.in_(select(Tag.id).where(Tag.level == 2)),
+                )
+            )
         )
 
         if not tag_names:

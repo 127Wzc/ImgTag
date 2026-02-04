@@ -44,7 +44,7 @@ const galleryPageSize = ref(40) // 默认更多
 const galleryCurrentPage = ref(1)
 const gallerySearchParams = ref<ImageSearchRequest>({ size: 40, page: 1, sort_by: 'id', sort_desc: true })
 
-const { data: galleryData, isLoading: galleryLoading } = useImages(gallerySearchParams)
+const { data: galleryData, isLoading: galleryLoading, refetch: refetchGallery } = useImages(gallerySearchParams)
 const galleryImages = computed(() => galleryData.value?.data || [])
 const galleryTotal = computed(() => galleryData.value?.total || 0)
 const galleryTotalPages = computed(() => Math.ceil(galleryTotal.value / galleryPageSize.value))
@@ -112,7 +112,7 @@ const selectedTags = computed<Tag[]>(() => {
 })
 
 const smartSearchParams = ref<SimilarSearchRequest | null>(null)
-const { data: smartData, isLoading: smartLoading } = useSimilarSearch(smartSearchParams)
+const { data: smartData, isLoading: smartLoading, refetch: refetchSmart } = useSimilarSearch(smartSearchParams)
 const smartResults = computed<ImageWithSimilarity[]>(() => smartData.value?.data || [])
 const smartTotal = computed(() => smartData.value?.total || 0)
 const hasVectorSearch = computed(() => !!smartSearchParams.value?.text)
@@ -219,6 +219,25 @@ watch([showTagDropdown, showSimilarityPopover], ([showTag, showSim]) => {
 })
 
 const currentImageList = computed(() => activeMode.value === 'gallery' ? galleryImages.value : smartResults.value)
+
+async function handleImageUpdated() {
+  if (activeMode.value === 'gallery') {
+    await refetchGallery()
+    const img = selectedImage.value
+    if (img) {
+      selectedImage.value = galleryImages.value.find(i => i.id === img.id) || img
+    }
+    return
+  }
+
+  if (smartSearchParams.value) {
+    await refetchSmart()
+    const img = selectedImage.value
+    if (img) {
+      selectedImage.value = smartResults.value.find(i => i.id === img.id) || img
+    }
+  }
+}
 </script>
 
 <template>
@@ -466,6 +485,7 @@ const currentImageList = computed(() => activeMode.value === 'gallery' ? gallery
       @close="closeImage"
       @prev="prevImage"
       @next="nextImage"
+      @updated="handleImageUpdated"
     />
   </div>
 </template>

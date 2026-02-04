@@ -278,6 +278,20 @@ function prevImage() {
 function nextImage() {
   if (selectedIndex.value < images.value.length - 1) { selectedIndex.value++; selectedImage.value = images.value[selectedIndex.value] }
 }
+
+async function handleImageUpdated() {
+  const img = selectedImage.value
+  if (img) {
+    // 避免覆盖层把最新服务端数据“盖回旧值”
+    tagOverrides.value.delete(img.id)
+    tagOverrides.value = new Map(tagOverrides.value)
+  }
+  await refetch()
+  if (img) {
+    const latest = images.value.find(i => i.id === img.id) || null
+    selectedImage.value = latest
+  }
+}
 </script>
 
 <template>
@@ -523,6 +537,7 @@ function nextImage() {
       @close="closeImage"
       @prev="prevImage"
       @next="nextImage"
+      @updated="handleImageUpdated"
     />
 
     <!-- 批量打标签弹窗 -->

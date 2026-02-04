@@ -9,7 +9,7 @@ import {
   Plus, Pencil, Loader2, Save, Link, Download,
   PanelRightClose
 } from 'lucide-vue-next'
-import { useUpdateImage, useTags, useCategories, useResolveTag } from '@/api/queries'
+import { useUpdateImage, useSuggestImageUpdate, useTags, useSearchTags, useCategories, useResolveTag } from '@/api/queries'
 import { useUserStore } from '@/stores'
 import { toast } from 'vue-sonner'
 import { getErrorMessage } from '@/utils/api-error'
@@ -28,6 +28,7 @@ export interface ImageInfo {
   created_at?: string | null
   file_path?: string | null
   uploaded_by?: number | null
+  uploaded_by_username?: string | null
 }
 
 const props = withDefaults(defineProps<{
@@ -54,7 +55,7 @@ const showUnsavedConfirm = ref(false)
 
 // 用户权限
 const userStore = useUserStore()
-const { canCreateTags } = usePermission()
+const { canCreateTags, canSuggestChanges } = usePermission()
 
 const canEdit = computed(() => {
   if (!props.image) return false
@@ -62,7 +63,33 @@ const canEdit = computed(() => {
   return props.image.uploaded_by === userStore.user?.id
 })
 
-const canEditTags = computed(() => canEdit.value && canCreateTags.value)
+const canSuggest = computed(() => {
+  if (!props.image) return false
+  if (canEdit.value) return false
+  return canSuggestChanges.value
+})
+
+// 说明：
+// - “编辑图片元信息”的权限由 canEdit 决定（上传者/管理员）
+// - “新建标签”的权限由 canCreateTags 控制；无此权限仍可选择已有标签
+const canModifyTags = computed(() => canEdit.value || canSuggest.value)
+
+const editHint = computed(() => {
+  if (!props.image) return ''
+  if (canEdit.value) return '你有编辑权限：修改将直接保存'
+  if (!userStore.isLoggedIn) return '登录后可提交修改建议'
+  if (canSuggestChanges.value) return '建议模式：修改将提交给管理员审批'
+  return '无编辑权限：可联系管理员开通“提交修改建议”权限'
+})
+
+const uploaderDisplay = computed(() => {
+  const username = props.image?.uploaded_by_username || ''
+  const id = props.image?.uploaded_by
+  if (username && id) return `${username} (#${id})`
+  if (username) return username
+  if (id) return `#${id}`
+  return '-'
+})
 
 // 复制成功提示
 const showCopied = ref(false)
@@ -80,8 +107,9 @@ async function copyImageUrl() {
 
 // API
 const updateMutation = useUpdateImage()
+const suggestMutation = useSuggestImageUpdate()
 const resolveMutation = useResolveTag()
-const { data: allTags } = useTags(100)
+const { data: allTags } = useTags(200)
 const { data: categories } = useCategories()
 
 // 编辑用标签对象类型
@@ -103,10 +131,13 @@ const newTagInput = ref('')
 const tagInputRef = ref<HTMLInputElement | null>(null)
 const isResolvingTag = ref(false)
 const isComposing = ref(false)
+const pendingAddAfterComposition = ref(false)
+const { data: searchedTags } = useSearchTags(newTagInput, computed(() => 2), 20)
 
 // 原始数据
 const originalCategoryId = ref<number | null>(null)
 const originalNormalTagIds = ref<number[]>([])
+const originalNormalTags = ref<DraftTag[]>([])
 const originalDescription = ref('')
 
 // 同步 props.image 到本地草稿
@@ -115,14 +146,14 @@ watch(() => props.image, (img) => {
     const tags = img.tags || []
 
     const cat = tags.find(t => t.level === 0)
-    const catTag = categories.value?.find(c => c.name === cat?.name)
-    draftCategoryId.value = catTag?.id ?? null
-    originalCategoryId.value = catTag?.id ?? null
+    draftCategoryId.value = typeof cat?.id === 'number' ? cat.id : null
+    originalCategoryId.value = typeof cat?.id === 'number' ? cat.id : null
 
     const normalTagObjs = tags.filter(t => t.level === 2 || t.level === undefined)
       .map(t => ({ id: t.id || 0, name: t.name }))
     draftNormalTags.value = [...normalTagObjs]
     originalNormalTagIds.value = normalTagObjs.map(t => t.id)
+    originalNormalTags.value = [...normalTagObjs]
 
     draftDescription.value = img.description || ''
     originalDescription.value = img.description || ''
@@ -130,6 +161,8 @@ watch(() => props.image, (img) => {
     isEditingDescription.value = false
     showTagInput.value = false
     newTagInput.value = ''
+    pendingAddAfterComposition.value = false
+    isComposing.value = false
   }
 }, { immediate: true })
 
@@ -137,17 +170,46 @@ const resolutionTags = computed(() =>
   (props.image?.tags || []).filter(t => t.level === 1)
 )
 
+function tagKey(tag: DraftTag): string {
+  if (tag.id && tag.id > 0) return `id:${tag.id}`
+  return `name:${tag.name.toLowerCase()}`
+}
+
+const addedNormalTags = computed(() => {
+  const base = new Set(originalNormalTags.value.map(tagKey))
+  return draftNormalTags.value.filter(t => !base.has(tagKey(t)))
+})
+
+const removedNormalTags = computed(() => {
+  const next = new Set(draftNormalTags.value.map(tagKey))
+  return originalNormalTags.value.filter(t => !next.has(tagKey(t)))
+})
+
+function isAddedNormalTag(tag: DraftTag): boolean {
+  const base = new Set(originalNormalTags.value.map(tagKey))
+  return !base.has(tagKey(tag))
+}
+
+function restoreRemovedTag(tag: DraftTag) {
+  if (!canModifyTags.value) return
+  if (draftNormalTags.value.some(t => tagKey(t) === tagKey(tag))) return
+  draftNormalTags.value.push({ id: tag.id, name: tag.name })
+}
+
 const hasChanges = computed(() => {
   if (draftCategoryId.value !== originalCategoryId.value) return true
   if (draftDescription.value !== originalDescription.value) return true
-  const currentIds = draftNormalTags.value.map(t => t.id).sort()
-  const originalIds = [...originalNormalTagIds.value].sort()
-  if (currentIds.length !== originalIds.length) return true
-  return !currentIds.every((id, i) => id === originalIds[i])
+  const currentKeys = new Set(draftNormalTags.value.map(tagKey))
+  const originalKeys = new Set(originalNormalTags.value.map(tagKey))
+  if (currentKeys.size !== originalKeys.size) return true
+  for (const k of currentKeys) {
+    if (!originalKeys.has(k)) return true
+  }
+  return false
 })
 
 async function startEditDescription() {
-  if (!canEdit.value) return
+  if (!canEdit.value && !canSuggest.value) return
   isEditingDescription.value = true
   await nextTick()
   descriptionInput.value?.focus()
@@ -163,15 +225,37 @@ function autoResizeTextarea() {
 }
 
 async function showAddTag() {
-  if (!canEditTags.value) return
+  if (!canModifyTags.value) return
   showTagInput.value = true
   await nextTick()
   tagInputRef.value?.focus()
 }
 
-async function addTag() {
-  if (!canEditTags.value) return
-  if (isComposing.value) return
+function closeTagInput() {
+  showTagInput.value = false
+  newTagInput.value = ''
+  pendingAddAfterComposition.value = false
+}
+
+function handleCompositionStart() {
+  isComposing.value = true
+}
+
+async function handleCompositionEnd() {
+  isComposing.value = false
+  if (!pendingAddAfterComposition.value) return
+  pendingAddAfterComposition.value = false
+  await nextTick()
+  await addTag()
+}
+
+async function addTag(e?: KeyboardEvent) {
+  if (!canModifyTags.value) return
+  if (e?.isComposing || isComposing.value) {
+    pendingAddAfterComposition.value = true
+    return
+  }
+  pendingAddAfterComposition.value = false
 
   const tagName = newTagInput.value.trim()
   if (!tagName) return
@@ -182,9 +266,24 @@ async function addTag() {
   }
 
   try {
+    const exactExisting = (searchedTags.value || allTags.value || []).find(
+      t => t.level === 2 && t.name.toLowerCase() === tagName.toLowerCase()
+    )
+    if (exactExisting) {
+      draftNormalTags.value.push({ id: exactExisting.id, name: exactExisting.name })
+      newTagInput.value = ''
+      return
+    }
+
+    if (!canCreateTags.value) {
+      toast.error('暂无新建标签权限：不能添加不存在的标签', {
+        description: '请从下拉建议选择已有标签，或联系管理员开通“新建标签”权限'
+      })
+      return
+    }
+
     isResolvingTag.value = true
     const resolved = await resolveMutation.mutateAsync({ name: tagName, level: 2 })
-
     draftNormalTags.value.push({ id: resolved.id, name: resolved.name })
     newTagInput.value = ''
 
@@ -192,6 +291,8 @@ async function addTag() {
       toast.success(`新标签 "${resolved.name}" 已创建`)
     }
   } catch (e: any) {
+    const status = e?.response?.status
+    if (status === 403 && !canCreateTags.value) return
     toast.error(getErrorMessage(e))
   } finally {
     isResolvingTag.value = false
@@ -199,22 +300,33 @@ async function addTag() {
 }
 
 function selectSuggestion(tag: { id: number; name: string }) {
+  if (!canModifyTags.value) return
+  if (draftNormalTags.value.some(t => t.id === tag.id || t.name.toLowerCase() === tag.name.toLowerCase())) {
+    newTagInput.value = ''
+    showTagInput.value = false
+    return
+  }
   draftNormalTags.value.push({ id: tag.id, name: tag.name })
   newTagInput.value = ''
   showTagInput.value = false
 }
 
 function removeTag(tagId: number) {
-  if (!canEditTags.value) return
+  if (!canModifyTags.value) return
   draftNormalTags.value = draftNormalTags.value.filter(t => t.id !== tagId)
 }
 
 const tagSuggestions = computed(() => {
-  if (!allTags.value || !newTagInput.value) return []
-  const input = newTagInput.value.toLowerCase()
-  const existingIds = new Set(draftNormalTags.value.map(t => t.id))
-  return allTags.value
-    .filter(t => t.level === 2 && t.name.toLowerCase().includes(input) && !existingIds.has(t.id))
+  const inputRaw = newTagInput.value.trim()
+  if (!inputRaw) return []
+
+  const input = inputRaw.toLowerCase()
+  const existingIds = new Set(draftNormalTags.value.map(t => t.id).filter(id => id > 0))
+  const existingNames = new Set(draftNormalTags.value.map(t => t.name.toLowerCase()))
+  const source = (searchedTags.value && searchedTags.value.length) ? searchedTags.value : (allTags.value || [])
+
+  return source
+    .filter(t => t.level === 2 && t.name.toLowerCase().includes(input) && !existingIds.has(t.id) && !existingNames.has(t.name.toLowerCase()))
     .slice(0, 5)
 })
 
@@ -222,32 +334,56 @@ async function saveChanges() {
   if (!props.image || !hasChanges.value) return
 
   try {
-    const allTagIds: number[] = []
+    if (canEdit.value) {
+      const allTagIds: number[] = []
 
-    if (draftCategoryId.value) {
-      allTagIds.push(draftCategoryId.value)
+      if (draftCategoryId.value) {
+        allTagIds.push(draftCategoryId.value)
+      }
+
+      // 分辨率标签只读，但前端保留传递；后端会忽略 level=1 的输入
+      resolutionTags.value.forEach(t => {
+        if (t.id) allTagIds.push(t.id)
+      })
+
+      draftNormalTags.value.forEach(t => allTagIds.push(t.id))
+
+      await updateMutation.mutateAsync({
+        id: props.image.id,
+        data: {
+          tag_ids: allTagIds,
+          description: draftDescription.value,
+        }
+      })
+
+      originalCategoryId.value = draftCategoryId.value
+      originalNormalTagIds.value = draftNormalTags.value.map(t => t.id)
+      originalNormalTags.value = [...draftNormalTags.value]
+      originalDescription.value = draftDescription.value
+
+      emit('updated')
+      toast.success('保存成功')
+      return
     }
 
-    resolutionTags.value.forEach(t => {
-      if (t.id) allTagIds.push(t.id)
-    })
+    if (canSuggest.value) {
+      const normalTagIds = draftNormalTags.value
+        .map(t => t.id)
+        .filter(id => Boolean(id) && id > 0)
 
-    draftNormalTags.value.forEach(t => allTagIds.push(t.id))
+      await suggestMutation.mutateAsync({
+        id: props.image.id,
+        data: {
+          description: draftDescription.value,
+          category_id: draftCategoryId.value,
+          normal_tag_ids: normalTagIds,
+        }
+      })
 
-    await updateMutation.mutateAsync({
-      id: props.image.id,
-      data: {
-        tag_ids: allTagIds,
-        description: draftDescription.value,
-      }
-    })
-
-    originalCategoryId.value = draftCategoryId.value
-    originalNormalTagIds.value = draftNormalTags.value.map(t => t.id)
-    originalDescription.value = draftDescription.value
-
-    emit('updated')
-    toast.success('保存成功')
+      discardChanges()
+      toast.success('建议已提交，等待管理员审批')
+      return
+    }
   } catch (e: any) {
     toast.error(getErrorMessage(e))
   }
@@ -255,10 +391,7 @@ async function saveChanges() {
 
 function discardChanges() {
   draftCategoryId.value = originalCategoryId.value
-  const tags = props.image?.tags || []
-  const normalTagObjs = tags.filter(t => t.level === 2 || t.level === undefined)
-    .map(t => ({ id: t.id || 0, name: t.name }))
-  draftNormalTags.value = [...normalTagObjs]
+  draftNormalTags.value = [...originalNormalTags.value]
   draftDescription.value = originalDescription.value
   isEditingDescription.value = false
 }
@@ -276,7 +409,7 @@ function getImageUrl(url?: string): string {
 }
 
 function handleBackdropClick() {
-  if (canEdit.value && hasChanges.value) {
+  if ((canEdit.value || canSuggest.value) && hasChanges.value) {
     showUnsavedConfirm.value = true
   } else {
     emit('close')
@@ -418,6 +551,9 @@ onUnmounted(() => {
                   {{ image.description || '未命名图片' }}
                 </h2>
                 <div class="text-xs text-white/50 mt-1 font-mono">ID: {{ image.id }}</div>
+                <div v-if="editHint" class="text-[11px] text-white/45 mt-1">
+                  {{ editHint }}
+                </div>
               </div>
 
               <!-- 顶部操作区 (对应胶囊位置) -->
@@ -467,7 +603,7 @@ onUnmounted(() => {
               <div class="space-y-3">
                 <div class="flex items-center justify-between text-xs text-white/40 uppercase tracking-wider font-medium">
                   <span>描述</span>
-                  <Pencil v-if="canEdit" class="w-3 h-3" />
+                  <Pencil v-if="canEdit || canSuggest" class="w-3 h-3" />
                 </div>
                 <div v-if="isEditingDescription" class="space-y-2">
                   <textarea
@@ -487,9 +623,9 @@ onUnmounted(() => {
                 </div>
                 <div
                   v-else
-                  @click="canEdit && startEditDescription()"
+                  @click="(canEdit || canSuggest) && startEditDescription()"
                   class="text-sm leading-relaxed text-white/80 min-h-[1.5em]"
-                  :class="canEdit ? 'cursor-text hover:text-white transition-colors' : ''"
+                  :class="(canEdit || canSuggest) ? 'cursor-text hover:text-white transition-colors' : ''"
                 >
                   {{ draftDescription || '暂无描述' }}
                 </div>
@@ -502,7 +638,7 @@ onUnmounted(() => {
                   <div class="text-xs text-white/40 uppercase tracking-wider font-medium">分类</div>
                   <div class="flex flex-wrap gap-2">
                     <select
-                      v-if="canEdit"
+                      v-if="canEdit || canSuggest"
                       v-model="draftCategoryId"
                       class="w-full px-3 py-2 text-sm bg-white/5 text-white rounded-xl focus:outline-none hover:bg-white/10 transition-colors appearance-none cursor-pointer"
                     >
@@ -521,7 +657,16 @@ onUnmounted(() => {
                 <div class="space-y-3">
                   <div class="flex items-center justify-between text-xs text-white/40 uppercase tracking-wider font-medium">
                     <span>标签</span>
-                    <span v-if="canEditTags" class="text-[10px] bg-white/10 px-1.5 py-0.5 rounded">{{ draftNormalTags.length }}</span>
+                    <div v-if="canModifyTags" class="flex items-center gap-1">
+                      <span class="text-[10px] bg-white/10 px-1.5 py-0.5 rounded">{{ draftNormalTags.length }}</span>
+                      <span
+                        v-if="addedNormalTags.length || removedNormalTags.length"
+                        class="text-[10px] bg-white/10 px-1.5 py-0.5 rounded"
+                      >
+                        <span v-if="addedNormalTags.length" class="text-emerald-300">+{{ addedNormalTags.length }}</span>
+                        <span v-if="removedNormalTags.length" class="text-red-300" :class="addedNormalTags.length ? 'ml-1' : ''">-{{ removedNormalTags.length }}</span>
+                      </span>
+                    </div>
                   </div>
 
                   <div class="flex flex-wrap gap-2">
@@ -539,11 +684,13 @@ onUnmounted(() => {
                       v-for="tag in draftNormalTags"
                       :key="tag.id"
                       class="group inline-flex items-center px-2.5 py-1 rounded-md text-xs bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-200 transition-all"
+                      :class="isAddedNormalTag(tag) ? 'bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/20' : ''"
                     >
                       <Hash class="w-3 h-3 mr-1 opacity-30 group-hover:opacity-50" />
+                      <span v-if="isAddedNormalTag(tag)" class="mr-0.5 text-emerald-200/90 font-mono">+</span>
                       {{ tag.name }}
                       <button
-                        v-if="canEditTags"
+                        v-if="canModifyTags"
                         @click.stop="removeTag(tag.id)"
                         class="ml-1.5 p-0.5 rounded-full hover:bg-white/10 text-white/20 hover:text-white/60 opacity-0 group-hover:opacity-100 transition-all"
                       >
@@ -552,18 +699,18 @@ onUnmounted(() => {
                     </div>
 
                     <!-- 添加标签 -->
-                    <div v-if="canEditTags" class="relative inline-block">
+                    <div v-if="canModifyTags" class="relative inline-block">
                       <div v-if="showTagInput" class="flex items-center">
                         <input
                           ref="tagInputRef"
                           v-model="newTagInput"
-                          @keydown.enter.prevent="addTag"
-                          @keyup.escape="showTagInput = false; newTagInput = ''"
-                          @compositionstart="isComposing = true"
-                          @compositionend="isComposing = false"
-                          @blur="!newTagInput && (showTagInput = false)"
+                          @keydown.enter.prevent="addTag($event)"
+                          @keyup.escape="closeTagInput"
+                          @compositionstart="handleCompositionStart"
+                          @compositionend="handleCompositionEnd"
+                          @blur="!newTagInput && closeTagInput()"
                           class="w-24 px-2 py-1 text-xs bg-transparent border-b border-white/20 text-white focus:outline-none focus:border-white/50 focus:w-32 transition-all placeholder:text-white/20"
-                          placeholder="输入..."
+                          :placeholder="canSuggest && !canCreateTags ? '搜索已有...' : '输入...'"
                         />
                         <!-- 建议列表 -->
                         <div v-if="tagSuggestions.length" class="absolute top-full left-0 mt-2 w-40 bg-zinc-900 border border-white/10 rounded-lg shadow-xl z-50 overflow-hidden">
@@ -587,6 +734,42 @@ onUnmounted(() => {
                       </button>
                     </div>
                   </div>
+
+                  <div
+                    v-if="canModifyTags && !canCreateTags"
+                    class="mt-2 flex items-start gap-2 rounded-2xl bg-amber-500/5 px-3 py-2 text-[11px] text-amber-100/70"
+                  >
+                    <div class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-400/10 text-amber-100/75">
+                      <Info class="h-3.5 w-3.5" />
+                    </div>
+                    <div class="leading-4">
+                      <span class="text-amber-100/85">无新建标签权限</span>
+                      <span class="opacity-80">：仅可从下拉建议选择已有标签；回车不会创建新标签。</span>
+                      <span class="opacity-60">需要新增请联系管理员开通。</span>
+                    </div>
+                  </div>
+
+                  <!-- 友好提示：显示被移除的标签（用于建议/编辑时清晰看到 diff） -->
+                  <div v-if="canModifyTags && removedNormalTags.length" class="space-y-2 pt-2">
+                    <div class="text-[10px] text-white/35 uppercase tracking-wider font-medium">将移除</div>
+                    <div class="flex flex-wrap gap-2">
+                      <div
+                        v-for="tag in removedNormalTags"
+                        :key="tagKey(tag)"
+                        class="group inline-flex items-center px-2.5 py-1 rounded-md text-xs bg-red-500/10 text-red-200 hover:bg-red-500/15 transition-all"
+                      >
+                        <span class="mr-0.5 text-red-200/90 font-mono">-</span>
+                        {{ tag.name }}
+                        <button
+                          @click.stop="restoreRemovedTag(tag)"
+                          class="ml-1.5 p-0.5 rounded-full hover:bg-white/10 text-white/30 hover:text-white/70 opacity-0 group-hover:opacity-100 transition-all"
+                          title="撤销移除"
+                        >
+                          <Plus class="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -607,6 +790,10 @@ onUnmounted(() => {
                     <span class="text-white/80">{{ image.created_at ? new Date(image.created_at).toLocaleDateString() : '-' }}</span>
                   </div>
                   <div class="flex flex-col gap-1">
+                    <span class="text-white/30">上传者</span>
+                    <span class="text-white/80">{{ uploaderDisplay }}</span>
+                  </div>
+                  <div class="flex flex-col gap-1">
                     <span class="text-white/30">路径</span>
                     <span class="truncate" :title="image.file_path || ''">{{ image.file_path || '-' }}</span>
                   </div>
@@ -615,22 +802,24 @@ onUnmounted(() => {
             </div>
 
             <!-- Footer: Save Actions -->
-            <div v-if="canEdit && hasChanges" class="shrink-0 p-4 border-t border-white/10 bg-white/5 backdrop-blur">
+            <div v-if="canEdit || canSuggest" class="shrink-0 p-4 border-t border-white/10 bg-white/5 backdrop-blur">
               <div class="flex gap-3">
                 <button
                   @click="discardChanges"
+                  :disabled="!hasChanges || updateMutation.isPending.value || suggestMutation.isPending.value"
                   class="flex-1 px-4 py-2.5 text-sm font-medium text-white/70 hover:text-white hover:bg-white/10 rounded-xl transition-colors"
+                  :class="(!hasChanges || updateMutation.isPending.value || suggestMutation.isPending.value) ? 'opacity-40 cursor-not-allowed hover:bg-transparent hover:text-white/70' : ''"
                 >
                   放弃
                 </button>
                 <button
                   @click="saveChanges"
-                  :disabled="updateMutation.isPending.value"
+                  :disabled="!hasChanges || updateMutation.isPending.value || suggestMutation.isPending.value"
                   class="flex-[2] flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium bg-white text-black rounded-xl hover:bg-white/90 transition-colors shadow-lg disabled:opacity-50"
                 >
-                  <Loader2 v-if="updateMutation.isPending.value" class="w-4 h-4 animate-spin" />
+                  <Loader2 v-if="updateMutation.isPending.value || suggestMutation.isPending.value" class="w-4 h-4 animate-spin" />
                   <Save v-else class="w-4 h-4" />
-                  保存修改
+                  {{ canEdit ? '保存修改' : '提交建议' }}
                 </button>
               </div>
             </div>
@@ -642,7 +831,9 @@ onUnmounted(() => {
           <div v-if="showUnsavedConfirm" class="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 backdrop-blur-sm">
             <div class="bg-zinc-900 border border-white/20 rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl transform scale-100">
               <h3 class="text-white font-medium text-lg mb-2">未保存的更改</h3>
-              <p class="text-white/60 text-sm mb-6">您修改了图片信息，是否保存更改？</p>
+              <p class="text-white/60 text-sm mb-6">
+                您修改了图片信息，是否{{ canEdit ? '保存更改' : '提交建议' }}？
+              </p>
               <div class="flex gap-3 justify-end">
                 <button
                   @click="confirmDiscardAndClose"
@@ -652,10 +843,10 @@ onUnmounted(() => {
                 </button>
                 <button
                   @click="confirmSaveAndClose"
-                  :disabled="updateMutation.isPending.value"
+                  :disabled="updateMutation.isPending.value || suggestMutation.isPending.value"
                   class="px-5 py-2 text-sm bg-white text-black font-medium rounded-lg hover:bg-gray-200 transition-colors"
                 >
-                  保存
+                  {{ canEdit ? '保存' : '提交' }}
                 </button>
               </div>
             </div>

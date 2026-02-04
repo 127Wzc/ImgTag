@@ -74,6 +74,7 @@ export function usePermission() {
   const canUpload = computed(() => hasPermission(Permission.UPLOAD_IMAGE))
   const canCreateTags = computed(() => hasPermission(Permission.CREATE_TAGS))
   const canUseAIAnalyze = computed(() => hasPermission(Permission.AI_ANALYZE))
+  const canSuggestChanges = computed(() => hasPermission(Permission.SUGGEST_CHANGES))
 
   return {
     hasPermission,
@@ -84,5 +85,6 @@ export function usePermission() {
     canUpload,
     canCreateTags,
     canUseAIAnalyze,
+    canSuggestChanges,
   }
 }

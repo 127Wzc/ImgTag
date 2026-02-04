@@ -352,6 +352,33 @@ class TaskQueueService:
         logger.info(f"Worker {worker_id} 处理图片 ID: {image_id}")
         
         try:
+            # ==================== 向量重建任务（不触发视觉分析） ====================
+            if task.type == "rebuild_vector":
+                async with async_session_maker() as session:
+                    image_model = await image_repository.get_with_tags(session, image_id)
+                    if not image_model:
+                        raise ValueError(f"图片 {image_id} 不存在")
+
+                    description = image_model.description or ""
+                    # 仅使用主分类(level=0) + 普通标签(level=2)，排除分辨率(level=1)
+                    tags = [
+                        t.name for t in (image_model.tags or [])
+                        if t.level in (0, 2)
+                    ]
+
+                saved = await embedding_service.save_embedding_for_image(
+                    image_id, description, tags
+                )
+
+                await self._mark_task_completed(task.id, {
+                    "image_id": image_id,
+                    "saved": saved,
+                    "used_description": description,
+                    "used_tags": tags,
+                })
+                logger.info(f"图片 {image_id} 向量重建完成")
+                return
+
             async with async_session_maker() as session:
                 # 获取图片信息
                 image_model = await image_repository.get_with_tags(session, image_id)
@@ -499,6 +526,8 @@ class TaskQueueService:
     
     async def _skip_task(self, task_id: str, image_id: int, reason: str):
         """跳过任务（格式不支持等）"""
+        from imgtag.services import embedding_service
+
         logger.info(f"图片 {image_id} 跳过: {reason}")
         
         # 生成空向量

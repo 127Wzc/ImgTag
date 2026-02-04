@@ -45,3 +45,7 @@ dist/
 
 # 模型文件
 models/*
+
+# 项目agent md
+AGENTS.md
+CLAUDE.md

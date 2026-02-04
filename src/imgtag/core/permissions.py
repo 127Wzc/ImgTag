@@ -18,6 +18,7 @@ class Permission(IntFlag):
         UPLOAD_IMAGE: 允许上传图片
         CREATE_TAGS: 允许新建标签
         AI_ANALYZE: 允许 AI 分析
+        SUGGEST_CHANGES: 允许提交修改建议（修改他人图片元信息）
     """
 
     # === 图片权限 ===
@@ -26,10 +27,11 @@ class Permission(IntFlag):
     # === 功能权限 ===
     CREATE_TAGS = 1 << 1  # 新建标签
     AI_ANALYZE = 1 << 2  # AI 分析
+    SUGGEST_CHANGES = 1 << 3  # 提交修改建议
 
     # === 预设组合 ===
     NONE = 0  # 无权限
-    FULL = (1 << 3) - 1  # 所有当前权限 (0x7 = 7)
+    FULL = (1 << 4) - 1  # 所有当前权限 (0xF = 15)
     DEFAULT = FULL  # 默认权限（全开）
 
 
@@ -38,6 +40,7 @@ PERMISSION_NAMES = {
     Permission.UPLOAD_IMAGE: "上传图片",
     Permission.CREATE_TAGS: "新建标签",
     Permission.AI_ANALYZE: "AI 分析",
+    Permission.SUGGEST_CHANGES: "提交修改建议",
 }
 
 

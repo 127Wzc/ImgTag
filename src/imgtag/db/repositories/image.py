@@ -113,7 +113,7 @@ class ImageRepository(BaseRepository[Image]):
         """
         stmt = (
             select(Image)
-            .options(selectinload(Image.tags))
+            .options(selectinload(Image.tags), selectinload(Image.uploader))
             .where(Image.id == image_id)
         )
         result = await session.execute(stmt)
@@ -312,7 +312,7 @@ class ImageRepository(BaseRepository[Image]):
             Dict with images, total, limit, offset.
         """
         # Base query - eager load tags to avoid lazy-load issues
-        stmt = select(Image).options(selectinload(Image.tags))
+        stmt = select(Image).options(selectinload(Image.tags), selectinload(Image.uploader))
         count_stmt = select(func.count()).select_from(Image)
 
         conditions = []
@@ -670,6 +670,27 @@ class ImageRepository(BaseRepository[Image]):
             images_for_url = await self.get_by_ids(session, image_ids)
             url_map = await storage_service.get_read_urls(list(images_for_url))
 
+        # Batch fetch uploader info（用于前端展示与权限判断）
+        uploader_map: dict[int, dict[str, Any]] = {}
+        if image_ids:
+            from imgtag.models.user import User
+
+            uploader_stmt = (
+                select(
+                    Image.id.label("image_id"),
+                    Image.uploaded_by,
+                    User.username.label("uploaded_by_username"),
+                )
+                .outerjoin(User, User.id == Image.uploaded_by)
+                .where(Image.id.in_(image_ids))
+            )
+            uploader_result = await session.execute(uploader_stmt)
+            for row in uploader_result:
+                uploader_map[int(row.image_id)] = {
+                    "uploaded_by": row.uploaded_by,
+                    "uploaded_by_username": row.uploaded_by_username,
+                }
+
         # Build response
         images = []
         for row in rows:
@@ -680,6 +701,7 @@ class ImageRepository(BaseRepository[Image]):
             
             # Get URL from storage service (fallback to empty string)
             display_url = url_map.get(image_id, "")
+            uploader = uploader_map.get(int(image_id)) or {}
 
             images.append({
                 "id": image_id,
@@ -687,6 +709,8 @@ class ImageRepository(BaseRepository[Image]):
                 "tags": tags_map.get(image_id, []),
                 "description": row[1],
                 "original_url": row[2],
+                "uploaded_by": uploader.get("uploaded_by"),
+                "uploaded_by_username": uploader.get("uploaded_by_username"),
                 "similarity": final_score,
                 "vector_score": vector_score,
                 "tag_score": tag_score,

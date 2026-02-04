@@ -209,6 +209,7 @@ function nextImage() {
       @close="closeImage"
       @prev="prevImage"
       @next="nextImage"
+      @updated="refetch"
     />
   </div>
 </template>

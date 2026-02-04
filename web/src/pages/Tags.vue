@@ -48,9 +48,8 @@ watch(activeLevel, () => {
 const { data: activeTags, isLoading: tagsLoading } = useQuery({
   queryKey: computed(() => ['tags', 'level', activeLevel.value, currentPage.value]),
   queryFn: async () => {
-    const offset = (currentPage.value - 1) * PAGE_SIZE
     const { data } = await apiClient.get<Tag[]>('/tags/', {
-      params: { level: activeLevel.value, limit: PAGE_SIZE, offset }
+      params: { level: activeLevel.value, size: PAGE_SIZE, page: currentPage.value }
     })
     return data
   },

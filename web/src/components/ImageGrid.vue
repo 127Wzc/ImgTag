@@ -7,6 +7,7 @@ import { useAddImageTag, useRemoveImageTag, useTags } from '@/api/queries'
 import { toast } from 'vue-sonner'
 import { getErrorMessage } from '@/utils/api-error'
 import { usePermission } from '@/composables/usePermission'
+import { useUserStore } from '@/stores'
 
 type ImageItem = ImageResponse | ImageWithSimilarity
 
@@ -36,7 +37,17 @@ const emit = defineEmits<{
 }>()
 
 const { canCreateTags } = usePermission()
-const canEditTags = computed(() => props.editable && canCreateTags.value)
+const userStore = useUserStore()
+
+function canEditImageMeta(image: ImageItem): boolean {
+  if (!userStore.isLoggedIn) return false
+  if (userStore.isAdmin) return true
+  return image.uploaded_by === userStore.user?.id
+}
+
+function canEditTagsForImage(image: ImageItem): boolean {
+  return props.editable && canEditImageMeta(image)
+}
 
 // API
 const addTagMutation = useAddImageTag()
@@ -115,7 +126,8 @@ function isTagPending(imageId: number, tagId: number): boolean {
 
 async function startEditTag(event: Event, imageId: number) {
   event.stopPropagation()
-  if (!canEditTags.value) return
+  const image = props.images.find(i => i.id === imageId)
+  if (!image || !canEditTagsForImage(image)) return
   editingImageId.value = imageId
   newTagInput.value = ''
   await new Promise(r => setTimeout(r, 50))
@@ -130,7 +142,7 @@ function cancelEdit(event: Event) {
 
 async function removeTag(event: Event, image: ImageItem, tag: TagWithSource) {
   event.stopPropagation()
-  if (!canEditTags.value || !tag.id) return
+  if (!canEditTagsForImage(image) || !tag.id) return
 
   const opKey = `${image.id}-${tag.id}`
   if (pendingTagOps.value.has(opKey)) return
@@ -152,7 +164,7 @@ async function removeTag(event: Event, image: ImageItem, tag: TagWithSource) {
 
 async function addTag(event: Event, image: ImageItem) {
   event.stopPropagation()
-  if (!canEditTags.value) return
+  if (!canEditTagsForImage(image)) return
   if (isComposing.value) return
 
   const tagName = newTagInput.value.trim()
@@ -171,9 +183,24 @@ async function addTag(event: Event, image: ImageItem) {
   pendingTagOps.value.add(opKey)
 
   try {
+    const existing = allTags.value?.find(
+      t => t.level === 2 && t.name.toLowerCase() === tagName.toLowerCase()
+    )
+
+    if (existing) {
+      const result = await addTagMutation.mutateAsync({ imageId: image.id, tagId: existing.id })
+      handleAddTagSuccess(image, result)
+      return
+    }
+
     const result = await addTagMutation.mutateAsync({ imageId: image.id, tagName })
     handleAddTagSuccess(image, result)
   } catch (e: any) {
+    const status = e?.response?.status
+    if (status === 403 && !canCreateTags.value) {
+      toast.error('暂无新建标签权限，只能选择已有标签')
+      return
+    }
     toast.error(getErrorMessage(e))
   } finally {
     pendingTagOps.value.delete(opKey)
@@ -216,7 +243,7 @@ const tagSuggestions = computed(() => {
 
 async function selectSuggestion(event: Event, image: ImageItem, tag: { id: number; name: string }) {
   event.stopPropagation()
-  if (!canEditTags.value) return
+  if (!canEditTagsForImage(image)) return
 
   const opKey = `${image.id}-${tag.id}`
   if (pendingTagOps.value.has(opKey)) return
@@ -367,13 +394,13 @@ function isAnyOpPending(imageId: number): boolean {
               class="group/tag inline-flex items-center px-2 py-0.5 text-[10px] border rounded-md transition-colors"
               :class="[
                 getTagClass(tag),
-                canEditTags ? 'pr-1' : '',
+                canEditTagsForImage(image) ? 'pr-1' : '',
                 isTagPending(image.id, tag.id) ? 'opacity-50' : ''
               ]"
             >
               {{ tag.name }}
               <button
-                v-if="canEditTags && !isTagPending(image.id, tag.id)"
+                v-if="canEditTagsForImage(image) && !isTagPending(image.id, tag.id)"
                 @click="removeTag($event, image, tag)"
                 class="ml-1 p-0.5 rounded-full hover:bg-red-500/10 hover:text-red-500 opacity-0 group-hover/tag:opacity-100 transition-all"
                 title="删除"
@@ -381,14 +408,14 @@ function isAnyOpPending(imageId: number): boolean {
                 <X class="w-2.5 h-2.5" />
               </button>
               <Loader2
-                v-if="canEditTags && isTagPending(image.id, tag.id)"
+                v-if="canEditTagsForImage(image) && isTagPending(image.id, tag.id)"
                 class="w-2.5 h-2.5 ml-1 animate-spin"
               />
             </span>
           </template>
 
           <!-- 添加标签按钮 -->
-          <template v-if="canEditTags">
+          <template v-if="canEditTagsForImage(image)">
             <div v-if="editingImageId === image.id" class="relative z-30" @click.stop>
               <div class="flex items-center gap-1">
                 <input
@@ -398,7 +425,7 @@ function isAnyOpPending(imageId: number): boolean {
                   @keyup.escape="cancelEdit($event)"
                   @compositionstart="isComposing = true"
                   @compositionend="isComposing = false"
-                  placeholder="新标签..."
+                  :placeholder="canCreateTags ? '新/已有...' : '选择已有...'"
                   class="w-20 px-2 py-0.5 text-[10px] bg-background border border-primary/30 rounded-md focus:outline-none focus:ring-1 focus:ring-primary shadow-sm"
                   :disabled="isAnyOpPending(image.id)"
                 />
@@ -438,7 +465,7 @@ function isAnyOpPending(imageId: number): boolean {
               v-else
               @click="startEditTag($event, image.id)"
               class="inline-flex items-center justify-center w-5 h-5 rounded-md border border-dashed border-border text-muted-foreground hover:border-primary/50 hover:text-primary hover:bg-primary/5 transition-all"
-              title="添加/新建标签"
+              :title="canCreateTags ? '添加/新建标签' : '添加标签（仅已有）'"
             >
               <Plus class="w-3 h-3" />
             </button>

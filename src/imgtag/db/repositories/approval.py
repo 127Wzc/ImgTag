@@ -32,6 +32,7 @@ class ApprovalRepository(BaseRepository[Approval]):
         self,
         session: AsyncSession,
         *,
+        types: Sequence[str] | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[Sequence[Approval], int]:
@@ -53,6 +54,8 @@ class ApprovalRepository(BaseRepository[Approval]):
             .select_from(Approval)
             .where(Approval.status == "pending")
         )
+        if types:
+            count_stmt = count_stmt.where(Approval.type.in_(list(types)))
         count_result = await session.execute(count_stmt)
         total = count_result.scalar() or 0
 
@@ -65,6 +68,8 @@ class ApprovalRepository(BaseRepository[Approval]):
             .limit(limit)
             .offset(offset)
         )
+        if types:
+            stmt = stmt.where(Approval.type.in_(list(types)))
         result = await session.execute(stmt)
         approvals = result.scalars().all()
 

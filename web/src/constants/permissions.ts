@@ -15,6 +15,9 @@ export const Permission = {
 
     /** AI 分析 */
     AI_ANALYZE: 1 << 2, // 4
+
+    /** 提交修改建议 */
+    SUGGEST_CHANGES: 1 << 3, // 8
 } as const
 
 export type PermissionType = (typeof Permission)[keyof typeof Permission]
@@ -39,6 +42,7 @@ export const PermissionNames: Record<PermissionType, string> = {
     [Permission.UPLOAD_IMAGE]: '上传图片',
     [Permission.CREATE_TAGS]: '新建标签',
     [Permission.AI_ANALYZE]: 'AI 分析',
+    [Permission.SUGGEST_CHANGES]: '提交修改建议',
 }
 
 /**

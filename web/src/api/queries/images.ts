@@ -235,6 +235,32 @@ export function useUpdateImage() {
         onSuccess: (_, variables) => {
             queryClient.invalidateQueries({ queryKey: ['image', variables.id] })
             queryClient.invalidateQueries({ queryKey: ['images'] })
+            // 这些列表也会展示 tags/description，需要同步刷新
+            queryClient.invalidateQueries({ queryKey: ['my-images'] })
+            queryClient.invalidateQueries({ queryKey: ['similar-search'] })
+        },
+    })
+}
+
+/**
+ * 提交图片元信息修改建议（非上传者）
+ */
+export function useSuggestImageUpdate() {
+    return useMutation({
+        mutationFn: async ({ id, data }: {
+            id: number
+            data: {
+                description: string
+                category_id: number | null
+                normal_tag_ids: number[]
+                comment?: string
+            }
+        }) => {
+            const { data: result } = await apiClient.post<{
+                message: string
+                approval_id: number
+            }>(`/images/${id}/suggest`, data)
+            return result
         },
     })
 }
@@ -243,6 +269,8 @@ export function useUpdateImage() {
  * 为图片添加单个标签（支持 ID 或名称）
  */
 export function useAddImageTag() {
+    const queryClient = useQueryClient()
+
     return useMutation({
         mutationFn: async ({ imageId, tagId, tagName }: {
             imageId: number
@@ -261,6 +289,14 @@ export function useAddImageTag() {
             }>(`/images/${imageId}/tags?${params.toString()}`)
             return data
         },
+        onSuccess: (data, variables) => {
+            queryClient.invalidateQueries({ queryKey: ['image', variables.imageId] })
+            queryClient.invalidateQueries({ queryKey: ['images'] })
+            queryClient.invalidateQueries({ queryKey: ['my-images'] })
+            if (data?.is_new) {
+                queryClient.invalidateQueries({ queryKey: ['tags'] })
+            }
+        },
     })
 }
 
@@ -268,6 +304,8 @@ export function useAddImageTag() {
  * 从图片删除单个标签
  */
 export function useRemoveImageTag() {
+    const queryClient = useQueryClient()
+
     return useMutation({
         mutationFn: async ({ imageId, tagId }: { imageId: number; tagId: number }) => {
             const { data } = await apiClient.delete<{ message: string; tag_id: number }>(
@@ -275,6 +313,10 @@ export function useRemoveImageTag() {
             )
             return data
         },
+        onSuccess: (_data, variables) => {
+            queryClient.invalidateQueries({ queryKey: ['image', variables.imageId] })
+            queryClient.invalidateQueries({ queryKey: ['images'] })
+            queryClient.invalidateQueries({ queryKey: ['my-images'] })
+        },
     })
 }
-

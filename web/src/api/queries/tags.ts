@@ -32,7 +32,7 @@ export function useTagsByLevel(level: MaybeRef<number>, limit = 200) {
         queryKey: computed(() => ['tags', 'level', unref(level), limit]),
         queryFn: async () => {
             const { data } = await apiClient.get<Tag[]>('/tags/', {
-                params: { level: unref(level), limit }
+                params: { level: unref(level), size: limit }
             })
             return data
         },
@@ -48,7 +48,7 @@ export function useTags(limit = 200) {
         queryKey: ['tags', 'all', limit],
         queryFn: async () => {
             const { data } = await apiClient.get<Tag[]>('/tags/', {
-                params: { limit }
+                params: { size: limit }
             })
             return data
         },
@@ -63,7 +63,7 @@ export function useSearchTags(keyword: MaybeRef<string>, level?: MaybeRef<number
     return useQuery({
         queryKey: computed(() => ['tags', 'search', unref(keyword), unref(level), limit]),
         queryFn: async () => {
-            const params: Record<string, any> = { limit }
+            const params: Record<string, any> = { size: limit }
             const kw = unref(keyword)
             const lv = unref(level)
             if (kw) params.keyword = kw
@@ -88,7 +88,7 @@ export function useCategories() {
         queryKey: ['tags', 'categories'],
         queryFn: async () => {
             const { data } = await apiClient.get<Tag[]>('/tags/', {
-                params: { level: 0, limit: 100 }
+                params: { level: 0, size: 100 }
             })
             return data
         },
@@ -104,7 +104,7 @@ export function useResolutions() {
         queryKey: ['tags', 'resolutions'],
         queryFn: async () => {
             const { data } = await apiClient.get<Tag[]>('/tags/', {
-                params: { level: 1, limit: 100 }
+                params: { level: 1, size: 100 }
             })
             return data
         },

@@ -60,6 +60,7 @@ from imgtag.schemas import (
     ImageSearchRequest,
     ImageSearchResponse,
     ImageUpdate,
+    ImageUpdateSuggestion,
     ImageWithSimilarity,
     SimilarSearchRequest,
     SimilarSearchResponse,
@@ -67,6 +68,7 @@ from imgtag.schemas import (
     PaginatedResponse,
 )
 from imgtag.services import embedding_service, storage_service, upload_service
+from imgtag.services.suggestion_service import suggestion_service
 from imgtag.services.backup_service import trigger_backup_for_image
 from imgtag.services.task_queue import task_queue
 from imgtag.utils.pagination import PageParams
@@ -143,6 +145,7 @@ async def _image_to_response(
         created_at=str(image.created_at) if image.created_at else None,
         updated_at=str(image.updated_at) if image.updated_at else None,
         uploaded_by=image.uploaded_by,
+        uploaded_by_username=image.uploader.username if image.uploader else None,
     )
 
 
@@ -190,6 +193,7 @@ async def _images_to_responses(
             created_at=str(img.created_at) if img.created_at else None,
             updated_at=str(img.updated_at) if img.updated_at else None,
             uploaded_by=img.uploaded_by,
+            uploaded_by_username=img.uploader.username if img.uploader else None,
         ))
     
     return responses
@@ -1143,21 +1147,44 @@ async def update_image(
         has_tag_update = image_update.tag_ids is not None or image_update.tags is not None
         has_desc_update = image_update.description is not None
         
-        # 获取标签名列表用于计算 embedding
-        tag_names_for_embedding: list[str] = []
-        tag_ids_to_set: list[int] | None = None
+        # 解析标签（新流程：tag_ids 只负责 level=0/1/2 的选择；真正写入时：
+        # - level=0 主分类：走 set_image_category（保证唯一）
+        # - level=2 普通标签：走 set_image_tags_by_ids（语义收敛为仅 level=2）
+        tag_ids_input: list[int] | None = None
+        new_category_id: int | None = None
+        new_category_name: str | None = None
+        new_normal_tag_ids: list[int] = []
+        new_normal_tag_names: list[str] = []
         
         if image_update.tag_ids is not None:
-            # 优先使用 tag_ids（新流程）
-            tag_ids_to_set = image_update.tag_ids
-            # 查询标签名用于 embedding
-            if tag_ids_to_set:
-                stmt = select(Tag.name).where(Tag.id.in_(tag_ids_to_set))
+            tag_ids_input = image_update.tag_ids or []
+            if tag_ids_input:
+                # 查询标签的 level/name，用于：
+                # 1) 解析主分类与普通标签
+                # 2) 计算 embedding（排除分辨率 level=1）
+                stmt = select(Tag.id, Tag.name, Tag.level).where(Tag.id.in_(tag_ids_input))
                 result = await session.execute(stmt)
-                tag_names_for_embedding = [row.name for row in result]
+                meta = {row.id: (row.name, row.level) for row in result.fetchall()}
+
+                for tid in tag_ids_input:
+                    m = meta.get(tid)
+                    if not m:
+                        continue
+                    name, level = m
+                    if level == 0:
+                        if new_category_id is not None and new_category_id != tid:
+                            raise HTTPException(status_code=400, detail="只能选择一个主分类（level=0）")
+                        new_category_id = tid
+                        new_category_name = name
+                    elif level == 2:
+                        new_normal_tag_ids.append(tid)
+                        new_normal_tag_names.append(name)
+                    else:
+                        # level=1 分辨率标签由系统维护，忽略客户端输入
+                        continue
         elif image_update.tags is not None:
             # 兼容旧流程（按标签名）
-            tag_names_for_embedding = image_update.tags
+            new_normal_tag_names = image_update.tags
 
         # Recalculate embedding if tags or description changed
         embedding_vector = None
@@ -1168,10 +1195,27 @@ async def update_image(
                 else (image.description or "")
             )
             
-            # 如果没有标签更新，查询当前标签
-            if not has_tag_update:
+            tag_names_for_embedding: list[str] = []
+
+            # 若是新流程（tag_ids），使用解析结果；否则回退到查询当前标签
+            if image_update.tag_ids is not None:
+                if new_category_name:
+                    tag_names_for_embedding.append(new_category_name)
+                tag_names_for_embedding.extend(new_normal_tag_names)
+            elif image_update.tags is not None:
+                # 旧流程：补上当前主分类（若有），再叠加普通标签名
                 current_tag_objs = await image_tag_repository.get_image_tags(session, image_id)
-                tag_names_for_embedding = [t.name for t in current_tag_objs]
+                current_category = next((t.name for t in current_tag_objs if t.level == 0), None)
+                if current_category:
+                    tag_names_for_embedding.append(current_category)
+                tag_names_for_embedding.extend(new_normal_tag_names)
+            else:
+                # 仅更新描述：查询当前标签（排除分辨率）
+                current_tag_objs = await image_tag_repository.get_image_tags(session, image_id)
+                current_category = next((t.name for t in current_tag_objs if t.level == 0), None)
+                if current_category:
+                    tag_names_for_embedding.append(current_category)
+                tag_names_for_embedding.extend([t.name for t in current_tag_objs if t.level == 2])
 
             embedding_vector = await embedding_service.get_embedding_combined(
                 description, tag_names_for_embedding
@@ -1188,17 +1232,28 @@ async def update_image(
         )
 
         # Update tags
-        if tag_ids_to_set is not None:
-            # 新流程：按 ID 更新标签关联
-            logger.info(f"更新标签关联: image_id={image_id}, tag_ids={tag_ids_to_set}")
-            changes = await image_tag_repository.set_image_tags_by_ids(
+        if tag_ids_input is not None:
+            # 新流程：主分类与普通标签分开处理，避免主分类残留
+            logger.info(
+                f"更新标签关联(tag_ids): image_id={image_id}, "
+                f"category_id={new_category_id}, normal_tag_ids={len(new_normal_tag_ids)}"
+            )
+
+            await image_tag_repository.set_image_category(
                 session,
                 image_id,
-                tag_ids_to_set,
+                new_category_id,
                 source="user",
                 added_by=current_user.get("id"),
             )
-            logger.info(f"标签关联更新完成: changes={changes}")
+            changes = await image_tag_repository.set_image_tags_by_ids(
+                session,
+                image_id,
+                new_normal_tag_ids,
+                source="user",
+                added_by=current_user.get("id"),
+            )
+            logger.info(f"普通标签关联更新完成: changes={changes}")
         elif image_update.tags is not None:
             # 旧流程：按名称更新（兼容）
             await ensure_create_tags_if_missing(session, current_user, image_update.tags)
@@ -1222,6 +1277,61 @@ async def update_image(
     except Exception as e:
         logger.error(f"更新图像失败: {e}")
         raise HTTPException(status_code=500, detail=f"更新图像失败: {e}")
+
+
+@router.post("/{image_id}/suggest", response_model=dict[str, Any], status_code=201)
+async def suggest_image_update(
+    image_id: int,
+    suggestion: ImageUpdateSuggestion,
+    current_user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """提交图片元信息修改建议（需登录）。
+
+    适用场景：普通成员对“非自己上传”的图片提交修改建议，由管理员审批后落地。
+
+    规则：
+    - 上传者/管理员拥有直接编辑权限，不应走建议流程
+    - 仅允许对“当前用户可见”的图片提交建议（public 或 owner/admin）
+    - 普通成员需要 SUGGEST_CHANGES 权限
+    """
+    try:
+        image = await image_repository.get_by_id(session, image_id)
+        if not image:
+            raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
+
+        # 上传者/管理员直接编辑即可（避免绕过审计语义）
+        if current_user.get("role") == "admin" or image.uploaded_by == current_user.get("id"):
+            raise HTTPException(status_code=400, detail="你有编辑权限，请直接编辑该图片")
+
+        # 权限校验（fail-fast）
+        ensure_permission(current_user, Permission.SUGGEST_CHANGES)
+
+        # 可见性校验：非公开图片仅 owner/admin 可见
+        if not getattr(image, "is_public", True):
+            raise HTTPException(status_code=403, detail="无权对该图片提交建议")
+
+        approval = await suggestion_service.create_image_update_suggestion(
+            session,
+            image_id=image_id,
+            requester_id=int(current_user.get("id")),
+            description=suggestion.description,
+            category_id=suggestion.category_id,
+            normal_tag_ids=suggestion.normal_tag_ids,
+            comment=suggestion.comment,
+        )
+
+        return {
+            "message": "修改建议已提交，等待管理员审批",
+            "approval_id": approval.id,
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"提交修改建议失败: {e}")
+        raise HTTPException(status_code=500, detail=f"提交修改建议失败: {e}")
 
 
 @router.delete("/{image_id}", response_model=dict[str, Any])
@@ -1653,39 +1763,64 @@ async def batch_update_tags(
         # 无 CREATE_TAGS 权限时，禁止隐式创建新标签
         await ensure_create_tags_if_missing(session, current_user, request.tags)
 
-        # Bulk tag operation with permission filter (SQL 层过滤)
+        # 权限兜底：非管理员只能操作自己上传的图片
         owner_id = get_owner_filter(current_user)
-        
+        effective_image_ids = request.image_ids
+        if owner_id is not None:
+            stmt = select(Image.id).where(
+                and_(Image.id.in_(request.image_ids), Image.uploaded_by == owner_id)
+            )
+            result = await session.execute(stmt)
+            effective_image_ids = [row.id for row in result]
+
+        if not effective_image_ids:
+            return {
+                "message": "无可操作图片（仅允许修改自己上传的图片）",
+                "success_count": 0,
+                "fail_count": len(request.image_ids),
+                "process_time": f"{(time.time() - start_time):.4f}秒",
+            }
+
+        # Bulk tag operation（此处 owner 已在 SQL 层过滤，仓库不再重复过滤）
         if request.mode == "add":
             updated = await image_tag_repository.batch_add_tags_to_images(
                 session,
-                request.image_ids,
+                effective_image_ids,
                 request.tags,
                 source="user",
                 added_by=user_id,
-                owner_id=owner_id,
+                owner_id=None,
             )
         else:
             updated = await image_tag_repository.batch_replace_tags_for_images(
                 session,
-                request.image_ids,
+                effective_image_ids,
                 request.tags,
                 source="user",
                 added_by=user_id,
-                owner_id=owner_id,
+                owner_id=None,
             )
+
+        # 提交后再触发向量重建，避免读到旧数据
+        await session.commit()
+        try:
+            asyncio.create_task(
+                task_queue.add_tasks(effective_image_ids, task_type="rebuild_vector")
+            )
+        except Exception as e:
+            logger.warning(f"批量更新后触发向量重建失败: {e}")
 
         process_time = time.time() - start_time
         perf_logger.info(f"批量更新标签耗时: {process_time:.4f}秒")
 
-        # 计算实际更新的数量
-        success_count = len(request.image_ids) if owner_id is None else updated
+        fail_count = max(0, len(request.image_ids) - len(effective_image_ids))
 
         return {
-            "message": f"批量更新完成: {success_count} 张图片",
-            "success_count": success_count,
-            "fail_count": 0,
+            "message": f"批量更新完成: {len(effective_image_ids)} 张图片",
+            "success_count": len(effective_image_ids),
+            "fail_count": fail_count,
             "tags_updated": updated,
+            "rebuild_scheduled": len(effective_image_ids),
             "process_time": f"{process_time:.4f}秒",
         }
     except HTTPException:
@@ -1796,6 +1931,15 @@ async def batch_set_category(
         await session.execute(insert_stmt)
         await session.flush()
 
+        # 提交后再触发向量重建，避免读到旧数据
+        await session.commit()
+        try:
+            asyncio.create_task(
+                task_queue.add_tasks(image_ids, task_type="rebuild_vector")
+            )
+        except Exception as e:
+            logger.warning(f"批量设置分类后触发向量重建失败: {e}")
+
         process_time = time.time() - start_time
         perf_logger.info(f"批量设置分类耗时: {process_time:.4f}秒")
 
@@ -1804,6 +1948,7 @@ async def batch_set_category(
             "success_count": len(image_ids),
             "fail_count": max(0, len(request.image_ids) - len(image_ids)),
             "category_name": category.name,
+            "rebuild_scheduled": len(image_ids),
             "process_time": f"{process_time:.4f}秒",
         }
     except HTTPException:
@@ -1811,8 +1956,3 @@ async def batch_set_category(
     except Exception as e:
         logger.error(f"批量设置分类失败: {e}")
         raise HTTPException(status_code=500, detail=f"批量设置分类失败: {e}")
-
-
-# Import Tag model for subquery
-from imgtag.models.tag import Tag, ImageTag
-from sqlalchemy import select

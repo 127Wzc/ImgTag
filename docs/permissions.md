@@ -8,20 +8,24 @@ ImgTag 使用位掩码（Bitmask）做细粒度权限控制；**前端仅用于 
 - `user`：由数据库字段 `users.permissions` 控制
 - 外部 API（API Key）同样会返回/携带 `permissions`，用于一致的权限判断
 
-## 权限位定义（当前仅 3 个）
+## 权限位定义（当前 4 个）
 
 | 权限位 | 权限名 | 说明 | 值 |
 |--------|--------|------|-----|
 | `1 << 0` | `UPLOAD_IMAGE` | 上传图片 | 1 |
 | `1 << 1` | `CREATE_TAGS` | 新建标签 | 2 |
 | `1 << 2` | `AI_ANALYZE` | AI 分析 | 4 |
+| `1 << 3` | `SUGGEST_CHANGES` | 提交修改建议（修改他人图片元信息） | 8 |
 
-组合示例：`3=上传+新建标签`，`5=上传+AI分析`，`7=全部权限`。
+组合示例：`3=上传+新建标签`，`5=上传+AI分析`，`15=全部权限`。
 
 ## 默认权限
 
-- 新注册用户默认 `permissions = 7`（开启所有当前权限）
-- 管理员创建用户：未显式传 `permissions` 时同样默认 7
+- 新注册用户默认 `permissions = 15`（开启所有当前权限）
+- 管理员创建用户：未显式传 `permissions` 时同样默认 15
+
+升级说明：
+- 通过 Alembic 迁移会对存量普通用户做补齐：`permissions |= 8`
 
 补充说明：
 - 后端权限是**实时**的：每次请求都会通过 `Token -> users` 查询拿到最新 `permissions`
@@ -71,10 +75,10 @@ PUT /api/v1/auth/users/{user_id}
 Authorization: Bearer <admin_token>
 Content-Type: application/json
 
-{ "permissions": 7 }
+{ "permissions": 15 }
 ```
 
-常用值：`0`（全禁用）、`1`（仅上传）、`7`（全部）。
+常用值：`0`（全禁用）、`1`（仅上传）、`15`（全部）。
 
 ## 新增权限（扩展）
 

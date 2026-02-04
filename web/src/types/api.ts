@@ -66,6 +66,7 @@ export interface ImageResponse {
     height: number | null
     file_size: number | null
     uploaded_by: number | null  // 上传者用户ID
+    uploaded_by_username?: string | null // 上传者用户名
     is_public?: boolean
     created_at?: string | null
     updated_at?: string | null
