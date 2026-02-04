@@ -18,7 +18,7 @@ from imgtag.api.endpoints.auth import require_admin
 from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger, get_perf_logger
 from imgtag.db import get_async_session
-from imgtag.db.database import async_session_maker
+from imgtag.db.database import async_session_maker, engine
 from imgtag.db.repositories import image_repository, config_repository
 from imgtag.services import embedding_service
 
@@ -272,6 +272,7 @@ async def install_local_task():
 
 @router.post("/resize-table", response_model=dict[str, str])
 async def resize_vector_table(
+    background_tasks: BackgroundTasks,
     admin: dict = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
@@ -322,6 +323,9 @@ async def resize_vector_table(
         await config_repository.set_value(session, "embedding_dimensions", str(new_dim))
         await session.commit()
         await config_cache.refresh()
+
+        # ALTER TABLE 会导致 asyncpg 预编译语句缓存失效；主动回收连接池，避免后续请求随机 500
+        background_tasks.add_task(engine.dispose)
 
         logger.info(f"向量维度修改成功: {new_dim}")
         return {"message": f"数据库向量维度已修改为 {new_dim}，请重建向量数据"}

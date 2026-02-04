@@ -3,9 +3,10 @@ import { ref, onMounted } from 'vue'
 import { useUserStore } from '@/stores'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
-import { toast } from 'vue-sonner'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import { getErrorMessage } from '@/utils/api-error'
+import { notifyError, notifySuccess } from '@/utils/notify'
 import { 
   User, 
   Key, 
@@ -54,8 +55,9 @@ async function generateApiKey() {
     const { data } = await apiClient.post('/auth/me/api-key')
     newApiKey.value = data.api_key
     await fetchApiKeyStatus()
+    notifySuccess('API 密钥已生成', { once: true })
   } catch {
-    // ignore
+    notifyError('生成失败')
   } finally {
     generatingKey.value = false
   }
@@ -75,9 +77,9 @@ async function deleteApiKey() {
     await apiClient.delete('/auth/me/api-key')
     apiKeyStatus.value = { has_key: false, masked_key: null }
     newApiKey.value = null
-    toast.success('API 密钥已删除')
+    notifySuccess('API 密钥已删除', { once: true })
   } catch {
-    toast.error('删除失败')
+    notifyError('删除失败')
   } finally {
     deletingKey.value = false
   }
@@ -113,9 +115,10 @@ async function handleChangePassword() {
     oldPassword.value = ''
     newPassword.value = ''
     confirmPassword.value = ''
-    toast.success('密码修改成功')
+    notifySuccess('密码修改成功', { once: true })
   } catch (e: any) {
-    passwordError.value = e.response?.data?.detail || '修改失败'
+    passwordError.value = getErrorMessage(e)
+    notifyError(passwordError.value)
   } finally {
     changingPassword.value = false
   }

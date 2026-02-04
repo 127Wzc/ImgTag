@@ -14,7 +14,7 @@ import {
   Search as SearchIcon, Loader2, Sparkles, Check, FolderOpen, SlidersHorizontal,
   Command,
 } from 'lucide-vue-next'
-import { toast } from 'vue-sonner'
+import { notifyWarning } from '@/utils/notify'
 
 const route = useRoute()
 const router = useRouter()
@@ -140,7 +140,7 @@ function handleSmartSearch() {
     if (lastTime) {
       const elapsed = (Date.now() - parseInt(lastTime)) / 1000
       if (elapsed < RATE_LIMIT_SECONDS) {
-        toast.warning(`请等待 ${Math.ceil(RATE_LIMIT_SECONDS - elapsed)} 秒后再次搜索`)
+        notifyWarning(`请等待 ${Math.ceil(RATE_LIMIT_SECONDS - elapsed)} 秒后再次搜索`, { once: true })
         return
       }
     }

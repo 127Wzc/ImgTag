@@ -2,8 +2,8 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
-import { toast } from 'vue-sonner'
 import { getErrorMessage } from '@/utils/api-error'
+import { notifyError, notifySuccess } from '@/utils/notify'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { 
@@ -165,7 +165,7 @@ async function fetchEndpoints() {
     const { data } = await apiClient.get<StorageEndpoint[]>('/storage/endpoints')
     endpoints.value = data
   } catch (e: any) {
-    toast.error(getErrorMessage(e))
+    notifyError(getErrorMessage(e))
   } finally {
     loading.value = false
   }
@@ -218,7 +218,7 @@ function openEdit(ep: StorageEndpoint) {
 
 async function saveEndpoint() {
   if (!form.value.name.trim()) {
-    toast.error('请输入端点名称')
+    notifyError('请输入端点名称', { once: true })
     return
   }
   
@@ -226,15 +226,15 @@ async function saveEndpoint() {
   try {
     if (editingEndpoint.value) {
       await apiClient.put(`/storage/endpoints/${editingEndpoint.value.id}`, form.value)
-      toast.success('端点已更新')
+      notifySuccess('端点已更新', { once: true })
     } else {
       await apiClient.post('/storage/endpoints', form.value)
-      toast.success('端点已创建')
+      notifySuccess('端点已创建', { once: true })
     }
     showDialog.value = false
     await fetchEndpoints()
   } catch (e: any) {
-    toast.error(getErrorMessage(e))
+    notifyError(getErrorMessage(e))
   } finally {
     saving.value = false
   }
@@ -245,13 +245,13 @@ async function testConnection(ep: StorageEndpoint) {
   try {
     const { data } = await apiClient.post(`/storage/endpoints/${ep.id}/test`)
     if (data.success) {
-      toast.success('连接测试成功')
+      notifySuccess('连接测试成功', { once: true })
     } else {
-      toast.error(data.message || '连接测试失败')
+      notifyError(data.message || '连接测试失败')
     }
     await fetchEndpoints()
   } catch (e: any) {
-    toast.error(getErrorMessage(e))
+    notifyError(getErrorMessage(e))
   } finally {
     testing.value = null
   }
@@ -260,10 +260,10 @@ async function testConnection(ep: StorageEndpoint) {
 async function setDefault(ep: StorageEndpoint) {
   try {
     await apiClient.post(`/storage/endpoints/${ep.id}/set-default`)
-    toast.success(`已设为默认上传端点: ${ep.name}`)
+    notifySuccess(`已设为默认上传端点: ${ep.name}`, { once: true })
     await fetchEndpoints()
   } catch (e: any) {
-    toast.error(getErrorMessage(e))
+    notifyError(getErrorMessage(e))
   }
 }
 
@@ -279,10 +279,10 @@ async function deleteEndpoint(ep: StorageEndpoint) {
   deleting.value = ep.id
   try {
     await apiClient.delete(`/storage/endpoints/${ep.id}`)
-    toast.success('端点已删除')
+    notifySuccess('端点已删除', { once: true })
     await fetchEndpoints()
   } catch (e: any) {
-    toast.error(getErrorMessage(e))
+    notifyError(getErrorMessage(e))
   } finally {
     deleting.value = null
   }
@@ -308,10 +308,10 @@ async function unlinkLocations(ep: StorageEndpoint) {
         delete_files: result.checkboxChecked,
       }
     })
-    toast.success(data.message || '位置记录已解除关联')
+    notifySuccess(data.message || '位置记录已解除关联', { once: true })
     await fetchEndpoints()
   } catch (e: any) {
-    toast.error(getErrorMessage(e))
+    notifyError(getErrorMessage(e))
   } finally {
     unlinking.value = null
   }
@@ -320,7 +320,7 @@ async function unlinkLocations(ep: StorageEndpoint) {
 // 同步功能
 function openSyncDialog() {
   if (endpoints.value.length < 2) {
-    toast.error('需要至少 2 个端点才能同步')
+    notifyError('需要至少 2 个端点才能同步', { once: true })
     return
   }
   syncForm.value = {
@@ -333,17 +333,17 @@ function openSyncDialog() {
 
 async function startSync() {
   if (syncForm.value.source_endpoint_id === syncForm.value.target_endpoint_id) {
-    toast.error('源端点和目标端点不能相同')
+    notifyError('源端点和目标端点不能相同', { once: true })
     return
   }
   syncing.value = true
   try {
     const { data } = await apiClient.post('/storage/sync/start', syncForm.value)
-    toast.success(`已启动 ${data.task_ids.length} 个同步任务`)
+    notifySuccess(`已启动 ${data.task_ids.length} 个同步任务`, { once: true })
     showSyncDialog.value = false
     // 可以轮询任务进度
   } catch (e: any) {
-    toast.error(getErrorMessage(e))
+    notifyError(getErrorMessage(e))
   } finally {
     syncing.value = false
   }

@@ -119,6 +119,7 @@ export function useCreateTag() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '创建成功' },
         mutationFn: async (tag: { name: string; level?: number; source?: string }) => {
             const { data } = await apiClient.post('/tags/', null, {
                 params: {
@@ -177,6 +178,7 @@ export function useRenameTag() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '保存成功' },
         mutationFn: async ({ id, name, code, prompt }: {
             id: number;
             name?: string;
@@ -204,6 +206,7 @@ export function useDeleteTag() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '删除成功' },
         mutationFn: async (tagId: number) => {
             const { data } = await apiClient.delete(`/tags/id/${tagId}`)
             return data
@@ -221,6 +224,7 @@ export function useUpdateTagCounts() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '同步完成' },
         mutationFn: async () => {
             await apiClient.post('/tags/sync')
         },

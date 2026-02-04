@@ -5,7 +5,7 @@
 import { computed } from 'vue'
 import { useUserStore } from '@/stores'
 import { Permission, PermissionNames, type PermissionType } from '@/constants/permissions'
-import { toast } from 'vue-sonner'
+import { notifyError } from '@/utils/notify'
 
 export function usePermission() {
   const userStore = useUserStore()
@@ -32,7 +32,7 @@ export function usePermission() {
     }
 
     const permissionName = action || PermissionNames[permission] || '该操作'
-    toast.error(`暂无${permissionName}权限`, {
+    notifyError(`暂无${permissionName}权限`, {
       description: '请联系管理员开通权限后再试'
     })
     return false

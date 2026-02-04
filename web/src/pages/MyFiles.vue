@@ -14,6 +14,7 @@ import {
   ChevronDown, ChevronLeft, ChevronRight, FolderOpen, ArrowUpDown, Tag,
   Plus,
   Lock,
+  Users,
 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -22,19 +23,19 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import ImageGrid from '@/components/ImageGrid.vue'
 import ImageFilterBar from '@/components/ImageFilterBar.vue'
 import ImageDetailModal from '@/components/ImageDetailModal.vue'
-import { toast } from 'vue-sonner'
-import { getErrorMessage } from '@/utils/api-error'
 import { useCategories } from '@/api/queries'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import UploadDialog from '@/components/UploadDialog.vue'
 import { usePermission } from '@/composables/usePermission'
 import { Permission } from '@/constants/permissions'
+import { notifyError, notifySuccess } from '@/utils/notify'
 
 const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
 
 const router = useRouter()
 const userStore = useUserStore()
+const isAdmin = computed(() => userStore.isAdmin)
 
 // 上传弹窗
 const showUploadDialog = ref(false)
@@ -73,6 +74,17 @@ const showLabelsAlways = ref(false)
 
 // 搜索参数
 const searchParams = ref<ImageSearchRequest>({ size: pageSize.value, page: 1, sort_by: sortBy.value, sort_desc: sortDesc.value })
+const viewAllUsers = ref(false)
+
+watch(viewAllUsers, (val) => {
+  if (!isAdmin.value) return
+  currentPage.value = 1
+  searchParams.value = {
+    ...searchParams.value,
+    all_users: val || undefined,
+    page: 1,
+  }
+})
 
 // 查询数据
 const { data: imageData, isLoading, refetch } = useMyImages(searchParams)
@@ -125,6 +137,7 @@ function handleReset() {
   currentPage.value = 1
   sortBy.value = 'id'
   sortDesc.value = true
+  viewAllUsers.value = false
   searchParams.value = { size: pageSize.value, page: 1, sort_by: 'id', sort_desc: true }
 }
 
@@ -190,9 +203,9 @@ async function handleBatchAnalyze() {
   batchLoading.value = true
   try {
     await apiClient.post('/queue/add', { image_ids: Array.from(selectedIds.value) })
-    toast.success(`已将 ${selectedIds.value.size} 张图片加入分析队列`)
+    notifySuccess(`已将 ${selectedIds.value.size} 张图片加入分析队列`, { once: true })
     clearSelection()
-  } catch (e: any) { toast.error(getErrorMessage(e)) }
+  } catch (e: any) { notifyError(e) }
   finally { batchLoading.value = false }
 }
 
@@ -215,10 +228,10 @@ async function handleBatchDelete() {
       image_ids: Array.from(selectedIds.value),
       delete_files: result.checkboxChecked,
     })
-    toast.success(`已删除 ${selectedIds.value.size} 张图片`)
+    notifySuccess(`已删除 ${selectedIds.value.size} 张图片`, { once: true })
     clearSelection()
     refetch()
-  } catch (e: any) { toast.error(getErrorMessage(e)) }
+  } catch (e: any) { notifyError(e) }
   finally { batchLoading.value = false }
 }
 
@@ -233,12 +246,12 @@ async function handleBatchTag() {
   try {
     const tags = batchTags.value.split(',').map(t => t.trim()).filter(Boolean)
     await apiClient.post('/images/batch/update-tags', { image_ids: Array.from(selectedIds.value), tags, mode: batchTagMode.value })
-    toast.success(`操作成功`)
+    notifySuccess('操作成功', { once: true })
     showBatchTagDialog.value = false
     batchTags.value = ''
     clearSelection()
     refetch()
-  } catch (e: any) { toast.error(getErrorMessage(e)) }
+  } catch (e: any) { notifyError(e) }
   finally { batchLoading.value = false }
 }
 
@@ -251,12 +264,12 @@ async function handleBatchCategory() {
   batchLoading.value = true
   try {
     await apiClient.post('/images/batch/set-category', { image_ids: Array.from(selectedIds.value), category_id: parseInt(batchCategoryId.value) })
-    toast.success(`分类设置成功`)
+    notifySuccess('分类设置成功', { once: true })
     showBatchCategoryDialog.value = false
     batchCategoryId.value = ''
     clearSelection()
     refetch()
-  } catch (e: any) { toast.error(getErrorMessage(e)) }
+  } catch (e: any) { notifyError(e) }
   finally { batchLoading.value = false }
 }
 
@@ -328,6 +341,33 @@ async function handleImageUpdated() {
                 :class="selectMode ? 'bg-background shadow-sm text-primary' : 'text-muted-foreground hover:text-foreground'"
               >
                 <CheckSquare class="w-3.5 h-3.5 mr-1.5" />{{ selectMode ? '退出选择' : '批量选择' }}
+              </Button>
+            </div>
+
+            <!-- 管理员：查看范围 -->
+            <div
+              v-if="isAdmin"
+              class="flex items-center bg-muted/40 p-1 rounded-lg border border-border/40 shrink-0"
+            >
+              <Button
+                variant="ghost"
+                size="sm"
+                class="h-7 px-3 text-xs rounded-md transition-all"
+                :class="!viewAllUsers ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'"
+                @click="viewAllUsers = false"
+              >
+                仅看自己
+              </Button>
+              <div class="w-px h-3 bg-border/50 mx-1"></div>
+              <Button
+                variant="ghost"
+                size="sm"
+                class="h-7 px-3 text-xs rounded-md transition-all"
+                :class="viewAllUsers ? 'bg-background shadow-sm text-primary' : 'text-muted-foreground hover:text-foreground'"
+                @click="viewAllUsers = true"
+              >
+                <Users class="w-3.5 h-3.5 mr-1.5" />
+                所有用户
               </Button>
             </div>
 

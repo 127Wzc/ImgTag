@@ -85,6 +85,8 @@ export interface ImageSearchRequest {
     resolution_id?: number
     pending_only?: boolean
     duplicates_only?: boolean
+    /** 仅管理员：是否查看所有用户的图片（跳过可见性过滤）。默认仅查看自己上传 */
+    all_users?: boolean
     // Page/Size 风格分页
     page?: number
     size?: number
@@ -163,6 +165,12 @@ export interface ApprovalResponse {
     target_type: string | null
     target_ids: number[] | null
     payload: Record<string, any>
+    preview?: {
+        image_id: number
+        image_url: string
+        uploaded_by: number | null
+        uploaded_by_username: string | null
+    } | null
     reviewer_id: number | null
     review_comment: string | null
     created_at: string

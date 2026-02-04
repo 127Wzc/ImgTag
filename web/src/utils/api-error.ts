@@ -16,6 +16,10 @@ export interface APIErrorResponse {
  * 从 API 错误中提取用户友好的错误消息
  */
 export function getErrorMessage(error: any): string {
+    if (typeof error === 'string') {
+        return error
+    }
+
     // 新格式: { success: false, error: { code, message } }
     if (error.response?.data?.error?.message) {
         return error.response.data.error.message
@@ -84,4 +88,8 @@ export const ErrorCodes = {
 
     // 服务器错误
     INTERNAL_ERROR: 'INTERNAL_ERROR',
+
+    // 瞬时错误（可重试）
+    DB_SCHEMA_CHANGED: 'DB_SCHEMA_CHANGED',
+    DB_TIMEOUT: 'DB_TIMEOUT',
 } as const

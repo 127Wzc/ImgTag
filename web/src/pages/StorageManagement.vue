@@ -2,9 +2,10 @@
 import { ref, onMounted } from 'vue'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
-import { toast } from 'vue-sonner'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import { getErrorMessage } from '@/utils/api-error'
+import { notifyError, notifySuccess } from '@/utils/notify'
 import { 
   HardDrive, 
   Database, 
@@ -50,10 +51,10 @@ async function scanDuplicates() {
   scanning.value = true
   try {
     const { data } = await apiClient.post('/storage/scan-duplicates')
-    toast.success(`扫描完成: 发现 ${data.duplicates_count} 组重复图片`)
+    notifySuccess(`扫描完成: 发现 ${data.duplicates_count} 组重复图片`, { once: true })
     await fetchStats()
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '扫描失败')
+    notifyError(getErrorMessage(e))
   } finally {
     scanning.value = false
   }
@@ -63,10 +64,10 @@ async function calculateHashes() {
   calculating.value = true
   try {
     const { data } = await apiClient.post('/storage/calculate-hashes')
-    toast.success(`计算完成: 处理了 ${data.processed} 张图片`)
+    notifySuccess(`计算完成: 处理了 ${data.processed} 张图片`, { once: true })
     await fetchStats()
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '计算失败')
+    notifyError(getErrorMessage(e))
   } finally {
     calculating.value = false
   }
@@ -84,10 +85,10 @@ async function cleanOrphans() {
   cleaning.value = true
   try {
     const { data } = await apiClient.post('/storage/clean-orphans')
-    toast.success(`清理完成: 删除了 ${data.deleted_count} 个孤立文件`)
+    notifySuccess(`清理完成: 删除了 ${data.deleted_count} 个孤立文件`, { once: true })
     await fetchStats()
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '清理失败')
+    notifyError(getErrorMessage(e))
   } finally {
     cleaning.value = false
   }

@@ -83,6 +83,15 @@ class ImageUpdate(BaseModel):
     """图像更新请求"""
     tags: Optional[List[str]] = Field(default=None, description="新的标签列表（按名称，废弃）")
     tag_ids: Optional[List[int]] = Field(default=None, description="新的标签ID列表（推荐）")
+    category_id: Optional[int] = Field(
+        default=None,
+        description="主分类 tag_id（level=0）。显式传 null 表示清空；未传表示不修改。",
+    )
+    normal_tag_ids: Optional[List[int]] = Field(
+        default=None,
+        description="普通标签 tag_id 列表（仅 level=2）。显式传空数组或 null 表示清空；未传表示不修改。",
+        max_length=200,
+    )
     description: Optional[str] = Field(default=None, description="新的描述")
     original_url: Optional[str] = Field(default=None, description="原始来源地址")
     is_public: Optional[bool] = Field(default=None, description="是否公开")
@@ -90,10 +99,22 @@ class ImageUpdate(BaseModel):
 class ImageUpdateSuggestion(BaseModel):
     """图片元信息修改建议（提交后需管理员审批）。"""
 
-    description: str = Field(..., description="建议的描述（允许空串）")
+    description: str = Field(
+        ...,
+        description="建议的描述（允许空串）",
+        max_length=4000,
+    )
     category_id: Optional[int] = Field(..., description="建议的主分类 tag_id (level=0，可为空)")
-    normal_tag_ids: List[int] = Field(..., description="建议的普通标签 tag_id 列表（仅 level=2）")
-    comment: Optional[str] = Field(default=None, description="给管理员的备注（可选）")
+    normal_tag_ids: List[int] = Field(
+        ...,
+        description="建议的普通标签 tag_id 列表（仅 level=2）",
+        max_length=200,
+    )
+    comment: Optional[str] = Field(
+        default=None,
+        description="给管理员的备注（可选）",
+        max_length=1000,
+    )
 
 
 
@@ -109,6 +130,10 @@ class ImageSearchRequest(BaseModel):
     resolution_id: Optional[int] = Field(default=None, description="分辨率 tag_id (level=1)")
     pending_only: bool = Field(default=False, description="仅显示待分析的图片（无标签）")
     duplicates_only: bool = Field(default=False, description="仅显示重复的图片")
+    all_users: bool = Field(
+        default=False,
+        description="仅管理员：是否查看所有用户的图片（跳过可见性过滤）。默认仅查看自己上传。",
+    )
     # Page/Size 风格分页
     page: int = Field(default=1, ge=1, description="页码 (从 1 开始)")
     size: int = Field(default=20, ge=1, le=100, description="每页数量")

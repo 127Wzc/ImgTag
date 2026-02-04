@@ -4,9 +4,10 @@ import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog'
-import { toast } from 'vue-sonner'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import { getErrorMessage } from '@/utils/api-error'
+import { notifyError, notifySuccess } from '@/utils/notify'
 import {
   Folder,
   Plus,
@@ -52,10 +53,10 @@ async function handleCreate() {
     newCollectionName.value = ''
     newCollectionDesc.value = ''
     showCreateDialog.value = false
-    toast.success('Collection created')
+    notifySuccess('收藏夹创建成功', { once: true })
     await fetchCollections()
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || 'Failed to create')
+    notifyError(getErrorMessage(e))
   } finally {
     creating.value = false
   }
@@ -72,10 +73,10 @@ async function handleDelete(collection: Collection) {
 
   try {
     await apiClient.delete(`/collections/${collection.id}`)
-    toast.success('Collection deleted')
+    notifySuccess('收藏夹已删除', { once: true })
     await fetchCollections()
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || 'Failed to delete')
+    notifyError(getErrorMessage(e))
   }
 }
 

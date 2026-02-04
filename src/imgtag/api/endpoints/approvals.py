@@ -1,14 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""
-审批管理 API 端点
-"""
-
-import asyncio
+"""审批管理 API 端点"""
 from typing import Dict, Any
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.schemas.approval import (
@@ -17,7 +13,8 @@ from imgtag.schemas.approval import (
     ApprovalAction, 
     BatchApproveRequest
 )
-from imgtag.api.endpoints.auth import get_current_user, require_admin
+from imgtag.api.endpoints.auth import require_admin
+from imgtag.core.exception_translate import translate_exception
 from imgtag.core.logging_config import get_logger
 from imgtag.db.database import get_async_session
 from imgtag.db.repositories import (
@@ -26,12 +23,27 @@ from imgtag.db.repositories import (
     image_repository,
 )
 from imgtag.services.suggestion_service import SUGGEST_IMAGE_UPDATE_TYPE, suggestion_service
-from imgtag.services.task_queue import task_queue
+from imgtag.services.approval_preview_service import approval_preview_service
+from imgtag.services.rebuild_vector_service import enqueue_rebuild_vector
+from imgtag.utils.approval_utils import extract_image_id_from_approval
 from imgtag.utils.pagination import PageParams
 
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+def _parse_types_param(types: str | None) -> list[str] | None:
+    """解析 approvals types 查询参数（逗号分隔）。"""
+    if not types:
+        return None
+    parsed = [t.strip() for t in types.split(",") if t and t.strip()]
+    return parsed or None
+
+
+def _extract_image_id(approval) -> int | None:
+    """兼容：从 approval 中提取 image_id（用于预览与向量重建）。"""
+    return extract_image_id_from_approval(approval, log=logger)
 
 
 def _approval_to_dict(approval) -> dict:
@@ -41,6 +53,7 @@ def _approval_to_dict(approval) -> dict:
         "type": approval.type,
         "status": approval.status,
         "requester_id": approval.requester_id,
+        "requester_name": approval.requester.username if getattr(approval, "requester", None) else None,
         "target_type": approval.target_type,
         "target_ids": approval.target_ids,
         "payload": approval.payload,
@@ -55,19 +68,33 @@ def _approval_to_dict(approval) -> dict:
 async def get_pending_approvals(
     page: int = 1,
     size: int = 50,
+    types: str | None = Query(default=None, description="审批类型过滤（逗号分隔）"),
+    include_preview: bool = Query(default=False, description="是否包含图片预览信息"),
     admin: Dict = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
     """获取待审批列表（仅管理员）"""
+    types_list = _parse_types_param(types)
     approvals, total = await approval_repository.get_pending(
         session,
-        types=[SUGGEST_IMAGE_UPDATE_TYPE],
+        types=types_list,
         limit=size,
         offset=(page - 1) * size,
     )
     
     params = PageParams(page=page, size=size)
-    return params.paginate([_approval_to_dict(a) for a in approvals], total)
+    items = [_approval_to_dict(a) for a in approvals]
+
+    if include_preview:
+        preview_map = await approval_preview_service.build_preview_map(
+            session,
+            approvals=list(approvals),
+            log=logger,
+        )
+        for item in items:
+            item["preview"] = preview_map.get(int(item["id"]))
+
+    return params.paginate(items, total)
 
 
 @router.get("/{approval_id}", response_model=ApprovalResponse)
@@ -102,6 +129,8 @@ async def approve_request(
     try:
         success = await execute_approval(session, approval)
     except Exception as e:
+        if translate_exception(e):
+            raise
         logger.error(f"执行审批操作异常: approval_id={approval_id}, error={e}")
         raise HTTPException(status_code=500, detail=f"执行审批操作失败: {e}")
     if not success:
@@ -124,21 +153,24 @@ async def approve_request(
     await session.commit()
 
     # 建议落地后触发向量重建（不走视觉分析）
+    rebuild_enqueued = None
+    rebuild_added = 0
+    rebuild_image_id = None
     if approval.type == SUGGEST_IMAGE_UPDATE_TYPE:
-        image_id = None
-        try:
-            if isinstance(approval.payload, dict):
-                image_id = approval.payload.get("image_id")
-            if not image_id and approval.target_ids:
-                image_id = approval.target_ids[0]
-            if image_id:
-                asyncio.create_task(
-                    task_queue.add_tasks([int(image_id)], task_type="rebuild_vector")
-                )
-        except Exception as e:
-            logger.warning(f"触发向量重建失败: approval_id={approval_id}, image_id={image_id}, error={e}")
-    
-    return {"message": "已批准"}
+        rebuild_image_id = _extract_image_id(approval)
+        if rebuild_image_id:
+            rebuild_enqueued, rebuild_added, _ = await enqueue_rebuild_vector(
+                [rebuild_image_id],
+                context=f"approval_id={approval_id}",
+                log=logger,
+            )
+
+    return {
+        "message": "已批准",
+        "rebuild_image_id": rebuild_image_id,
+        "rebuild_enqueued": rebuild_enqueued,
+        "rebuild_added": rebuild_added,
+    }
 
 
 @router.post("/{approval_id}/reject", response_model=Dict[str, Any])
@@ -202,16 +234,17 @@ async def batch_approve(
 
                     # 建议落地后触发向量重建
                     if approval.type == SUGGEST_IMAGE_UPDATE_TYPE:
-                        if isinstance(approval.payload, dict) and approval.payload.get("image_id"):
-                            rebuild_image_ids.append(int(approval.payload["image_id"]))
-                        elif approval.target_ids:
-                            rebuild_image_ids.append(int(approval.target_ids[0]))
+                        image_id = _extract_image_id(approval)
+                        if image_id:
+                            rebuild_image_ids.append(image_id)
 
                     approved_this = True
 
             if approved_this:
                 approved_count += 1
         except Exception as e:
+            if translate_exception(e):
+                raise
             logger.error(f"批量审批失败 ID {approval_id}: {str(e)}")
             if approval_id not in failed_ids:
                 failed_ids.append(approval_id)
@@ -230,20 +263,21 @@ async def batch_approve(
 
     # 确保审批与落地已提交后再触发向量重建
     await session.commit()
+    rebuild_enqueued = None
+    rebuild_added = 0
     if rebuild_image_ids:
-        # 去重，避免重复入队导致无意义的重复计算
-        rebuild_image_ids = list(dict.fromkeys(rebuild_image_ids))
-        try:
-            asyncio.create_task(
-                task_queue.add_tasks(rebuild_image_ids, task_type="rebuild_vector")
-            )
-        except Exception as e:
-            logger.warning(f"批量触发向量重建失败: {e}")
+        rebuild_enqueued, rebuild_added, _ = await enqueue_rebuild_vector(
+            rebuild_image_ids,
+            context="batch_approve",
+            log=logger,
+        )
     
     return {
         "message": f"已批准 {approved_count} 项",
         "approved_count": approved_count,
         "failed_ids": failed_ids,
+        "rebuild_enqueued": rebuild_enqueued,
+        "rebuild_added": rebuild_added,
     }
 
 

@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '@/stores'
 import apiClient from '@/api/client'
+import { getErrorMessage } from '@/utils/api-error'
 
 const router = useRouter()
 const route = useRoute()
@@ -56,7 +57,7 @@ async function handleLogin() {
     const redirect = route.query.redirect as string
     router.push(redirect || '/')
   } catch (e: any) {
-    error.value = e.response?.data?.detail || '登录失败'
+    error.value = getErrorMessage(e)
   } finally {
     loading.value = false
   }
@@ -82,7 +83,7 @@ async function handleRegister() {
     error.value = ''
     loginForm.value.username = registerForm.value.username
   } catch (e: any) {
-    error.value = e.response?.data?.detail || '注册失败'
+    error.value = getErrorMessage(e)
   } finally {
     loading.value = false
   }

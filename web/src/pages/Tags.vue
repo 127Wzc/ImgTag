@@ -8,8 +8,7 @@ import { usePermission } from '@/composables/usePermission'
 import { Permission } from '@/constants/permissions'
 import type { Tag } from '@/types'
 import { Button } from '@/components/ui/button'
-import { toast } from 'vue-sonner'
-import { getErrorMessage } from '@/utils/api-error'
+import { notifyError } from '@/utils/notify'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { 
@@ -28,7 +27,8 @@ import {
   ChevronRight
 } from 'lucide-vue-next'
 
-const PAGE_SIZE = 200
+const MAX_PAGE_SIZE = 1000
+const pageSizeOptions = [50, 100, 200, 500, 1000]
 const userStore = useUserStore()
 const { canCreateTags, checkPermissionWithToast } = usePermission()
 
@@ -38,6 +38,15 @@ const { data: stats, isLoading: statsLoading } = useTagStats()
 // 当前选中的分类和页码
 const activeLevel = ref(0)
 const currentPage = ref(1)
+const pageSize = ref(200)
+
+function setPageSize(value: string) {
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isFinite(parsed)) return
+  const clamped = Math.min(Math.max(parsed, 1), MAX_PAGE_SIZE)
+  pageSize.value = clamped
+  currentPage.value = 1
+}
 
 // 重置页码当切换分类时
 watch(activeLevel, () => {
@@ -46,10 +55,10 @@ watch(activeLevel, () => {
 
 // 按需加载当前分类的标签（支持分页）
 const { data: activeTags, isLoading: tagsLoading } = useQuery({
-  queryKey: computed(() => ['tags', 'level', activeLevel.value, currentPage.value]),
+  queryKey: computed(() => ['tags', 'level', activeLevel.value, currentPage.value, pageSize.value]),
   queryFn: async () => {
     const { data } = await apiClient.get<Tag[]>('/tags/', {
-      params: { level: activeLevel.value, size: PAGE_SIZE, page: currentPage.value }
+      params: { level: activeLevel.value, size: pageSize.value, page: currentPage.value }
     })
     return data
   },
@@ -67,10 +76,10 @@ const totalCount = computed(() => {
 })
 
 // 总页数
-const totalPages = computed(() => Math.ceil(totalCount.value / PAGE_SIZE))
+const totalPages = computed(() => Math.ceil(totalCount.value / pageSize.value))
 
 // 是否需要显示分页
-const showPagination = computed(() => totalCount.value > PAGE_SIZE)
+const showPagination = computed(() => totalCount.value > pageSize.value)
 
 const canManageActiveLevel = computed(() => {
   if (activeLevel.value === 2) return canCreateTags.value
@@ -82,7 +91,7 @@ function openCreateDialog() {
     if (!checkPermissionWithToast(Permission.CREATE_TAGS, '新建标签')) return
   } else {
     if (!userStore.isAdmin) {
-      toast.error('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
+      notifyError('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
       return
     }
   }
@@ -105,7 +114,7 @@ function startEdit(tag: Tag) {
     if (activeLevel.value === 2) {
       checkPermissionWithToast(Permission.CREATE_TAGS, '修改标签')
     } else {
-      toast.error('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
+      notifyError('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
     }
     return
   }
@@ -151,25 +160,22 @@ async function handleRename() {
   try {
     if (activeLevel.value === 2 && !checkPermissionWithToast(Permission.CREATE_TAGS, '修改标签')) return
     if (activeLevel.value !== 2 && !userStore.isAdmin) {
-      toast.error('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
+      notifyError('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
       return
     }
     await renameTagMutation.mutateAsync({ 
       id: editingTagId.value, 
       name: editingName.value.trim() 
     })
-    toast.success('重命名成功')
     cancelEdit()
-  } catch (e: any) {
-    toast.error(getErrorMessage(e))
-  }
+  } catch {}
 }
 
 async function handleCategorySave() {
   if (!editingCategory.value) return
   try {
     if (!userStore.isAdmin) {
-      toast.error('需要管理员权限', { description: '主分类仅管理员可管理' })
+      notifyError('需要管理员权限', { description: '主分类仅管理员可管理' })
       return
     }
     await renameTagMutation.mutateAsync({
@@ -178,11 +184,8 @@ async function handleCategorySave() {
       code: categoryEditForm.value.code.trim() || null,
       prompt: categoryEditForm.value.prompt.trim() || null,
     })
-    toast.success('分类更新成功')
     closeCategoryEdit()
-  } catch (e: any) {
-    toast.error(getErrorMessage(e))
-  }
+  } catch {}
 }
 
 // 新建标签
@@ -195,7 +198,7 @@ async function handleCreateTag() {
   try {
     if (activeLevel.value === 2 && !checkPermissionWithToast(Permission.CREATE_TAGS, '新建标签')) return
     if (activeLevel.value !== 2 && !userStore.isAdmin) {
-      toast.error('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
+      notifyError('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
       return
     }
     await createTagMutation.mutateAsync({
@@ -203,12 +206,9 @@ async function handleCreateTag() {
       level: activeLevel.value,
       source: 'user'
     })
-    toast.success('创建成功')
     newTagName.value = ''
     showCreateDialog.value = false
-  } catch (e: any) {
-    toast.error(getErrorMessage(e))
-  }
+  } catch {}
 }
 
 const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
@@ -218,7 +218,7 @@ const deleteTagMutation = useDeleteTag()
 async function handleDeleteTag(tag: Tag) {
   if (tag.level === 2 && !checkPermissionWithToast(Permission.CREATE_TAGS, '删除标签')) return
   if (tag.level !== 2 && !userStore.isAdmin) {
-    toast.error('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
+    notifyError('需要管理员权限', { description: '主分类/分辨率仅管理员可管理' })
     return
   }
   const confirmed = await confirm({
@@ -231,10 +231,7 @@ async function handleDeleteTag(tag: Tag) {
   
   try {
     await deleteTagMutation.mutateAsync(tag.id)
-    toast.success('删除成功')
-  } catch (e: any) {
-    toast.error(getErrorMessage(e))
-  }
+  } catch {}
 }
 
 // 同步
@@ -352,7 +349,10 @@ const isLoading = computed(() => statsLoading.value || tagsLoading.value)
               <span>{{ tag.name }}</span>
               <span class="text-xs opacity-60">{{ tag.usage_count }}</span>
               
-              <div v-if="canManageActiveLevel" class="hidden group-hover:flex items-center gap-0.5 ml-1">
+              <div
+                v-if="canManageActiveLevel"
+                class="flex items-center gap-0.5 ml-1 w-9 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none group-hover:pointer-events-auto"
+              >
                 <button 
                   class="p-0.5 hover:text-foreground rounded"
                   @click.stop="startEdit(tag)"
@@ -367,6 +367,26 @@ const isLoading = computed(() => statsLoading.value || tagsLoading.value)
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+
+        <!-- 分页大小 -->
+        <div v-if="activeTags?.length" class="flex items-center justify-between mt-6">
+          <span class="text-xs text-muted-foreground">共 {{ totalCount }} 个</span>
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-muted-foreground">每页</span>
+            <input
+              type="number"
+              min="1"
+              :max="String(MAX_PAGE_SIZE)"
+              class="h-8 w-24 rounded-md border border-border bg-background px-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              :value="String(pageSize)"
+              @change="setPageSize(($event.target as HTMLInputElement).value)"
+              list="tag-page-size-options"
+            />
+            <datalist id="tag-page-size-options">
+              <option v-for="opt in pageSizeOptions" :key="opt" :value="String(opt)" />
+            </datalist>
           </div>
         </div>
 

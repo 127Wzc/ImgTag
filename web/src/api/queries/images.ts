@@ -65,6 +65,7 @@ export function useUploadImage() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '上传成功' },
         mutationFn: async (options: UploadOptions) => {
             const formData = new FormData()
             formData.append('file', options.file)
@@ -112,6 +113,7 @@ export function useUploadZip() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '上传成功' },
         mutationFn: async (options: ZipUploadOptions) => {
             const formData = new FormData()
             formData.append('file', options.file)
@@ -154,6 +156,7 @@ export function useUploadFromUrl() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '上传成功' },
         mutationFn: async (options: UrlUploadOptions) => {
             const { data } = await apiClient.post<UploadAnalyzeResponse>('/images/analyze-url', {
                 image_url: options.imageUrl,
@@ -177,6 +180,7 @@ export function useBatchUpload() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '上传成功' },
         mutationFn: async (files: File[]) => {
             const results: UploadAnalyzeResponse[] = []
             for (const file of files) {
@@ -204,6 +208,7 @@ export function useDeleteImage() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '删除成功', toastError: true },
         mutationFn: async (id: number) => {
             await apiClient.delete(`/images/${id}`)
             return id
@@ -221,12 +226,17 @@ export function useUpdateImage() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '保存成功', toastError: true },
         mutationFn: async ({ id, data }: {
             id: number
             data: {
                 tags?: string[]           // 废弃：按标签名更新
                 tag_ids?: number[]        // 新流程：按标签 ID 更新
+                category_id?: number | null
+                normal_tag_ids?: number[] | null
                 description?: string
+                original_url?: string
+                is_public?: boolean
             }
         }) => {
             const { data: result } = await apiClient.put<ImageResponse>(`/images/${id}`, data)
@@ -247,6 +257,7 @@ export function useUpdateImage() {
  */
 export function useSuggestImageUpdate() {
     return useMutation({
+        meta: { successMessage: '建议已提交，等待管理员审批', toastError: true },
         mutationFn: async ({ id, data }: {
             id: number
             data: {

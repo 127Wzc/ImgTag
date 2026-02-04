@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.core.logging_config import get_logger
@@ -20,28 +19,14 @@ from imgtag.db.repositories import (
     approval_repository,
     image_repository,
     image_tag_repository,
-    tag_repository,
 )
 from imgtag.models.approval import Approval
-from imgtag.models.tag import Tag
+from imgtag.services.image_update_service import image_update_service
 
 logger = get_logger(__name__)
 
 
 SUGGEST_IMAGE_UPDATE_TYPE = "suggest_image_update"
-
-
-def _unique_ints_keep_order(values: list[int]) -> list[int]:
-    seen: set[int] = set()
-    result: list[int] = []
-    for v in values:
-        if not v or v <= 0:
-            continue
-        if v in seen:
-            continue
-        seen.add(v)
-        result.append(v)
-    return result
 
 
 class SuggestionService:
@@ -82,32 +67,21 @@ class SuggestionService:
             if category_id == 0:
                 category_id = None
             if category_id is not None:
-                category = await tag_repository.get_by_id(session, category_id)
-                if not category:
-                    raise ValueError("目标主分类不存在")
-                if category.level != 0:
-                    raise ValueError("目标标签不是主分类（level=0）")
-                proposed_category_name = category.name
+                proposed_category_name = await image_update_service.validate_category_id(
+                    session,
+                    category_id=category_id,
+                )
 
-        normalized_tag_ids = _unique_ints_keep_order(normal_tag_ids or [])
-        proposed_normal_tags_payload: list[dict[str, Any]] = []
-
-        if normalized_tag_ids:
-            stmt = select(Tag.id, Tag.name, Tag.level).where(Tag.id.in_(normalized_tag_ids))
-            result = await session.execute(stmt)
-            rows = result.fetchall()
-            found = {row.id: (row.name, row.level) for row in rows}
-
-            missing = [tid for tid in normalized_tag_ids if tid not in found]
-            if missing:
-                raise ValueError(f"存在不存在的标签ID: {missing[:10]}")
-
-            wrong_level = [tid for tid in normalized_tag_ids if found[tid][1] != 2]
-            if wrong_level:
-                raise ValueError("normal_tag_ids 只能包含普通标签（level=2）")
-
-            for tid in normalized_tag_ids:
-                proposed_normal_tags_payload.append({"id": tid, "name": found[tid][0]})
+        normalized_tag_ids, normalized_tag_names = (
+            await image_update_service.normalize_and_validate_normal_tag_ids(
+                session,
+                normal_tag_ids=normal_tag_ids or [],
+            )
+        )
+        proposed_normal_tags_payload = [
+            {"id": tid, "name": name}
+            for tid, name in zip(normalized_tag_ids, normalized_tag_names)
+        ]
 
         payload = {
             "image_id": image_id,
@@ -149,9 +123,11 @@ class SuggestionService:
         approval: Approval,
     ) -> int:
         """执行图片元信息修改建议（落地到 Image/ImageTag）。"""
-        payload = approval.payload or {}
+        payload = approval.payload if isinstance(approval.payload, dict) else {}
         image_id = payload.get("image_id")
-        proposed = (payload.get("proposed") or {}) if isinstance(payload, dict) else {}
+        proposed = payload.get("proposed") or {}
+        if not isinstance(proposed, dict):
+            proposed = {}
 
         if not image_id:
             raise ValueError("审批 payload 缺少 image_id")
@@ -194,4 +170,3 @@ class SuggestionService:
 
 
 suggestion_service = SuggestionService()
-

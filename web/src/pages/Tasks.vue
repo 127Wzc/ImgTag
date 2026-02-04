@@ -5,7 +5,6 @@ import { useMutation, useQueryClient } from '@tanstack/vue-query'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { toast } from 'vue-sonner'
 import { 
   Loader2, 
   CheckCircle, 
@@ -48,13 +47,12 @@ const retryTaskMutation = useRetryTask()
 
 // 批量删除 mutation
 const deleteMutation = useMutation({
+  meta: { successMessage: '删除成功', errorMessage: '删除失败' },
   mutationFn: (ids: string[]) => apiClient.delete('/tasks/batch', { data: { task_ids: ids } }),
   onSuccess: () => {
-    toast.success('删除成功')
     selectedIds.value = []
     queryClient.invalidateQueries({ queryKey: ['tasks'] })
   },
-  onError: () => toast.error('删除失败'),
 })
 
 // 多选

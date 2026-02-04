@@ -3,9 +3,10 @@ import { ref, onMounted, computed, onUnmounted } from 'vue'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
 import ImageDetailModal from '@/components/ImageDetailModal.vue'
-import { toast } from 'vue-sonner'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import { getErrorMessage } from '@/utils/api-error'
+import { notifyError, notifySuccess } from '@/utils/notify'
 import { 
   Settings,
   Save,
@@ -189,11 +190,11 @@ async function saveConfigs() {
     if (activeCategory.value !== 'embedding') {
       activeCategory.value = null
     } else {
-      toast.success('保存成功，请根据提示检查是否需要重建向量')
+      notifySuccess('保存成功，请根据提示检查是否需要重建向量', { once: true })
       fetchVectorStatus() // 刷新状态以更新 dimensions_match
     }
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '保存失败')
+    notifyError(getErrorMessage(e))
   } finally {
     saving.value = false
   }
@@ -260,9 +261,9 @@ async function scanDuplicates() {
     duplicateGroups.value = data.duplicate_groups || []
     totalGroups.value = data.total_groups || 0
     imagesWithoutHash.value = data.images_without_hash || 0
-    toast.success(`扫描完成: 发现 ${data.total_groups} 组重复图片`)
+    notifySuccess(`扫描完成: 发现 ${data.total_groups} 组重复图片`, { once: true })
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '扫描失败')
+    notifyError(getErrorMessage(e))
   } finally {
     scanning.value = false
   }
@@ -272,10 +273,10 @@ async function calculateHashes() {
   calculating.value = true
   try {
     const { data } = await apiClient.post('/system/duplicates/calculate-hashes')
-    toast.success(`计算完成: 处理了 ${data.processed || 0} 张图片`)
+    notifySuccess(`计算完成: 处理了 ${data.processed || 0} 张图片`, { once: true })
     imagesWithoutHash.value = data.remaining || 0
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '计算失败')
+    notifyError(getErrorMessage(e))
   } finally {
     calculating.value = false
   }
@@ -308,9 +309,9 @@ async function deleteImage(imageId: number) {
         break
       }
     }
-    toast.success('图片已删除')
+    notifySuccess('图片已删除', { once: true })
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '删除失败')
+    notifyError(getErrorMessage(e))
   } finally {
     deleting.value = null
   }
@@ -407,10 +408,10 @@ async function rebuildVectors() {
   rebuilding.value = true
   try {
     await apiClient.post('/vectors/rebuild')
-    toast.success('重建任务已启动')
+    notifySuccess('重建任务已启动', { once: true })
     pollRebuildStatus()
   } catch(e: any) {
-    toast.error(e.response?.data?.detail || '启动失败')
+    notifyError(getErrorMessage(e))
     rebuilding.value = false
   }
 }
@@ -427,10 +428,10 @@ async function resizeVectorTable() {
   resizing.value = true
   try {
     const { data } = await apiClient.post('/vectors/resize-table')
-    toast.success(data.message)
+    notifySuccess(data.message, { once: true })
     await fetchVectorStatus()
   } catch(e: any) {
-    toast.error(e.response?.data?.detail || '修改失败')
+    notifyError(getErrorMessage(e))
   } finally {
     resizing.value = false
   }
@@ -449,7 +450,7 @@ function pollRebuildStatus() {
         clearInterval(pollTimer)
         pollTimer = null
         rebuilding.value = false
-        if (data.processed > 0) toast.success('向量重建完成')
+        if (data.processed > 0) notifySuccess('向量重建完成', { once: true })
         fetchVectorStatus()
       } else {
         rebuilding.value = true
@@ -527,10 +528,10 @@ async function savePermissions() {
     })
     const user = userList.value.find(u => u.id === showPermissions.value)
     if (user) user.permissions = editingPermissions.value
-    toast.success('权限已更新')
+    notifySuccess('权限已更新', { once: true })
     showPermissions.value = null
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '保存失败')
+    notifyError(getErrorMessage(e))
   } finally {
     savingPermissions.value = false
   }
@@ -542,7 +543,7 @@ async function fetchUsers() {
     const { data } = await apiClient.get('/auth/users')
     userList.value = data.users || []
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '获取用户列表失败')
+    notifyError(getErrorMessage(e))
   } finally {
     usersLoading.value = false
   }
@@ -555,9 +556,9 @@ async function toggleUserActive(user: UserItem) {
       params: { is_active: !user.is_active } 
     })
     user.is_active = !user.is_active
-    toast.success(user.is_active ? '用户已启用' : '用户已禁用')
+    notifySuccess(user.is_active ? '用户已启用' : '用户已禁用', { once: true })
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '操作失败')
+    notifyError(getErrorMessage(e))
   } finally {
     userActionLoading.value = null
   }
@@ -571,9 +572,9 @@ async function changeUserRole(user: UserItem, newRole: 'admin' | 'user') {
       params: { role: newRole } 
     })
     user.role = newRole
-    toast.success('角色已更新')
+    notifySuccess('角色已更新', { once: true })
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '操作失败')
+    notifyError(getErrorMessage(e))
   } finally {
     userActionLoading.value = null
   }
@@ -581,7 +582,7 @@ async function changeUserRole(user: UserItem, newRole: 'admin' | 'user') {
 
 async function createUser() {
   if (!newUser.value.username || !newUser.value.password) {
-    toast.error('用户名和密码不能为空')
+    notifyError('用户名和密码不能为空', { once: true })
     return
   }
   creatingUser.value = true
@@ -592,12 +593,12 @@ async function createUser() {
       email: newUser.value.email || undefined,
       role: newUser.value.role,
     })
-    toast.success('用户创建成功')
+    notifySuccess('用户创建成功', { once: true })
     showCreateUser.value = false
     newUser.value = { username: '', password: '', email: '', role: 'user' }
     await fetchUsers()
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '创建失败')
+    notifyError(getErrorMessage(e))
   } finally {
     creatingUser.value = false
   }
@@ -605,7 +606,7 @@ async function createUser() {
 
 async function changePassword(userId: number) {
   if (!newPassword.value || newPassword.value.length < 6) {
-    toast.error('密码至少 6 位')
+    notifyError('密码至少 6 位', { once: true })
     return
   }
   changingPassword.value = true
@@ -613,11 +614,11 @@ async function changePassword(userId: number) {
     await apiClient.put(`/auth/admin/users/${userId}/password`, null, {
       params: { new_password: newPassword.value }
     })
-    toast.success('密码已修改')
+    notifySuccess('密码已修改', { once: true })
     showChangePassword.value = null
     newPassword.value = ''
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '修改失败')
+    notifyError(getErrorMessage(e))
   } finally {
     changingPassword.value = false
   }
@@ -636,9 +637,9 @@ async function deleteUser(user: UserItem) {
   try {
     await apiClient.delete(`/auth/users/${user.id}`)
     userList.value = userList.value.filter(u => u.id !== user.id)
-    toast.success('用户已删除')
+    notifySuccess('用户已删除', { once: true })
   } catch (e: any) {
-    toast.error(e.response?.data?.detail || '删除失败')
+    notifyError(getErrorMessage(e))
   } finally {
     userActionLoading.value = null
   }

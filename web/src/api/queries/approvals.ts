@@ -6,6 +6,10 @@ import type { ApprovalListResponse } from '@/types'
 export interface ApprovalsQueryParams {
   page: number
   size: number
+  /** 逗号分隔的审批类型过滤，例如：suggest_image_update */
+  types?: string
+  /** 是否包含图片预览信息（减少 N+1 请求） */
+  include_preview?: boolean
 }
 
 /**
@@ -30,6 +34,7 @@ export function useApproveApproval() {
   const queryClient = useQueryClient()
 
   return useMutation({
+    meta: { successMessage: '已通过', toastError: true },
     mutationFn: async ({ id, comment }: { id: number; comment?: string }) => {
       const { data } = await apiClient.post(`/approvals/${id}/approve`, {
         comment: comment ?? null,
@@ -49,6 +54,7 @@ export function useRejectApproval() {
   const queryClient = useQueryClient()
 
   return useMutation({
+    meta: { successMessage: '已拒绝', toastError: true },
     mutationFn: async ({ id, comment }: { id: number; comment?: string }) => {
       const { data } = await apiClient.post(`/approvals/${id}/reject`, {
         comment: comment ?? null,
@@ -60,4 +66,3 @@ export function useRejectApproval() {
     },
   })
 }
-

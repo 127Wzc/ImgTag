@@ -137,3 +137,32 @@ class InternalError(APIError):
     """Internal server error."""
     def __init__(self, message: str = "服务器内部错误"):
         super().__init__("INTERNAL_ERROR", message, 500)
+
+
+# ============= 503 Service Unavailable =============
+
+class TransientAPIError(APIError):
+    """Transient error that is typically safe to retry."""
+
+    def __init__(self, code: str, message: str = "服务暂不可用，请稍后重试", **details):
+        super().__init__(code, message, 503, details)
+
+
+class DBSchemaChangedError(TransientAPIError):
+    """Database schema/config changed during runtime; retry may succeed after pool refresh."""
+
+    def __init__(self):
+        super().__init__(
+            "DB_SCHEMA_CHANGED",
+            "数据库结构/配置刚发生变更，请重试；若仍失败请重启后端服务。",
+        )
+
+
+class DBTimeoutError(TransientAPIError):
+    """Database operation timed out."""
+
+    def __init__(self):
+        super().__init__(
+            "DB_TIMEOUT",
+            "数据库连接/查询超时，请检查数据库服务是否可用后重试。",
+        )

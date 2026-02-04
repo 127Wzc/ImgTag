@@ -11,8 +11,8 @@ import {
 } from 'lucide-vue-next'
 import { useUpdateImage, useSuggestImageUpdate, useTags, useSearchTags, useCategories, useResolveTag } from '@/api/queries'
 import { useUserStore } from '@/stores'
-import { toast } from 'vue-sonner'
 import { getErrorMessage } from '@/utils/api-error'
+import { notifyError, notifySuccess } from '@/utils/notify'
 import CopyToast from '@/components/ui/CopyToast.vue'
 import { usePermission } from '@/composables/usePermission'
 
@@ -101,7 +101,7 @@ async function copyImageUrl() {
     await navigator.clipboard.writeText(props.image.image_url)
     showCopied.value = true
   } catch {
-    toast.error('复制失败')
+    notifyError('复制失败')
   }
 }
 
@@ -276,7 +276,7 @@ async function addTag(e?: KeyboardEvent) {
     }
 
     if (!canCreateTags.value) {
-      toast.error('暂无新建标签权限：不能添加不存在的标签', {
+      notifyError('暂无新建标签权限：不能添加不存在的标签', {
         description: '请从下拉建议选择已有标签，或联系管理员开通“新建标签”权限'
       })
       return
@@ -288,12 +288,12 @@ async function addTag(e?: KeyboardEvent) {
     newTagInput.value = ''
 
     if (resolved.is_new) {
-      toast.success(`新标签 "${resolved.name}" 已创建`)
+      notifySuccess(`新标签 "${resolved.name}" 已创建`, { once: true })
     }
   } catch (e: any) {
     const status = e?.response?.status
     if (status === 403 && !canCreateTags.value) return
-    toast.error(getErrorMessage(e))
+    notifyError(getErrorMessage(e))
   } finally {
     isResolvingTag.value = false
   }
@@ -330,12 +330,13 @@ const tagSuggestions = computed(() => {
     .slice(0, 5)
 })
 
-async function saveChanges() {
-  if (!props.image || !hasChanges.value) return
+async function saveChanges(): Promise<boolean> {
+  if (!props.image || !hasChanges.value) return true
 
   try {
     if (canEdit.value) {
       const allTagIds: number[] = []
+      const normalTagIds: number[] = []
 
       if (draftCategoryId.value) {
         allTagIds.push(draftCategoryId.value)
@@ -346,12 +347,17 @@ async function saveChanges() {
         if (t.id) allTagIds.push(t.id)
       })
 
-      draftNormalTags.value.forEach(t => allTagIds.push(t.id))
+      draftNormalTags.value.forEach(t => {
+        allTagIds.push(t.id)
+        normalTagIds.push(t.id)
+      })
 
       await updateMutation.mutateAsync({
         id: props.image.id,
         data: {
           tag_ids: allTagIds,
+          category_id: draftCategoryId.value,
+          normal_tag_ids: normalTagIds.filter(id => Boolean(id) && id > 0),
           description: draftDescription.value,
         }
       })
@@ -362,8 +368,7 @@ async function saveChanges() {
       originalDescription.value = draftDescription.value
 
       emit('updated')
-      toast.success('保存成功')
-      return
+      return true
     }
 
     if (canSuggest.value) {
@@ -381,12 +386,13 @@ async function saveChanges() {
       })
 
       discardChanges()
-      toast.success('建议已提交，等待管理员审批')
-      return
+      return true
     }
   } catch (e: any) {
-    toast.error(getErrorMessage(e))
+    return false
   }
+
+  return true
 }
 
 function discardChanges() {
@@ -417,9 +423,9 @@ function handleBackdropClick() {
 }
 
 async function confirmSaveAndClose() {
-  await saveChanges()
+  const ok = await saveChanges()
   showUnsavedConfirm.value = false
-  emit('close')
+  if (ok) emit('close')
 }
 
 function confirmDiscardAndClose() {

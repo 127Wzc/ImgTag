@@ -20,10 +20,11 @@ import uvicorn
 from imgtag.api import api_router
 from imgtag.core.config import settings
 from imgtag.core.config_cache import config_cache
+from imgtag.core.exception_translate import translate_exception
 from imgtag.core.exceptions import APIError
 from imgtag.core.logging_config import get_logger
 from imgtag.core.storage_constants import get_mime_type, StorageProvider
-from imgtag.db.database import close_db, async_session_maker
+from imgtag.db.database import close_db, async_session_maker, engine
 from imgtag.db.repositories import task_repository, config_repository, storage_endpoint_repository
 from imgtag.services.task_queue import task_queue, QUEUE_TASK_TYPES
 from imgtag.services.auth_service import init_default_admin
@@ -204,6 +205,7 @@ async def api_error_handler(request: Request, exc: APIError):
         content=exc.to_dict(),
     )
 
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle FastAPI HTTPException with unified format (backward compatibility)."""
@@ -214,6 +216,45 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             "error": {
                 "code": f"HTTP_{exc.status_code}",
                 "message": exc.detail,
+            }
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """全局兜底异常处理器（统一错误格式 + 可扩展翻译）。"""
+    translated = translate_exception(exc)
+    if translated:
+        if translated.log_level == "warning":
+            logger.warning(f"请求异常(已翻译): path={request.url.path}, error={exc}", exc_info=True)
+        elif translated.log_level == "info":
+            logger.info(f"请求异常(已翻译): path={request.url.path}, error={exc}")
+        elif translated.log_level == "debug":
+            logger.debug(f"请求异常(已翻译): path={request.url.path}, error={exc}")
+        else:
+            logger.error(f"请求异常(已翻译): path={request.url.path}, error={exc}", exc_info=True)
+
+        if translated.dispose_engine:
+            try:
+                await engine.dispose()
+            except Exception as e:
+                logger.warning(f"回收数据库连接池失败: {e}")
+
+        api_error = translated.api_error
+        return JSONResponse(
+            status_code=api_error.status_code,
+            content=api_error.to_dict(),
+        )
+
+    logger.error(f"未处理异常: path={request.url.path}, error={exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "服务器内部错误，请稍后重试",
             }
         },
     )

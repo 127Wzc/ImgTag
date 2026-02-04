@@ -17,6 +17,7 @@ from imgtag.core.config_cache import config_cache
 from imgtag.db.repositories.base import BaseRepository
 from imgtag.models.image import Image
 from imgtag.models.tag import ImageTag, Tag
+from imgtag.utils.ids import dedup_positive_ints_keep_order
 
 
 class ImageRepository(BaseRepository[Image]):
@@ -740,6 +741,44 @@ class ImageRepository(BaseRepository[Image]):
         stmt = select(Image).where(Image.id.in_(image_ids))
         result = await session.execute(stmt)
         return result.scalars().all()
+
+    async def get_uploader_preview_map(
+        self,
+        session: AsyncSession,
+        image_ids: list[int],
+    ) -> dict[int, dict[str, Any]]:
+        """批量获取图片上传者信息（用于审批预览等场景）。
+
+        Returns:
+            { image_id: {uploaded_by, uploaded_by_username}, ... }
+        """
+        if not image_ids:
+            return {}
+
+        # 去重（保持输入顺序）
+        image_ids = dedup_positive_ints_keep_order(image_ids)
+        if not image_ids:
+            return {}
+
+        from imgtag.models.user import User
+
+        uploader_map: dict[int, dict[str, Any]] = {}
+        uploader_stmt = (
+            select(
+                Image.id.label("image_id"),
+                Image.uploaded_by,
+                User.username.label("uploaded_by_username"),
+            )
+            .outerjoin(User, User.id == Image.uploaded_by)
+            .where(Image.id.in_(image_ids))
+        )
+        uploader_result = await session.execute(uploader_stmt)
+        for row in uploader_result:
+            uploader_map[int(row.image_id)] = {
+                "uploaded_by": row.uploaded_by,
+                "uploaded_by_username": row.uploaded_by_username,
+            }
+        return uploader_map
 
     async def get_by_ids_with_tags(
         self,

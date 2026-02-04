@@ -48,6 +48,7 @@ export function useRetryTask() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '已提交重试' },
         mutationFn: async (taskId: string) => {
             const { data } = await apiClient.post(`/tasks/${taskId}/retry`)
             return data
@@ -65,6 +66,7 @@ export function useCancelTask() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '已提交取消' },
         mutationFn: async (taskId: string) => {
             const { data } = await apiClient.post(`/tasks/${taskId}/cancel`)
             return data
@@ -82,6 +84,7 @@ export function useClearCompletedTasks() {
     const queryClient = useQueryClient()
 
     return useMutation({
+        meta: { successMessage: '已清理完成任务' },
         mutationFn: async () => {
             const { data } = await apiClient.delete('/tasks/completed')
             return data

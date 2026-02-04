@@ -4,8 +4,8 @@ import type { ImageResponse, ImageWithSimilarity, TagWithSource } from '@/types'
 import { Copy, X, Plus, Loader2, Check } from 'lucide-vue-next'
 import CopyToast from '@/components/ui/CopyToast.vue'
 import { useAddImageTag, useRemoveImageTag, useTags } from '@/api/queries'
-import { toast } from 'vue-sonner'
 import { getErrorMessage } from '@/utils/api-error'
+import { notifyError, notifySuccess, notifyWarning } from '@/utils/notify'
 import { usePermission } from '@/composables/usePermission'
 import { useUserStore } from '@/stores'
 
@@ -154,9 +154,9 @@ async function removeTag(event: Event, image: ImageItem, tag: TagWithSource) {
     const currentTags = image.tags || []
     const newTags = currentTags.filter(t => t.id !== tag.id)
     emit('tagsUpdated', image.id, newTags)
-    toast.success(`标签 "${tag.name}" 已移除`)
+    notifySuccess(`标签 "${tag.name}" 已移除`, { once: true })
   } catch (e: any) {
-    toast.error(getErrorMessage(e))
+    notifyError(getErrorMessage(e))
   } finally {
     pendingTagOps.value.delete(opKey)
   }
@@ -173,7 +173,7 @@ async function addTag(event: Event, image: ImageItem) {
   const currentTags = image.tags || []
   if (currentTags.some(t => t.name.toLowerCase() === tagName.toLowerCase())) {
     newTagInput.value = ''
-    toast.warning('标签已存在')
+    notifyWarning('标签已存在', { once: true })
     return
   }
 
@@ -198,10 +198,10 @@ async function addTag(event: Event, image: ImageItem) {
   } catch (e: any) {
     const status = e?.response?.status
     if (status === 403 && !canCreateTags.value) {
-      toast.error('暂无新建标签权限，只能选择已有标签')
+      notifyError('暂无新建标签权限，只能选择已有标签', { once: true })
       return
     }
-    toast.error(getErrorMessage(e))
+    notifyError(getErrorMessage(e))
   } finally {
     pendingTagOps.value.delete(opKey)
   }
@@ -224,9 +224,9 @@ function handleAddTagSuccess(
   editingImageId.value = null
 
   if (result.is_new) {
-    toast.success(`新标签 "${result.tag_name}" 已创建并添加`)
+    notifySuccess(`新标签 "${result.tag_name}" 已创建并添加`, { once: true })
   } else {
-    toast.success(`标签 "${result.tag_name}" 已添加`)
+    notifySuccess(`标签 "${result.tag_name}" 已添加`, { once: true })
   }
 }
 
@@ -254,7 +254,7 @@ async function selectSuggestion(event: Event, image: ImageItem, tag: { id: numbe
     const result = await addTagMutation.mutateAsync({ imageId: image.id, tagId: tag.id })
     handleAddTagSuccess(image, result)
   } catch (e: any) {
-    toast.error(getErrorMessage(e))
+    notifyError(getErrorMessage(e))
   } finally {
     pendingTagOps.value.delete(opKey)
   }

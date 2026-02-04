@@ -11,6 +11,7 @@ import apiClient from '@/api/client'
 import { useUserStore } from '@/stores/user'
 import { usePermission } from '@/composables/usePermission'
 import { Permission } from '@/constants/permissions'
+import { getErrorMessage } from '@/utils/api-error'
 import type { UploadAnalyzeResponse } from '@/types'
 import { 
   Upload as UploadIcon, 
@@ -231,7 +232,7 @@ async function uploadSingle(item: FileItem) {
   } catch (error: any) {
     clearInterval(progressInterval)
     item.status = 'error'
-    item.error = error.response?.data?.detail || error.message || '上传失败'
+    item.error = getErrorMessage(error)
   }
 }
 
@@ -262,7 +263,7 @@ async function uploadFromUrl() {
       urlResults.value[i].status = 'success'
     } catch (e: any) {
       urlResults.value[i].status = 'error'
-      urlResults.value[i].error = e.response?.data?.detail || e.message || '添加失败'
+      urlResults.value[i].error = getErrorMessage(e)
     }
   }
   

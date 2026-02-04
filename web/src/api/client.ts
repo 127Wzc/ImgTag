@@ -37,6 +37,13 @@ apiClient.interceptors.request.use(
 // 响应拦截器：处理错误
 apiClient.interceptors.response.use(
     (response: AxiosResponse) => {
+        // 兼容后端统一错误格式：即使 HTTP 200，也可能返回 { success:false, error:{...} }
+        const data = response.data as any
+        if (data && typeof data === 'object' && data.success === false && data.error?.message) {
+            const err: any = new Error(data.error.message)
+            err.response = response
+            return Promise.reject(err)
+        }
         return response
     },
     (error) => {
