@@ -23,10 +23,17 @@
 - 💾 **Multi-Endpoint Storage** - Local + S3-compatible with auto backup
 - 📁 **Collections** - Hierarchical folders with auto-tagging
 - 🏷️ **Tag System** - Source tracking (AI/User), usage statistics
-- 👥 **User Auth** - JWT authentication, admin approval, role-based access
+- 👥 **User Auth** - JWT authentication, role-based access, admin can disable accounts
+- 📝 **Change Suggestions & Approvals** - Non-owners can submit metadata change suggestions; admins approve to apply (and rebuild vectors)
 - ⚡ **Batch Operations** - Bulk upload, delete, tag, and analyze
 
 > Default admin: `admin` / `admin123`
+
+## 📚 Docs
+
+- Release history (detailed changes per tag): [docs/release-history.md](docs/release-history.md)
+- Permissions and suggestion/approval details: [docs/permissions.md](docs/permissions.md)
+- Docs index: [docs/README.md](docs/README.md)
 
 ---
 
