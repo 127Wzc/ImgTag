@@ -9,7 +9,7 @@ from fastapi import APIRouter
 
 from imgtag.api.endpoints import (
     images, search, system, config, vectors, queue, collections, tags,
-    tasks, auth, approvals, storage_endpoints, mcp,
+    tasks, auth, approvals, storage_endpoints, mcp, subjects,
 )
 
 api_router = APIRouter()
@@ -33,6 +33,13 @@ api_router.include_router(
     images.router,
     prefix="/images",
     tags=["图像管理"]
+)
+
+# 注册主体词典路由
+api_router.include_router(
+    subjects.router,
+    prefix="/subjects",
+    tags=["主体词典"],
 )
 
 # 注册搜索相关路由
@@ -112,4 +119,3 @@ api_router.include_router(
     prefix="/mcp", 
     tags=["MCP"]
 )
-

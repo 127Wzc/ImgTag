@@ -60,6 +60,7 @@ export interface ImageResponse {
     id: number
     image_url: string
     tags: TagWithSource[]
+    subjects: ImageSubjectAssignment[]
     description: string | null
     original_url: string | null
     width: number | null
@@ -118,6 +119,31 @@ export interface UploadAnalyzeResponse {
     tags: string[]
     description: string
     process_time: string
+}
+
+// ============= 主体相关 =============
+
+export interface SubjectResponse {
+    id: number
+    name: string
+    category_tag_id: number
+    category_tag_name: string
+    primary_tag_id: number
+    primary_tag_name: string
+    alias_tag_ids: number[]
+    aliases: string[]
+    description: string | null
+    is_active: boolean
+    created_by: number | null
+}
+
+export interface ImageSubjectAssignment {
+    subject_id: number
+    subject_name: string
+    confidence: number | null
+    source: 'manual' | 'auto' | 'approval' | 'suggest'
+    state: 'confirmed' | 'pending' | 'rejected'
+    is_primary: boolean
 }
 
 // ============= 任务相关 =============

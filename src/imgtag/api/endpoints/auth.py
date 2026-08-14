@@ -8,7 +8,7 @@ Provides user authentication, registration, and management.
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,8 +44,6 @@ def _user_to_dict(user: User) -> dict[str, Any]:
         "role": user.role,
         "is_active": user.is_active,
         "permissions": user.permissions,
-        "password_hash": user.password_hash,
-        "api_key": user.api_key,
         "created_at": user.created_at,
         "last_login_at": user.last_login_at,
     }
@@ -516,17 +514,18 @@ async def generate_my_api_key(
 
 @router.get("/me/api-key")
 async def get_my_api_key(
+    reveal: bool = Query(default=False, description="是否返回当前用户的明文 API 密钥"),
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Get current API key (masked).
+    """获取当前用户的 API 密钥状态；仅在本人主动请求时返回明文。
 
     Args:
         user: Current user dictionary.
         session: Database session.
 
     Returns:
-        API key status and masked key.
+        API key status and masked key. ``reveal=true`` 时额外返回明文密钥。
     """
     full_user = await user_repository.get_by_id(session, user["id"])
     if not full_user or not full_user.api_key:
@@ -536,7 +535,11 @@ async def get_my_api_key(
     api_key = full_user.api_key
     masked_key = f"{api_key[:8]}...{api_key[-8:]}"
 
-    return {"has_key": True, "masked_key": masked_key}
+    response = {"has_key": True, "masked_key": masked_key}
+    if reveal:
+        # 此接口受当前 JWT 认证保护，且只读取当前用户自己的密钥。
+        response["api_key"] = api_key
+    return response
 
 
 @router.delete("/me/api-key")

@@ -10,6 +10,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field, HttpUrl
 
 from .base import BaseSchema
+from .subject import ImageSubjectAssignment
 
 
 # ============= 图像分析结果 =============
@@ -58,6 +59,7 @@ class ImageResponse(BaseSchema):
     id: int = Field(..., description="图像 ID")
     image_url: str = Field(..., description="图像访问 URL (动态计算)")
     tags: List[TagWithSource] = Field(default_factory=list, description="标签列表")
+    subjects: List[ImageSubjectAssignment] = Field(default_factory=list, description="主体列表")
     description: Optional[str] = Field(default=None, description="图像描述")
     original_url: Optional[str] = Field(default=None, description="原始来源 URL")
     width: Optional[int] = Field(default=None, description="宽度(px)")

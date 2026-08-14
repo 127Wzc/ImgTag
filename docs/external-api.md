@@ -77,6 +77,8 @@ api_key: YOUR_API_KEY
 | `tags` | array | 否 | `[]` | 标签筛选（AND 关系） |
 | `count` | int | 否 | `1` | 返回数量，最大 50 |
 
+> 返回范围：公开图片 + 本人上传的图片（admin 无限制）。
+
 #### 示例
 
 ```bash
@@ -425,47 +427,71 @@ if response.choices[0].message.tool_calls:
 
 ### MCP 配置
 
-ImgTag 内置 MCP Server，使用 SSE (Server-Sent Events) 传输协议。
+ImgTag 内置 MCP Server，同时支持两代传输协议（共享同一套工具与权限逻辑）：
+
+- **Streamable HTTP**（现行标准，推荐）：单端点 POST，无状态，兼容负载均衡与标准限流；
+- **HTTP+SSE**（2024-11-05 旧协议，已被官方弃用）：保留给尚未升级的旧客户端。
+
+| 端点 | 传输 | 认证 | 工具 | 数据可见性 |
+|------|------|------|------|-----------|
+| `POST /api/v1/mcp` | Streamable HTTP | 强制 API Key | 全部（写工具按用户权限过滤） | public + 本人上传；admin 无限制 |
+| `POST /api/v1/mcp/public` | Streamable HTTP | API Key 可选 | 仅只读工具 | 匿名：仅 public；带 Key：public + 本人上传（工具仍只读） |
+| `GET /api/v1/mcp/sse` | HTTP+SSE（兼容） | 强制 API Key | 同上全功能 | 同上 |
+| `GET /api/v1/mcp/public/sse` | HTTP+SSE（兼容） | API Key 可选 | 同上只读 | 同上 |
 
 **支持的 Tools：**
-| Tool | 说明 |
-|------|------|
-| `search_images` | 搜索图片（关键词/标签） |
-| `get_random_images` | 随机获取图片 |
-| `get_image_detail` | 获取图片详情 |
-| `add_image` | 从 URL 添加图片（支持 AI 分析） |
+| Tool | 只读 | 说明 |
+|------|------|------|
+| `search_images` | 是 | 图库检索：不传条件随机抽取；tags 标签筛选（AND 硬过滤）；keyword 关键词搜索（语义向量 / 模糊匹配）；`sort=latest` 支持分页浏览 |
+| `get_image_detail` | 是 | 获取图片详情（含可见性校验） |
+| `add_image` | 否 | 从 URL 添加图片（支持 AI 分析），需要「上传图片」权限 |
+
+**`search_images` 参数：**
+| 参数 | 类型 / 默认 | 说明 |
+|------|------------|------|
+| `keyword` | string | 搜索词。不传时进入随机抽取模式 |
+| `tags` | string[] | 标签名列表（AND 关系，所有模式下硬过滤） |
+| `match` | `auto` / `semantic` / `fuzzy`，默认 `auto` | keyword 匹配方式：semantic=语义向量；fuzzy=描述/标签名子串；auto=优先语义、失败降级模糊 |
+| `sort` | `auto` / `random` / `latest` / `relevance`，默认 `auto` | auto=有 keyword 按相关度、无 keyword 随机；latest=最新排序（唯一支持分页）；random 仅无 keyword 时有效 |
+| `count` | int 1-50，默认 10 | 返回数量（latest 模式下为每页数量） |
+| `page` | int ≥1，默认 1 | 页码，仅 `sort=latest` 时生效 |
 
 **端点地址：**
 ```
-SSE: http://your-server:8000/api/v1/mcp/sse?api_key=YOUR_KEY
+推荐（Streamable HTTP）:
+  全功能:   http://your-server:8000/api/v1/mcp?api_key=YOUR_KEY
+  公共只读: http://your-server:8000/api/v1/mcp/public                    （匿名，仅公开图片）
+  公共只读: http://your-server:8000/api/v1/mcp/public?api_key=YOUR_KEY   （公开 + 本人上传）
+
+兼容（HTTP+SSE，已弃用，仅供旧客户端）:
+  全功能:   http://your-server:8000/api/v1/mcp/sse?api_key=YOUR_KEY
+  公共只读: http://your-server:8000/api/v1/mcp/public/sse
 ```
 
-#### Claude Desktop 配置
+> 新客户端会自动探测传输协议：POST initialize 成功即 Streamable HTTP；失败（4xx）则回退旧 SSE。
+> 旧 SSE 公共端点对匿名连接数设有上限（默认 20），超出返回 `429`；Streamable HTTP 无长连接，不受此限制。
 
-> [!TIP]
-> Claude Desktop 目前主要支持 stdio 传输。SSE 传输需要使用代理工具或等待官方支持。
+#### 客户端配置
 
-**方式一：直接 HTTP 调用**
-
-使用支持 SSE 的 MCP 客户端（如 Cursor）直接连接：
+**方式一：直接 HTTP 连接（Cursor 等支持远程 MCP 的客户端）**
 
 ```json
 {
   "mcpServers": {
     "imgtag": {
-      "url": "http://your-server:8000/api/v1/mcp/sse?api_key=YOUR_KEY",
-      "transport": "sse"
+      "url": "http://your-server:8000/api/v1/mcp?api_key=YOUR_KEY"
     }
   }
 }
 ```
 
-**方式二：使用 mcp-remote 代理**
+> 接入公共只读端点时，将 `url` 换成 `/api/v1/mcp/public`，`api_key` 可省略（省略后仅能访问公开图片）。
+> 仅支持旧协议的客户端可继续使用 `/api/v1/mcp/sse` 并声明 `"transport": "sse"`。
 
-安装 `mcp-remote` 将 SSE 转为 stdio：
+**方式二：使用 mcp-remote 代理（仅支持 stdio 的客户端，如部分版本 Claude Desktop）**
 
 ```bash
-npx -y mcp-remote http://your-server:8000/api/v1/mcp/sse?api_key=YOUR_KEY
+npx -y mcp-remote http://your-server:8000/api/v1/mcp?api_key=YOUR_KEY
 ```
 
 Claude Desktop 配置（`~/.claude/claude_desktop_config.json`）：
@@ -478,7 +504,7 @@ Claude Desktop 配置（`~/.claude/claude_desktop_config.json`）：
       "args": [
         "-y",
         "mcp-remote",
-        "http://your-server:8000/api/v1/mcp/sse?api_key=YOUR_KEY"
+        "http://your-server:8000/api/v1/mcp?api_key=YOUR_KEY"
       ]
     }
   }

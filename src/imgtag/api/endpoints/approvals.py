@@ -23,6 +23,10 @@ from imgtag.db.repositories import (
     image_repository,
 )
 from imgtag.services.suggestion_service import SUGGEST_IMAGE_UPDATE_TYPE, suggestion_service
+from imgtag.services.subject_assignment_service import (
+    SUGGEST_SUBJECT_ASSIGNMENT_TYPE,
+    subject_assignment_service,
+)
 from imgtag.services.approval_preview_service import approval_preview_service
 from imgtag.services.rebuild_vector_service import enqueue_rebuild_vector
 from imgtag.utils.approval_utils import extract_image_id_from_approval
@@ -128,6 +132,9 @@ async def approve_request(
     # 执行审批操作
     try:
         success = await execute_approval(session, approval)
+    except ValueError as e:
+        # 可预期的业务失败（如主体已停用、payload 缺字段）：提示管理员处理而非报 500
+        raise HTTPException(status_code=400, detail=f"无法执行该审批: {e}，可选择拒绝此审批")
     except Exception as e:
         if translate_exception(e):
             raise
@@ -152,11 +159,13 @@ async def approve_request(
     # 确保修改已提交后再触发异步任务，避免读到旧数据
     await session.commit()
 
-    # 建议落地后触发向量重建（不走视觉分析）
+    # 建议落地后触发向量重建（不走视觉分析）：
+    # - 图片修改建议：描述/标签变化
+    # - 主体纠正建议：落地时会同步图片标签
     rebuild_enqueued = None
     rebuild_added = 0
     rebuild_image_id = None
-    if approval.type == SUGGEST_IMAGE_UPDATE_TYPE:
+    if approval.type in (SUGGEST_IMAGE_UPDATE_TYPE, SUGGEST_SUBJECT_ASSIGNMENT_TYPE):
         rebuild_image_id = _extract_image_id(approval)
         if rebuild_image_id:
             rebuild_enqueued, rebuild_added, _ = await enqueue_rebuild_vector(
@@ -233,7 +242,7 @@ async def batch_approve(
                     await approval_repository.approve(session, approval, admin["id"], data.comment)
 
                     # 建议落地后触发向量重建
-                    if approval.type == SUGGEST_IMAGE_UPDATE_TYPE:
+                    if approval.type in (SUGGEST_IMAGE_UPDATE_TYPE, SUGGEST_SUBJECT_ASSIGNMENT_TYPE):
                         image_id = _extract_image_id(approval)
                         if image_id:
                             rebuild_image_ids.append(image_id)
@@ -289,6 +298,9 @@ async def execute_approval(session: AsyncSession, approval) -> bool:
     # 修改建议审批：必须保证失败时能回滚（由上层 savepoint 负责），因此这里不吞异常
     if approval_type == SUGGEST_IMAGE_UPDATE_TYPE:
         await suggestion_service.apply_image_update_suggestion(session, approval=approval)
+        return True
+    if approval_type == SUGGEST_SUBJECT_ASSIGNMENT_TYPE:
+        await subject_assignment_service.apply_subject_suggestion(session, approval=approval)
         return True
 
     try:

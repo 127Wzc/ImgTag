@@ -3,6 +3,8 @@ import { computed, unref, type MaybeRef } from 'vue'
 import apiClient from '../client'
 import type { Tag } from '@/types'
 
+const MAX_TAG_PAGE_SIZE = 1000
+
 interface TagStats {
     categories: number
     resolutions: number
@@ -28,11 +30,12 @@ export function useTagStats() {
  * 获取指定级别的标签（响应式）
  */
 export function useTagsByLevel(level: MaybeRef<number>, limit = 200) {
+    const cappedLimit = Math.min(Math.max(limit, 1), MAX_TAG_PAGE_SIZE)
     return useQuery({
-        queryKey: computed(() => ['tags', 'level', unref(level), limit]),
+        queryKey: computed(() => ['tags', 'level', unref(level), cappedLimit]),
         queryFn: async () => {
             const { data } = await apiClient.get<Tag[]>('/tags/', {
-                params: { level: unref(level), size: limit }
+                params: { level: unref(level), size: cappedLimit }
             })
             return data
         },
@@ -44,11 +47,12 @@ export function useTagsByLevel(level: MaybeRef<number>, limit = 200) {
  * 获取所有标签
  */
 export function useTags(limit = 200) {
+    const cappedLimit = Math.min(Math.max(limit, 1), MAX_TAG_PAGE_SIZE)
     return useQuery({
-        queryKey: ['tags', 'all', limit],
+        queryKey: ['tags', 'all', cappedLimit],
         queryFn: async () => {
             const { data } = await apiClient.get<Tag[]>('/tags/', {
-                params: { size: limit }
+                params: { size: cappedLimit }
             })
             return data
         },
@@ -60,10 +64,11 @@ export function useTags(limit = 200) {
  * 搜索标签（支持关键字模糊匹配）
  */
 export function useSearchTags(keyword: MaybeRef<string>, level?: MaybeRef<number | null>, limit = 50) {
+    const cappedLimit = Math.min(Math.max(limit, 1), MAX_TAG_PAGE_SIZE)
     return useQuery({
-        queryKey: computed(() => ['tags', 'search', unref(keyword), unref(level), limit]),
+        queryKey: computed(() => ['tags', 'search', unref(keyword), unref(level), cappedLimit]),
         queryFn: async () => {
-            const params: Record<string, any> = { size: limit }
+            const params: Record<string, any> = { size: cappedLimit }
             const kw = unref(keyword)
             const lv = unref(level)
             if (kw) params.keyword = kw

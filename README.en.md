@@ -25,6 +25,7 @@
 - 🏷️ **Tag System** - Source tracking (AI/User), usage statistics
 - 👥 **User Auth** - JWT authentication, role-based access, admin can disable accounts
 - 📝 **Change Suggestions & Approvals** - Non-owners can submit metadata change suggestions; admins approve to apply (and rebuild vectors)
+- 🧠 **Subject Memory & Correction** - Maintain dictionaries for people, landmarks, animals, and other subjects; confirmed corrections guide future analysis
 - ⚡ **Batch Operations** - Bulk upload, delete, tag, and analyze
 
 > Default admin: `admin` / `admin123`
@@ -33,7 +34,20 @@
 
 - Release history (detailed changes per tag): [docs/release-history.md](docs/release-history.md)
 - Permissions and suggestion/approval details: [docs/permissions.md](docs/permissions.md)
+- Subject memory and correction design: [docs/subject-correction-plan.md](docs/subject-correction-plan.md)
 - Docs index: [docs/README.md](docs/README.md)
+
+---
+
+## 🧠 Subject Memory & Correction
+
+When a person, landmark, animal, or other subject is identified incorrectly, correct it from the image detail view. The confirmed result is linked to the existing tag system and becomes a prompt constraint during future re-analysis.
+
+- **Subject dictionary**: Administrators manage each subject's category, primary-name tag, aliases, and active state. Referenced tags are protected from deletion.
+- **Correction and approval**: Image owners and administrators can set the primary subject directly. Other users with suggestion permission can submit a correction for administrator approval.
+- **Tag and vector sync**: Confirming a subject adds its primary-name tag and rebuilds the image vector. Forced re-analysis can optionally refresh historical descriptions and tags.
+- **Manual results win**: Manual and approved assignments cannot be overwritten by automatic matching.
+- **Current matcher status**: V1 provides the complete data and correction workflow. The default matcher is `stub`, so it makes no automatic matches and does not change existing analysis results. A real matcher can be enabled through configuration later.
 
 ---
 
@@ -131,7 +145,8 @@ Access: http://localhost:5173
 ```bash
 # Backend
 cp .env.example .env && vim .env  # Configure database
-uv sync && uv run uvicorn imgtag.main:app --reload --port 8000
+uv sync
+uv run uvicorn imgtag.main:app --reload --port 8000
 
 # Frontend
 cd web && pnpm install && pnpm dev
@@ -150,6 +165,7 @@ Manage via Web UI "System Settings":
 | Vision Model | API URL, API Key, Model Name |
 | Embedding Model | Local model / Online API |
 | Storage Endpoints | Multi-endpoint, S3-compatible, Auto-backup |
+| Subject Memory | Enablement, confidence thresholds, candidate count, matcher backend (default: `stub`) |
 ---
 
 ## 🔌 Developer Integration

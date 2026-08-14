@@ -71,6 +71,19 @@ class TagRepository(BaseRepository[Tag]):
             level=level,
         )
 
+    async def get_by_ids(
+        self,
+        session: AsyncSession,
+        ids: Sequence[int],
+    ) -> Sequence[Tag]:
+        """Batch get tags by ids."""
+        clean_ids = [int(i) for i in ids if int(i) > 0]
+        if not clean_ids:
+            return []
+        stmt = select(Tag).where(Tag.id.in_(clean_ids))
+        result = await session.execute(stmt)
+        return result.scalars().all()
+
     async def get_or_create_with_flag(
         self,
         session: AsyncSession,

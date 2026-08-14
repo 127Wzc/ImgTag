@@ -19,13 +19,31 @@ import type { ApprovalResponse } from '@/types'
 
 const { state: confirmState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
 
-const params = ref({ page: 1, size: 50, types: 'suggest_image_update', include_preview: true })
+const params = ref({ page: 1, size: 50, types: 'suggest_image_update,suggest_subject_assignment', include_preview: true })
 const { data, isLoading, refetch } = useApprovals(params)
 const approveMutation = useApproveApproval()
 const rejectMutation = useRejectApproval()
 
 const approvals = computed(() => data.value?.data || [])
 const total = computed(() => data.value?.total || 0)
+
+type ApprovalKind = 'image' | 'subject'
+
+interface ApprovalView {
+  approval: ApprovalResponse
+  previewUrl: string
+  kind: ApprovalKind
+  descriptionBase: string
+  descriptionProposed: string
+  categoryBase: string
+  categoryProposed: string
+  diffAdded: string[]
+  diffRemoved: string[]
+  baseSubjectName: string
+  proposedSubjectName: string
+  confidenceText: string
+  commentText: string
+}
 
 function requesterDisplay(approval: ApprovalResponse): string {
   const username = approval.requester_name
@@ -36,7 +54,7 @@ function requesterDisplay(approval: ApprovalResponse): string {
   return '-'
 }
 
-function getSuggestionPayload(approval: ApprovalResponse): {
+function getImageSuggestionPayload(approval: ApprovalResponse): {
   base: any
   proposed: any
 } {
@@ -44,6 +62,21 @@ function getSuggestionPayload(approval: ApprovalResponse): {
   return {
     base: payload?.base || {},
     proposed: payload?.proposed || {},
+  }
+}
+
+function getSubjectSuggestionPayload(approval: ApprovalResponse): {
+  base_subject: any
+  proposed_subject: any
+  confidence: number | null
+  comment: string
+} {
+  const payload = approval.payload as any
+  return {
+    base_subject: payload?.base_subject || {},
+    proposed_subject: payload?.proposed_subject || {},
+    confidence: typeof payload?.confidence === 'number' ? payload.confidence : null,
+    comment: typeof payload?.comment === 'string' ? payload.comment : '',
   }
 }
 
@@ -97,12 +130,46 @@ async function reject(approvalId: number) {
   }
 }
 
-const approvalViews = computed(() => {
+const approvalViews = computed<ApprovalView[]>(() => {
   return approvals.value.map((approval) => {
-    const suggestion = getSuggestionPayload(approval)
-    const diff = diffTags(suggestion.base.normal_tags, suggestion.proposed.normal_tags)
     const previewUrl = approval.preview?.image_url || ''
-    return { approval, suggestion, diff, previewUrl }
+
+    if (approval.type === 'suggest_image_update') {
+      const suggestion = getImageSuggestionPayload(approval)
+      const diff = diffTags(suggestion.base.normal_tags, suggestion.proposed.normal_tags)
+      return {
+        approval,
+        previewUrl,
+        kind: 'image',
+        descriptionBase: suggestion.base.description || '（空）',
+        descriptionProposed: suggestion.proposed.description || '（空）',
+        categoryBase: suggestion.base.category_name || '未分类',
+        categoryProposed: suggestion.proposed.category_name || '未分类',
+        diffAdded: diff.added,
+        diffRemoved: diff.removed,
+        baseSubjectName: '',
+        proposedSubjectName: '',
+        confidenceText: '-',
+        commentText: suggestion.proposed.comment || '',
+      }
+    }
+
+    const suggestion = getSubjectSuggestionPayload(approval)
+    return {
+      approval,
+      previewUrl,
+      kind: 'subject',
+      descriptionBase: '',
+      descriptionProposed: '',
+      categoryBase: '',
+      categoryProposed: '',
+      diffAdded: [],
+      diffRemoved: [],
+      baseSubjectName: suggestion.base_subject?.subject_name || '未设置',
+      proposedSubjectName: suggestion.proposed_subject?.subject_name || '未设置',
+      confidenceText: suggestion.confidence != null ? suggestion.confidence.toFixed(4) : '-',
+      commentText: suggestion.comment || '',
+    }
   })
 })
 </script>
@@ -114,7 +181,7 @@ const approvalViews = computed(() => {
       <div class="flex items-center justify-between mb-8">
         <div>
           <h1 class="text-2xl font-bold text-foreground">审批管理</h1>
-          <p class="text-muted-foreground mt-1">审批成员提交的修改建议</p>
+          <p class="text-muted-foreground mt-1">审批成员提交的图片修改与主体纠正建议</p>
         </div>
         <div class="flex gap-2">
           <Button variant="outline" size="sm" @click="refetch" :disabled="isLoading">
@@ -180,58 +247,86 @@ const approvalViews = computed(() => {
               </div>
 
               <div class="space-y-2 text-sm">
-                <div class="flex items-start gap-2">
-                  <AlignLeft class="w-4 h-4 mt-0.5 text-muted-foreground" />
-                  <div class="flex-1 min-w-0">
-                    <div class="text-xs text-muted-foreground">描述</div>
-                    <div class="text-foreground line-clamp-2">
-                      {{ view.suggestion.base.description || '（空）' }}
-                      <span class="text-muted-foreground mx-1">→</span>
-                      {{ view.suggestion.proposed.description || '（空）' }}
+                <template v-if="view.kind === 'image'">
+                  <div class="flex items-start gap-2">
+                    <AlignLeft class="w-4 h-4 mt-0.5 text-muted-foreground" />
+                    <div class="flex-1 min-w-0">
+                      <div class="text-xs text-muted-foreground">描述</div>
+                      <div class="text-foreground line-clamp-2">
+                        {{ view.descriptionBase }}
+                        <span class="text-muted-foreground mx-1">→</span>
+                        {{ view.descriptionProposed }}
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <div class="flex items-start gap-2">
-                  <Tag class="w-4 h-4 mt-0.5 text-muted-foreground" />
-                  <div class="flex-1 min-w-0">
-                    <div class="text-xs text-muted-foreground">分类</div>
-                    <div class="text-foreground">
-                      {{ view.suggestion.base.category_name || '未分类' }}
-                      <span class="text-muted-foreground mx-1">→</span>
-                      {{ view.suggestion.proposed.category_name || '未分类' }}
+                  <div class="flex items-start gap-2">
+                    <Tag class="w-4 h-4 mt-0.5 text-muted-foreground" />
+                    <div class="flex-1 min-w-0">
+                      <div class="text-xs text-muted-foreground">分类</div>
+                      <div class="text-foreground">
+                        {{ view.categoryBase }}
+                        <span class="text-muted-foreground mx-1">→</span>
+                        {{ view.categoryProposed }}
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <div class="flex items-start gap-2">
-                  <Tag class="w-4 h-4 mt-0.5 text-muted-foreground opacity-60" />
-                  <div class="flex-1 min-w-0">
-                    <div class="text-xs text-muted-foreground">标签变更</div>
-                    <div class="text-xs text-foreground">
-                      <span v-if="view.diff.added.length">
-                        +{{ view.diff.added.join('、') }}
-                      </span>
-                      <span
-                        v-if="view.diff.removed.length"
-                        class="text-muted-foreground"
-                      >
-                        <span v-if="view.diff.added.length"> · </span>
-                        -{{ view.diff.removed.join('、') }}
-                      </span>
-                      <span
-                        v-if="!view.diff.added.length && !view.diff.removed.length"
-                        class="text-muted-foreground"
-                      >
-                        无变更
-                      </span>
+                  <div class="flex items-start gap-2">
+                    <Tag class="w-4 h-4 mt-0.5 text-muted-foreground opacity-60" />
+                    <div class="flex-1 min-w-0">
+                      <div class="text-xs text-muted-foreground">标签变更</div>
+                      <div class="text-xs text-foreground">
+                        <span v-if="view.diffAdded.length">
+                          +{{ view.diffAdded.join('、') }}
+                        </span>
+                        <span
+                          v-if="view.diffRemoved.length"
+                          class="text-muted-foreground"
+                        >
+                          <span v-if="view.diffAdded.length"> · </span>
+                          -{{ view.diffRemoved.join('、') }}
+                        </span>
+                        <span
+                          v-if="!view.diffAdded.length && !view.diffRemoved.length"
+                          class="text-muted-foreground"
+                        >
+                          无变更
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
+                </template>
+
+                <template v-else>
+                  <div class="flex items-start gap-2">
+                    <Tag class="w-4 h-4 mt-0.5 text-muted-foreground" />
+                    <div class="flex-1 min-w-0">
+                      <div class="text-xs text-muted-foreground">主体</div>
+                      <div class="text-foreground">
+                        {{ view.baseSubjectName }}
+                        <span class="text-muted-foreground mx-1">→</span>
+                        {{ view.proposedSubjectName }}
+                      </div>
+                    </div>
+                  </div>
+                  <div class="flex items-start gap-2">
+                    <Tag class="w-4 h-4 mt-0.5 text-muted-foreground opacity-60" />
+                    <div class="flex-1 min-w-0">
+                      <div class="text-xs text-muted-foreground">建议置信度</div>
+                      <div class="text-foreground">
+                        {{ view.confidenceText }}
+                      </div>
+                    </div>
+                  </div>
+                </template>
               </div>
 
-              <p v-if="view.suggestion.proposed.comment" class="text-xs text-muted-foreground">
-                备注：{{ view.suggestion.proposed.comment }}
+              <p
+                v-if="view.commentText"
+                class="text-xs text-muted-foreground"
+              >
+                备注：{{ view.commentText }}
               </p>
             </div>
 

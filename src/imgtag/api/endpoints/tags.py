@@ -19,12 +19,27 @@ from imgtag.api.permission_guards import ensure_permission
 from imgtag.core.permissions import Permission
 from imgtag.core.logging_config import get_logger
 from imgtag.db import get_async_session
-from imgtag.db.repositories import tag_repository
+from imgtag.db.repositories import subject_repository, tag_repository
 from imgtag.schemas import Tag, TagUpdate
 
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+async def _ensure_tag_not_referenced_by_subjects(
+    session: AsyncSession,
+    tag_id: int,
+) -> None:
+    """删除标签前检查主体引用（外键为 RESTRICT，提前拦截并给出可读提示）。"""
+    subjects = await subject_repository.list_referencing_tag(session, tag_id)
+    if subjects:
+        names = "、".join(s.name for s in subjects[:5])
+        suffix = " 等" if len(subjects) > 5 else ""
+        raise HTTPException(
+            status_code=400,
+            detail=f"标签正在被主体使用（{names}{suffix}），请先在主体管理中解除关联",
+        )
 
 
 # ============= Read Operations (Public) =============
@@ -229,6 +244,14 @@ async def rename_tag_by_id(
         raise HTTPException(status_code=400, detail="没有可更新的字段")
     
     await session.flush()
+
+    # 同步主体冗余名称（主名称 / 别名），避免标签改名后数据漂移
+    if updated_fields.get("new_name"):
+        synced = await subject_repository.sync_tag_rename(
+            session, tag_id=tag.id, new_name=updated_fields["new_name"]
+        )
+        if synced:
+            logger.info(f"标签改名已同步 {synced} 个主体: tag_id={tag_id}")
     
     # Invalidate category cache if level=0 tag was updated
     if tag.level == 0:
@@ -267,6 +290,9 @@ async def delete_tag_by_id(
     if tag.level == 2:
         ensure_permission(user, Permission.CREATE_TAGS)
 
+    # 主体引用检查（subjects 外键为 RESTRICT，直接删除会触发数据库错误）
+    await _ensure_tag_not_referenced_by_subjects(session, tag_id)
+
     # Level 0/1 检查是否在使用中
     if tag.level in (0, 1):
         success, message = await tag_repository.delete_category(session, tag_id)
@@ -296,6 +322,8 @@ async def delete_tag_by_name(
     tag = await tag_repository.get_by_name(session, tag_name)
     if not tag:
         raise HTTPException(status_code=404, detail=f"标签 '{tag_name}' 不存在")
+
+    await _ensure_tag_not_referenced_by_subjects(session, tag.id)
 
     await tag_repository.delete(session, tag)
     return {"message": f"标签 '{tag_name}' 已删除", "deleted_name": tag_name}

@@ -58,3 +58,13 @@ export {
     useDashboardStats,
     type DashboardStats
 } from './system'
+
+// Subjects
+export {
+    useSubjects,
+    useCreateSubject,
+    useUpdateSubject,
+    useSetPrimarySubject,
+    useSuggestPrimarySubject,
+    type SubjectsQueryParams,
+} from './subjects'

@@ -13,6 +13,7 @@ from imgtag.models.approval import Approval, AuditLog
 from imgtag.models.config import Config, SchemaMeta
 from imgtag.models.storage_endpoint import StorageEndpoint
 from imgtag.models.image_location import ImageLocation
+from imgtag.models.subject import Subject, SubjectSample, ImageSubject
 
 __all__ = [
     "Base",
@@ -30,5 +31,7 @@ __all__ = [
     "SchemaMeta",
     "StorageEndpoint",
     "ImageLocation",
+    "Subject",
+    "SubjectSample",
+    "ImageSubject",
 ]
-

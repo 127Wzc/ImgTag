@@ -26,6 +26,7 @@ from imgtag.models.base import Base, TimestampMixin
 if TYPE_CHECKING:
     from imgtag.models.collection import Collection
     from imgtag.models.image_location import ImageLocation
+    from imgtag.models.subject import ImageSubject
     from imgtag.models.tag import Tag
     from imgtag.models.user import User
 
@@ -97,7 +98,11 @@ class Image(Base, TimestampMixin):
     locations: Mapped[list["ImageLocation"]] = relationship(
         "ImageLocation", back_populates="image", cascade="all, delete-orphan"
     )
+    image_subjects: Mapped[list["ImageSubject"]] = relationship(
+        "ImageSubject",
+        back_populates="image",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         return f"<Image(id={self.id}, file_type='{self.file_type}')>"
-

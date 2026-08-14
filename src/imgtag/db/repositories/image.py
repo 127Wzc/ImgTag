@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import and_, asc, desc, func, or_, select, text, update
+from sqlalchemy import and_, asc, bindparam, desc, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -32,6 +32,16 @@ class ImageRepository(BaseRepository[Image]):
     """
 
     model = Image
+
+    async def get_by_id_for_update(
+        self,
+        session: AsyncSession,
+        image_id: int,
+    ) -> Optional[Image]:
+        """读取并锁定图片行，用于串行化同一图片的主体变更。"""
+        stmt = select(Image).where(Image.id == image_id).with_for_update()
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def create_image(
         self,
@@ -551,6 +561,7 @@ class ImageRepository(BaseRepository[Image]):
         tag_weight: float = 0.3,
         category_id: Optional[int] = None,
         resolution_id: Optional[int] = None,
+        tags: Optional[list[str]] = None,
         visible_to_user_id: Optional[int] = None,
         skip_visibility_filter: bool = False,
     ) -> list[dict[str, Any]]:
@@ -569,6 +580,7 @@ class ImageRepository(BaseRepository[Image]):
             tag_weight: Weight for tag score (0-1).
             category_id: Filter by category (level=0 tag).
             resolution_id: Filter by resolution (level=1 tag).
+            tags: Hard filter by tag names (AND logic, all must match).
             visible_to_user_id: If set, only return public images or images uploaded by this user.
 
         Returns:
@@ -596,6 +608,18 @@ class ImageRepository(BaseRepository[Image]):
         if resolution_id:
             filter_sql += " AND i.id IN (SELECT image_id FROM image_tags WHERE tag_id = :resolution_id)"
             params["resolution_id"] = resolution_id
+        # Tag hard filter (AND logic): image must have all specified tags
+        if tags:
+            filter_sql += """ AND i.id IN (
+                SELECT it_f.image_id
+                FROM image_tags it_f
+                JOIN tags t_f ON it_f.tag_id = t_f.id
+                WHERE t_f.name IN :filter_tags
+                GROUP BY it_f.image_id
+                HAVING COUNT(DISTINCT t_f.id) = :filter_tags_count
+            )"""
+            params["filter_tags"] = list(tags)
+            params["filter_tags_count"] = len(tags)
         # Visibility filter:
         # - skip_visibility_filter=True: no filter (admin mode)
         # - visible_to_user_id set: show public OR owned by user
@@ -631,6 +655,9 @@ class ImageRepository(BaseRepository[Image]):
             ) DESC
             LIMIT :limit
         """)
+        if tags:
+            # IN 子句列表参数需要 expanding bindparam
+            query = query.bindparams(bindparam("filter_tags", expanding=True))
 
         result = await session.execute(query, params)
         rows = result.fetchall()
@@ -897,6 +924,9 @@ class ImageRepository(BaseRepository[Image]):
         session: AsyncSession,
         tag_names: list[str],
         count: int = 1,
+        *,
+        visible_to_user_id: Optional[int] = None,
+        skip_visibility_filter: bool = False,
     ) -> list[dict[str, Any]]:
         """Get random images filtered by tags (AND logic).
 
@@ -906,11 +936,26 @@ class ImageRepository(BaseRepository[Image]):
             session: Database session.
             tag_names: Tag names to filter (all must match).
             count: Number of random images.
+            visible_to_user_id: If set, only return public images or images uploaded by this user.
+            skip_visibility_filter: Skip visibility filter entirely (admin mode).
 
         Returns:
             List of image dicts with tags.
         """
-        # Build query with optional tag filter
+        conditions = []
+
+        # Visibility filter:
+        # - skip_visibility_filter=True: no filter (admin mode)
+        # - visible_to_user_id set: show public OR owned by user
+        # - visible_to_user_id=None: show only public (anonymous user)
+        if not skip_visibility_filter:
+            if visible_to_user_id is not None:
+                conditions.append(
+                    or_(Image.is_public == True, Image.uploaded_by == visible_to_user_id)
+                )
+            else:
+                conditions.append(Image.is_public == True)
+
         if tag_names:
             # AND logic: must have all specified tags
             subquery = (
@@ -920,20 +965,16 @@ class ImageRepository(BaseRepository[Image]):
                 .group_by(ImageTag.image_id)
                 .having(func.count(func.distinct(Tag.id)) == len(tag_names))
             )
-            stmt = (
-                select(Image)
-                .where(Image.id.in_(subquery))
-                .options(selectinload(Image.tags))
-                .order_by(func.random())
-                .limit(count)
-            )
-        else:
-            stmt = (
-                select(Image)
-                .options(selectinload(Image.tags))
-                .order_by(func.random())
-                .limit(count)
-            )
+            conditions.append(Image.id.in_(subquery))
+
+        stmt = (
+            select(Image)
+            .options(selectinload(Image.tags))
+            .order_by(func.random())
+            .limit(count)
+        )
+        if conditions:
+            stmt = stmt.where(and_(*conditions))
 
         result = await session.execute(stmt)
         images = result.scalars().all()

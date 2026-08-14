@@ -8,6 +8,7 @@ import {
   Settings,
   ListTodo,
   Tags,
+  Users,
   User,
   LogOut,
   Moon,
@@ -55,6 +56,7 @@ const coreItems = computed(() => [
 const adminItems = computed(() => [
   { name: 'StorageEndpoints', path: '/storage-endpoints', icon: HardDrive, label: '存储端点' },
   { name: 'Tags', path: '/tags', icon: Tags, label: '标签管理' },
+  { name: 'Subjects', path: '/subjects', icon: Users, label: '主体管理' },
   { name: 'Approvals', path: '/approvals', icon: Inbox, label: '审批管理' },
   { name: 'Tasks', path: '/tasks', icon: ListTodo, label: '任务队列' },
   { name: 'Settings', path: '/settings', icon: Settings, label: '系统设置' },

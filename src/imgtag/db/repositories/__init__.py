@@ -34,6 +34,14 @@ from imgtag.db.repositories.tag import (
 )
 from imgtag.db.repositories.task import TaskRepository, task_repository
 from imgtag.db.repositories.user import UserRepository, user_repository
+from imgtag.db.repositories.subject import (
+    SubjectRepository,
+    SubjectSampleRepository,
+    ImageSubjectRepository,
+    subject_repository,
+    subject_sample_repository,
+    image_subject_repository,
+)
 
 __all__ = [
     "BaseRepository",
@@ -67,8 +75,14 @@ __all__ = [
     # Task
     "TaskRepository",
     "task_repository",
+    # Subject
+    "SubjectRepository",
+    "subject_repository",
+    "SubjectSampleRepository",
+    "subject_sample_repository",
+    "ImageSubjectRepository",
+    "image_subject_repository",
     # User
     "UserRepository",
     "user_repository",
 ]
-

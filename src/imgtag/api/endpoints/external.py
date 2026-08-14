@@ -92,7 +92,15 @@ async def random_images(
 
     try:
         # Single query with optional tag filter
-        result = await image_repository.get_random_by_tags(session, tags, count)
+        # 可见性:普通用户可见 public + 自己上传;admin 不过滤
+        is_admin = api_user.get("role") == "admin"
+        result = await image_repository.get_random_by_tags(
+            session,
+            tags,
+            count,
+            visible_to_user_id=None if is_admin else api_user.get("id"),
+            skip_visibility_filter=is_admin,
+        )
 
         # Process URLs - format determined by endpoint's public_url_prefix
         images = []

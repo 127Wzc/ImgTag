@@ -40,4 +40,11 @@ DEFAULT_CONFIG: dict[str, str] = {
     "max_upload_size": "10",
     # 系统配置
     "allow_register": "true",
+    # 主体记忆配置（阈值对所有主体类型通用）
+    "subject_memory_enabled": "true",
+    "subject_auto_apply_high_conf": "true",
+    "subject_high_threshold": "0.50",
+    "subject_low_threshold": "0.40",
+    "subject_max_candidates": "3",
+    "subject_matcher_backend": "stub",
 }

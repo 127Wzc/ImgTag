@@ -6,7 +6,7 @@ Provides async access to approval and audit log records.
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -46,8 +46,6 @@ class ApprovalRepository(BaseRepository[Approval]):
         Returns:
             Tuple of (approvals, total_count).
         """
-        from sqlalchemy import func
-
         # Count query
         count_stmt = (
             select(func.count())
@@ -74,6 +72,28 @@ class ApprovalRepository(BaseRepository[Approval]):
         approvals = result.scalars().all()
 
         return approvals, total
+
+    async def has_pending_of_type(
+        self,
+        session: AsyncSession,
+        *,
+        type_: str,
+        target_id: int,
+    ) -> bool:
+        """判断某目标是否已存在指定类型的 pending 审批（用于防止重复提审）。"""
+        stmt = (
+            select(func.count())
+            .select_from(Approval)
+            .where(
+                and_(
+                    Approval.type == type_,
+                    Approval.status == "pending",
+                    Approval.target_ids.contains([target_id]),
+                )
+            )
+        )
+        result = await session.execute(stmt)
+        return int(result.scalar() or 0) > 0
 
     async def get_with_relations(
         self,

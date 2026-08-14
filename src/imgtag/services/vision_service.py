@@ -176,7 +176,11 @@ class VisionService:
         """获取视觉模型名称"""
         return await config_cache.get("vision_model", "gpt-4o-mini") or "gpt-4o-mini"
     
-    async def _get_prompt(self, category_id: int | None = None) -> str:
+    async def _get_prompt(
+        self,
+        category_id: int | None = None,
+        subject_hints: list[str] | None = None,
+    ) -> str:
         """获取分析提示词（全局 + 分类专用 + 禁用标签）
         
         Args:
@@ -221,10 +225,19 @@ class VisionService:
                     category = await tag_repository.get_by_id(session, category_id)
                     if category and category.level == 0 and category.prompt:
                         logger.debug(f"使用分类专用提示词: {category.name}")
-                        return f"{base_prompt}\n\n### 分类特定要求\n{category.prompt}"
+                        base_prompt = f"{base_prompt}\n\n### 分类特定要求\n{category.prompt}"
         except Exception as e:
             logger.warning(f"获取提示词失败: {e}")
         
+        if subject_hints:
+            valid_hints = [h.strip() for h in subject_hints if h and h.strip()]
+            if valid_hints:
+                base_prompt += (
+                    "\n\n# 主体约束\n"
+                    + "\n".join([f"- {h}" for h in valid_hints[:5]])
+                    + "\n请在描述与标签中保持上述主体一致。"
+                )
+
         return base_prompt
     
     # 禁用标签缓存
@@ -320,6 +333,7 @@ class VisionService:
         image_data: bytes, 
         mime_type: str = "image/jpeg",
         category_id: int | None = None,
+        subject_hints: list[str] | None = None,
     ) -> ImageAnalysisResult:
         """分析 Base64 编码的图像（支持 OpenAI 和 Gemini 原生格式）
         
@@ -350,7 +364,7 @@ class VisionService:
             api_base = await config_cache.get("vision_api_base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"
             api_key = await config_cache.get("vision_api_key", "") or ""
             model = await self._get_model()
-            prompt = await self._get_prompt(category_id)  # 传递分类 ID
+            prompt = await self._get_prompt(category_id, subject_hints)  # 传递分类 ID / 主体提示
             
             if not api_key:
                 raise ValueError("视觉模型 API 密钥未配置")

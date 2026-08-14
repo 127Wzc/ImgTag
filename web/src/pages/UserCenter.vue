@@ -11,6 +11,8 @@ import {
   User, 
   Key, 
   Copy, 
+  Eye,
+  EyeOff,
   RefreshCw, 
   Trash2, 
   Check,
@@ -27,7 +29,8 @@ const loadingApiKey = ref(false)
 const generatingKey = ref(false)
 const deletingKey = ref(false)
 const copiedKey = ref(false)
-const newApiKey = ref<string | null>(null)
+const revealedApiKey = ref<string | null>(null)
+const revealingKey = ref(false)
 
 // 密码修改
 const showPasswordDialog = ref(false)
@@ -53,7 +56,7 @@ async function generateApiKey() {
   generatingKey.value = true
   try {
     const { data } = await apiClient.post('/auth/me/api-key')
-    newApiKey.value = data.api_key
+    revealedApiKey.value = data.api_key
     await fetchApiKeyStatus()
     notifySuccess('API 密钥已生成', { once: true })
   } catch {
@@ -76,7 +79,7 @@ async function deleteApiKey() {
   try {
     await apiClient.delete('/auth/me/api-key')
     apiKeyStatus.value = { has_key: false, masked_key: null }
-    newApiKey.value = null
+    revealedApiKey.value = null
     notifySuccess('API 密钥已删除', { once: true })
   } catch {
     notifyError('删除失败')
@@ -85,9 +88,31 @@ async function deleteApiKey() {
   }
 }
 
-function copyApiKey() {
-  if (newApiKey.value) {
-    navigator.clipboard.writeText(newApiKey.value)
+async function revealApiKey() {
+  revealingKey.value = true
+  try {
+    const { data } = await apiClient.get('/auth/me/api-key', { params: { reveal: true } })
+    if (!data.api_key) {
+      notifyError('当前没有可查看的 API 密钥')
+      return
+    }
+    revealedApiKey.value = data.api_key
+    apiKeyStatus.value = { has_key: data.has_key, masked_key: data.masked_key }
+  } catch (e: any) {
+    notifyError(getErrorMessage(e))
+  } finally {
+    revealingKey.value = false
+  }
+}
+
+async function copyApiKey() {
+  if (revealedApiKey.value) {
+    try {
+      await navigator.clipboard.writeText(revealedApiKey.value)
+    } catch {
+      notifyError('复制失败，请检查浏览器剪贴板权限')
+      return
+    }
     copiedKey.value = true
     setTimeout(() => copiedKey.value = false, 2000)
   }
@@ -187,19 +212,22 @@ onMounted(() => {
           加载中...
         </div>
 
-        <!-- 新生成的密钥 -->
-        <div v-else-if="newApiKey" class="mb-4">
+        <!-- 已查看/新生成的密钥 -->
+        <div v-else-if="revealedApiKey" class="mb-4">
           <div class="p-4 bg-green-500/10 border border-green-500/20 rounded-lg mb-4">
             <p class="text-sm text-green-600 dark:text-green-400 mb-2">
-              ⚠️ 请立即复制保存，此密钥只显示一次！
+              明文密钥仅在本页查看期间展示；关闭或刷新页面后会重新隐藏。
             </p>
             <div class="flex items-center gap-2">
               <code class="flex-1 px-3 py-2 bg-muted rounded text-sm font-mono text-foreground break-all">
-                {{ newApiKey }}
+                {{ revealedApiKey }}
               </code>
               <Button variant="outline" size="icon" @click="copyApiKey">
                 <Check v-if="copiedKey" class="w-4 h-4 text-green-500" />
                 <Copy v-else class="w-4 h-4" />
+              </Button>
+              <Button variant="outline" size="icon" title="隐藏密钥" @click="revealedApiKey = null">
+                <EyeOff class="w-4 h-4" />
               </Button>
             </div>
           </div>
@@ -216,7 +244,7 @@ onMounted(() => {
 
         <!-- 操作按钮 -->
         <div class="flex gap-3">
-          <Button 
+          <Button
             @click="generateApiKey"
             :disabled="generatingKey"
           >
@@ -224,7 +252,17 @@ onMounted(() => {
             <Key v-else class="w-4 h-4 mr-2" />
             {{ apiKeyStatus.has_key ? '重新生成' : '生成密钥' }}
           </Button>
-          <Button 
+          <Button
+            v-if="apiKeyStatus.has_key && !revealedApiKey"
+            variant="outline"
+            @click="revealApiKey"
+            :disabled="revealingKey"
+          >
+            <Loader2 v-if="revealingKey" class="w-4 h-4 mr-2 animate-spin" />
+            <Eye v-else class="w-4 h-4 mr-2" />
+            查看并复制
+          </Button>
+          <Button
             v-if="apiKeyStatus.has_key"
             variant="outline"
             @click="deleteApiKey"

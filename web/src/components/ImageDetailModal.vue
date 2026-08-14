@@ -9,12 +9,23 @@ import {
   Plus, Pencil, Loader2, Save, Link, Download,
   PanelRightClose
 } from 'lucide-vue-next'
-import { useUpdateImage, useSuggestImageUpdate, useTags, useSearchTags, useCategories, useResolveTag } from '@/api/queries'
+import {
+  useUpdateImage,
+  useSuggestImageUpdate,
+  useTags,
+  useSearchTags,
+  useCategories,
+  useResolveTag,
+  useSubjects,
+  useSetPrimarySubject,
+  useSuggestPrimarySubject,
+} from '@/api/queries'
 import { useUserStore } from '@/stores'
 import { getErrorMessage } from '@/utils/api-error'
 import { notifyError, notifySuccess } from '@/utils/notify'
 import CopyToast from '@/components/ui/CopyToast.vue'
 import { usePermission } from '@/composables/usePermission'
+import type { ImageSubjectAssignment } from '@/types'
 
 // 图片信息接口
 export interface ImageInfo {
@@ -22,6 +33,7 @@ export interface ImageInfo {
   image_url: string
   description?: string | null
   tags?: Array<{ id?: number; name: string; level?: number; source?: string }>
+  subjects?: ImageSubjectAssignment[]
   width?: number | null
   height?: number | null
   file_size?: number | null
@@ -108,9 +120,27 @@ async function copyImageUrl() {
 // API
 const updateMutation = useUpdateImage()
 const suggestMutation = useSuggestImageUpdate()
+const setPrimarySubjectMutation = useSetPrimarySubject()
+const suggestPrimarySubjectMutation = useSuggestPrimarySubject()
 const resolveMutation = useResolveTag()
 const { data: allTags } = useTags(200)
 const { data: categories } = useCategories()
+const subjectParams = ref({ page: 1, size: 200, active_only: true as boolean })
+// 词典接口需登录；仅在用户可编辑/可建议时才拉取，避免匿名请求触发 401 跳转
+const { data: subjectOptions } = useSubjects(
+  subjectParams,
+  () => canEdit.value || canSuggest.value,
+)
+
+const selectedSubjectId = ref<number | null>(null)
+const addSubjectSample = ref(false)
+const reanalyzeAfterSet = ref(false)
+const subjectComment = ref('')
+
+const currentPrimarySubject = computed(() => {
+  const subjects = props.image?.subjects || []
+  return subjects.find(s => s.is_primary) || null
+})
 
 // 编辑用标签对象类型
 interface DraftTag {
@@ -163,8 +193,69 @@ watch(() => props.image, (img) => {
     newTagInput.value = ''
     pendingAddAfterComposition.value = false
     isComposing.value = false
+
+    selectedSubjectId.value = img.subjects?.find(s => s.is_primary)?.subject_id ?? null
+    addSubjectSample.value = false
+    reanalyzeAfterSet.value = false
+    subjectComment.value = ''
   }
 }, { immediate: true })
+
+const canSetSubjectDirectly = computed(() => canEdit.value)
+const canSuggestSubjectChange = computed(() => canSuggest.value)
+
+const hasSubjectChange = computed(() => {
+  const current = currentPrimarySubject.value?.subject_id ?? null
+  return selectedSubjectId.value !== null && selectedSubjectId.value !== current
+})
+
+function buildSubjectPayload() {
+  if (!props.image || !selectedSubjectId.value) return null
+  return {
+    image_id: props.image.id,
+    subject_id: selectedSubjectId.value,
+    add_sample: addSubjectSample.value,
+    comment: subjectComment.value || undefined,
+  }
+}
+
+function resetSubjectForm() {
+  subjectComment.value = ''
+  addSubjectSample.value = false
+  reanalyzeAfterSet.value = false
+}
+
+async function applyPrimarySubject() {
+  if (!canSetSubjectDirectly.value) return
+  const payload = buildSubjectPayload()
+  if (!payload) return
+  try {
+    const result = await setPrimarySubjectMutation.mutateAsync({
+      ...payload,
+      reanalyze: reanalyzeAfterSet.value,
+    })
+    if (result.reanalyze_enqueued) {
+      notifySuccess('已触发重新分析，描述与标签稍后自动更新')
+    }
+    emit('updated')
+    resetSubjectForm()
+  } catch (e: any) {
+    notifyError(getErrorMessage(e))
+  }
+}
+
+async function submitPrimarySubjectSuggestion() {
+  if (!canSuggestSubjectChange.value) return
+  const payload = buildSubjectPayload()
+  if (!payload) return
+  try {
+    await suggestPrimarySubjectMutation.mutateAsync(payload)
+    resetSubjectForm()
+    selectedSubjectId.value = currentPrimarySubject.value?.subject_id ?? null
+  } catch (e: any) {
+    notifyError(getErrorMessage(e))
+  }
+}
 
 const resolutionTags = computed(() =>
   (props.image?.tags || []).filter(t => t.level === 1)
@@ -776,6 +867,81 @@ onUnmounted(() => {
                       </div>
                     </div>
                   </div>
+                </div>
+              </div>
+
+              <!-- 主体 -->
+              <div class="space-y-3">
+                <div class="flex items-center justify-between text-xs text-white/40 uppercase tracking-wider font-medium">
+                  <span>主体</span>
+                  <span
+                    v-if="currentPrimarySubject"
+                    class="text-[10px] bg-white/10 px-1.5 py-0.5 rounded text-white/70 normal-case"
+                  >
+                    当前：{{ currentPrimarySubject.subject_name }}
+                  </span>
+                </div>
+
+                <select
+                  v-model="selectedSubjectId"
+                  class="w-full px-3 py-2 text-sm bg-white/5 text-white rounded-xl focus:outline-none hover:bg-white/10 transition-colors"
+                  :disabled="!(canSetSubjectDirectly || canSuggestSubjectChange)"
+                >
+                  <option :value="null" class="bg-zinc-900">请选择主体</option>
+                  <option
+                    v-for="subject in (subjectOptions || [])"
+                    :key="subject.id"
+                    :value="subject.id"
+                    class="bg-zinc-900"
+                  >
+                    {{ subject.name }}
+                  </option>
+                </select>
+
+                <textarea
+                  v-model="subjectComment"
+                  maxlength="300"
+                  class="w-full px-3 py-2 text-xs bg-white/5 text-white rounded-xl focus:outline-none focus:bg-white/10 placeholder:text-white/25 resize-none"
+                  rows="2"
+                  placeholder="主体纠正备注（可选）"
+                  :disabled="!(canSetSubjectDirectly || canSuggestSubjectChange)"
+                />
+
+                <label
+                  v-if="canSetSubjectDirectly || canSuggestSubjectChange"
+                  class="flex items-center gap-2 text-xs text-white/60"
+                >
+                  <input v-model="addSubjectSample" type="checkbox" class="accent-white/80" />
+                  写入主体样本（记录来源图片，供后续识别器使用）
+                </label>
+
+                <label
+                  v-if="canSetSubjectDirectly"
+                  class="flex items-center gap-2 text-xs text-white/60"
+                >
+                  <input v-model="reanalyzeAfterSet" type="checkbox" class="accent-white/80" />
+                  同时重新分析以修正描述（消耗一次视觉分析）
+                </label>
+
+                <div v-if="canSetSubjectDirectly || canSuggestSubjectChange" class="flex gap-2">
+                  <button
+                    v-if="canSetSubjectDirectly"
+                    class="flex-1 px-3 py-2 text-xs bg-white/10 hover:bg-white/20 rounded-xl text-white disabled:opacity-40"
+                    :disabled="!hasSubjectChange || setPrimarySubjectMutation.isPending.value"
+                    @click="applyPrimarySubject"
+                  >
+                    <Loader2 v-if="setPrimarySubjectMutation.isPending.value" class="w-3 h-3 animate-spin inline mr-1" />
+                    直接设置主体
+                  </button>
+                  <button
+                    v-else
+                    class="flex-1 px-3 py-2 text-xs bg-white/10 hover:bg-white/20 rounded-xl text-white disabled:opacity-40"
+                    :disabled="!hasSubjectChange || suggestPrimarySubjectMutation.isPending.value"
+                    @click="submitPrimarySubjectSuggestion"
+                  >
+                    <Loader2 v-if="suggestPrimarySubjectMutation.isPending.value" class="w-3 h-3 animate-spin inline mr-1" />
+                    提交主体建议
+                  </button>
                 </div>
               </div>
 

@@ -84,6 +84,7 @@ class TaskQueueService:
         self, 
         session, 
         image_ids: list[int],
+        task_type: str,
     ) -> set[int]:
         """批量获取已有 pending/processing 任务的 image_ids
         
@@ -101,7 +102,9 @@ class TaskQueueService:
         stmt = (
             select(Task.payload["image_id"].as_integer())
             .where(Task.status.in_(["pending", "processing"]))
-            .where(Task.type.in_(QUEUE_TASK_TYPES))
+            # 分析与向量重建是不同的工作：二者必须分别去重。
+            # 例如主体纠正后的 force_analyze 不能被已有 rebuild_vector 阻塞。
+            .where(Task.type == task_type)
             .where(Task.payload["image_id"].as_integer().in_(image_ids))
         )
         result = await session.execute(stmt)
@@ -114,6 +117,7 @@ class TaskQueueService:
         image_ids: list[int], 
         task_type: str = "analyze_image",
         callback_url: str | None = None,
+        force_analyze: bool = False,
     ) -> int:
         """添加任务到队列
         
@@ -121,6 +125,8 @@ class TaskQueueService:
             image_ids: 图片 ID 列表
             task_type: 任务类型 (analyze_image / rebuild_vector)
             callback_url: 分析完成后的回调 URL
+            force_analyze: 强制执行视觉分析（跳过“已有描述+标签”的短路检查，
+                用于主体纠正后重新生成描述）
             
         Returns:
             实际添加的任务数量
@@ -131,7 +137,9 @@ class TaskQueueService:
         added = 0
         async with async_session_maker() as session:
             # 批量获取已有 pending/processing 任务的 image_ids
-            existing_ids = await self._get_pending_image_ids(session, image_ids)
+            existing_ids = await self._get_pending_image_ids(
+                session, image_ids, task_type
+            )
             
             for image_id in image_ids:
                 if image_id in existing_ids:
@@ -139,14 +147,17 @@ class TaskQueueService:
                 
                 # 创建任务
                 task_id = str(uuid.uuid4())
+                payload: dict[str, Any] = {
+                    "image_id": image_id,
+                    "callback_url": callback_url,
+                }
+                if force_analyze:
+                    payload["force_analyze"] = True
                 await task_repository.create_task(
                     session,
                     task_id=task_id,
                     task_type=task_type,
-                    payload={
-                        "image_id": image_id,
-                        "callback_url": callback_url,
-                    },
+                    payload=payload,
                 )
                 added += 1
             
@@ -337,6 +348,89 @@ class TaskQueueService:
                 session, task_id, StorageTaskStatus.COMPLETED.value, result=result
             )
             await session.commit()
+
+    async def _resolve_subject_memory(
+        self,
+        *,
+        image_id: int,
+        file_content: bytes,
+        mime_type: str,
+    ) -> list[str]:
+        """主体记忆判定层：返回可用于视觉提示词的主体约束。
+
+        规则：
+        1. 已有人工/审批确认的主体 → 直接作为提示词约束，不再执行自动匹配，
+           保证人工纠正在重新分析时持续生效；
+        2. 无人工确认 → 执行自动匹配：高置信自动落库（不会覆盖人工结果），
+           低置信创建审批建议（同图片 pending 去重）；
+        3. 任何异常降级为空列表，不阻塞分析主流程。
+        """
+        from imgtag.db.repositories import image_subject_repository
+        from imgtag.services.subject_assignment_service import subject_assignment_service
+        from imgtag.services.subject_memory_service import (
+            build_subject_hint,
+            subject_memory_service,
+        )
+
+        subject_hints: list[str] = []
+        try:
+            async with async_session_maker() as session:
+                confirmed = await image_subject_repository.get_primary(session, image_id)
+                if (
+                    confirmed is not None
+                    and confirmed.state == "confirmed"
+                    and confirmed.source in ("manual", "approval")
+                    and confirmed.subject is not None
+                    and confirmed.subject.is_active
+                ):
+                    logger.debug(f"图片 {image_id} 已有人工确认主体: {confirmed.subject.name}，跳过自动匹配")
+                    return [build_subject_hint(confirmed.subject.name)]
+
+            subject_match = await subject_memory_service.match_primary_subject(
+                image_id=image_id,
+                image_data=file_content,
+                mime_type=mime_type,
+            )
+            decision = subject_match.get("status")
+            matched_subject_id = subject_match.get("subject_id")
+            matched_confidence = subject_match.get("confidence")
+            hint_text = subject_match.get("hint_text")
+            if isinstance(hint_text, str) and hint_text.strip():
+                subject_hints.append(hint_text.strip())
+
+            if decision == "high_conf" and matched_subject_id:
+                async with async_session_maker() as subject_session:
+                    await subject_assignment_service.assign_primary_subject(
+                        subject_session,
+                        image_id=image_id,
+                        subject_id=int(matched_subject_id),
+                        actor_id=None,
+                        confidence=float(matched_confidence) if matched_confidence is not None else None,
+                        source="auto",
+                        state="confirmed",
+                        add_sample=False,
+                    )
+                    await subject_session.commit()
+            elif decision == "low_conf" and matched_subject_id:
+                async with async_session_maker() as subject_session:
+                    if await subject_assignment_service.has_pending_subject_suggestion(
+                        subject_session, image_id
+                    ):
+                        logger.debug(f"图片 {image_id} 已有待审批主体建议，跳过重复提审")
+                    else:
+                        await subject_assignment_service.create_subject_suggestion(
+                            subject_session,
+                            image_id=image_id,
+                            requester_id=None,
+                            subject_id=int(matched_subject_id),
+                            confidence=float(matched_confidence) if matched_confidence is not None else None,
+                            comment="系统低置信主体命中，等待管理员审批确认",
+                            add_sample=False,
+                        )
+                        await subject_session.commit()
+        except Exception as e:
+            logger.warning(f"主体记忆判定失败（降级继续分析）: image_id={image_id}, error={e}")
+        return subject_hints
     
     # ==================== 任务处理 ====================
     
@@ -348,6 +442,7 @@ class TaskQueueService:
         payload = task.payload or {}
         image_id = payload.get("image_id")
         callback_url = payload.get("callback_url")
+        force_analyze = bool(payload.get("force_analyze"))
         
         logger.info(f"Worker {worker_id} 处理图片 ID: {image_id}")
         
@@ -414,8 +509,8 @@ class TaskQueueService:
             
             file_ext = image.get("file_type", "") or ""
             
-            # 如果已有描述和标签，直接生成向量
-            if image.get("description") and image.get("tags"):
+            # 如果已有描述和标签，直接生成向量（force_analyze 时跳过短路，重新走视觉分析）
+            if not force_analyze and image.get("description") and image.get("tags"):
                 logger.info(f"图片 {image_id} 已有标签，只生成向量")
                 await embedding_service.save_embedding_for_image(
                     image_id, image["description"], image["tags"]
@@ -463,10 +558,20 @@ class TaskQueueService:
             # GIF 转 PNG
             if file_ext == "gif" and convert_gif:
                 file_content, mime_type = await self._convert_gif_to_png(file_content)
+
+            # 主体记忆判定层（人工确认优先，其次自动匹配；stub 后端恒无命中）
+            subject_hints = await self._resolve_subject_memory(
+                image_id=image_id,
+                file_content=file_content,
+                mime_type=mime_type,
+            )
             
             # 分析图片（传递分类 ID 以使用分类专用提示词）
             analysis = await vision_service.analyze_image_base64(
-                file_content, mime_type, category_id=image.get("category_id")
+                file_content,
+                mime_type,
+                category_id=image.get("category_id"),
+                subject_hints=subject_hints or None,
             )
             
             # 更新数据库 - 保存分析结果

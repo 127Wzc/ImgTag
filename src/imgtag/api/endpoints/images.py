@@ -46,6 +46,7 @@ from imgtag.core.storage_constants import (
 )
 from imgtag.db import get_async_session
 from imgtag.db.repositories import (
+    image_subject_repository,
     image_location_repository,
     image_repository,
     image_tag_repository,
@@ -67,10 +68,13 @@ from imgtag.schemas import (
     SimilarSearchResponse,
     UploadAnalyzeResponse,
     PaginatedResponse,
+    SetPrimarySubjectRequest,
+    SuggestSubjectRequest,
 )
 from imgtag.services import embedding_service, storage_service, upload_service
 from imgtag.services.image_update_service import image_update_service
 from imgtag.services.suggestion_service import suggestion_service
+from imgtag.services.subject_assignment_service import subject_assignment_service
 from imgtag.services.backup_service import trigger_backup_for_image
 from imgtag.services.task_queue import task_queue
 from imgtag.services.rebuild_vector_service import enqueue_rebuild_vector
@@ -119,6 +123,7 @@ async def _image_to_response(
     image: Image,
     tags_with_source: list[dict] | None = None,
     display_url: str | None = None,
+    subjects: list[dict] | None = None,
 ) -> ImageResponse:
     """Convert Image model to response schema.
 
@@ -143,6 +148,7 @@ async def _image_to_response(
         height=image.height,
         original_url=image.original_url,
         description=image.description,
+        subjects=subjects or [],
         tags=tags_with_source or [],
         is_public=image.is_public,
         created_at=str(image.created_at) if image.created_at else None,
@@ -156,6 +162,7 @@ async def _image_to_response(
 async def _images_to_responses(
     images: list[Image],
     tags_map: dict[int, list[dict]],
+    subjects_map: dict[int, list[dict]] | None = None,
 ) -> list[ImageResponse]:
     """Convert multiple Image models to response schemas efficiently.
     
@@ -191,6 +198,7 @@ async def _images_to_responses(
             height=img.height,
             original_url=img.original_url,
             description=img.description,
+            subjects=(subjects_map or {}).get(img.id, []),
             tags=tags_map.get(img.id, []),
             is_public=img.is_public,
             created_at=str(img.created_at) if img.created_at else None,
@@ -887,11 +895,16 @@ async def get_image(
         tags_with_source = await image_repository.get_image_tags_with_source(
             session, image_id
         )
+        subjects_map = await image_subject_repository.list_by_image_ids(session, [image_id])
 
         process_time = time.time() - start_time
         perf_logger.info(f"获取图像耗时: {process_time:.4f}秒")
 
-        return await _image_to_response(image, tags_with_source)
+        return await _image_to_response(
+            image,
+            tags_with_source,
+            subjects=subjects_map.get(image_id, []),
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -951,8 +964,10 @@ async def search_images(
             session, image_ids
         )
 
+        subjects_map = await image_subject_repository.list_by_image_ids(session, image_ids)
+
         # Convert to response with batch URL retrieval
-        images = await _images_to_responses(results["images"], tags_map)
+        images = await _images_to_responses(results["images"], tags_map, subjects_map)
 
         # 使用通用分页响应
         # 分页响应 (已移至顶部 import)
@@ -1106,8 +1121,10 @@ async def get_my_images(
             session, image_ids
         )
 
+        subjects_map = await image_subject_repository.list_by_image_ids(session, image_ids)
+
         # Convert to response with batch URL retrieval
-        images = await _images_to_responses(results["images"], tags_map)
+        images = await _images_to_responses(results["images"], tags_map, subjects_map)
 
         # 使用通用分页响应
         # 分页响应 (已移至顶部 import)
@@ -1392,6 +1409,118 @@ async def suggest_image_update(
             raise
         logger.error(f"提交修改建议失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="提交修改建议失败，请稍后重试")
+
+
+@router.put("/{image_id}/subjects/primary", response_model=dict[str, Any])
+async def set_primary_subject(
+    image_id: int,
+    data: SetPrimarySubjectRequest,
+    current_user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """上传者/管理员直接设置图片主主体。"""
+    try:
+        image = await image_repository.get_by_id(session, image_id)
+        if not image:
+            raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
+
+        check_image_permission(image, current_user, "修改主体")
+
+        assignment = await subject_assignment_service.assign_primary_subject(
+            session,
+            image_id=image_id,
+            subject_id=data.subject_id,
+            actor_id=current_user.get("id"),
+            confidence=data.confidence,
+            source="manual",
+            state="confirmed",
+            add_sample=bool(data.add_sample),
+            comment=data.comment,
+        )
+
+        # 主体落地会同步图片标签，先提交再触发异步任务，避免任务读到旧数据
+        await session.commit()
+
+        reanalyze_enqueued = False
+        rebuild_enqueued = None
+        rebuild_added = 0
+        if data.reanalyze:
+            # 强制重新分析：跳过“已有描述+标签”短路，基于主体约束重新生成描述与标签，
+            # 分析完成后会自动重建向量，无需单独入队 rebuild_vector
+            try:
+                added = await task_queue.add_tasks([image_id], force_analyze=True)
+                reanalyze_enqueued = added > 0
+                if not reanalyze_enqueued:
+                    logger.info(f"图片 {image_id} 已有进行中的分析任务，跳过重复入队")
+            except Exception as e:
+                logger.warning(f"主体纠正触发重新分析失败（不影响主体落地）: image_id={image_id}, error={e}")
+        else:
+            rebuild_enqueued, rebuild_added, _ = await enqueue_rebuild_vector(
+                [image_id],
+                context=f"set_primary_subject image_id={image_id}",
+                log=logger,
+            )
+        return {
+            "message": "主体已更新",
+            "assignment": assignment,
+            "reanalyze_enqueued": reanalyze_enqueued,
+            "rebuild_enqueued": rebuild_enqueued,
+            "rebuild_added": rebuild_added,
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        if translate_exception(e):
+            raise
+        logger.error(f"设置主主体失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="设置主主体失败，请稍后重试")
+
+
+@router.post("/{image_id}/subjects/suggest", response_model=dict[str, Any], status_code=201)
+async def suggest_primary_subject(
+    image_id: int,
+    data: SuggestSubjectRequest,
+    current_user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """非上传者提交主体纠正建议（管理员审批后落地）。"""
+    try:
+        image = await image_repository.get_by_id(session, image_id)
+        if not image:
+            raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
+
+        if current_user.get("role") == "admin" or image.uploaded_by == current_user.get("id"):
+            raise HTTPException(status_code=400, detail="你有编辑权限，请直接修改该图片主体")
+
+        ensure_permission(current_user, Permission.SUGGEST_CHANGES)
+
+        if not getattr(image, "is_public", True):
+            raise HTTPException(status_code=403, detail="无权对该图片提交主体建议")
+
+        approval = await subject_assignment_service.create_subject_suggestion(
+            session,
+            image_id=image_id,
+            requester_id=int(current_user.get("id")),
+            subject_id=data.subject_id,
+            confidence=data.confidence,
+            comment=data.comment,
+            add_sample=bool(data.add_sample),
+        )
+        return {
+            "message": "主体建议已提交，等待管理员审批",
+            "approval_id": approval.id,
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        if translate_exception(e):
+            raise
+        logger.error(f"提交主体建议失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="提交主体建议失败，请稍后重试")
 
 
 @router.delete("/{image_id}", response_model=dict[str, Any])

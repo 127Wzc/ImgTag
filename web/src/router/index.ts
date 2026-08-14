@@ -69,6 +69,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '标签管理', requiresAdmin: true },
     },
     {
+        path: '/subjects',
+        name: 'Subjects',
+        component: () => import('@/pages/Subjects.vue'),
+        meta: { title: '主体管理', requiresAdmin: true },
+    },
+    {
         path: '/user-center',
         name: 'UserCenter',
         component: () => import('@/pages/UserCenter.vue'),

@@ -68,6 +68,14 @@ from .storage import (
     DeletionImpactResponse,
     ActiveTaskInfo,
 )
+from .subject import (
+    SubjectCreate,
+    SubjectUpdate,
+    SubjectResponse,
+    ImageSubjectAssignment,
+    SetPrimarySubjectRequest,
+    SuggestSubjectRequest,
+)
 
 __all__ = [
     # Base
@@ -127,4 +135,11 @@ __all__ = [
     "HardDeleteRequest",
     "DeletionImpactResponse",
     "ActiveTaskInfo",
+    # Subject
+    "SubjectCreate",
+    "SubjectUpdate",
+    "SubjectResponse",
+    "ImageSubjectAssignment",
+    "SetPrimarySubjectRequest",
+    "SuggestSubjectRequest",
 ]
