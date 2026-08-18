@@ -1,6 +1,6 @@
 [project]
 name = "imgtag"
-version = "0.1.7"
+version = "0.1.8"
 description = "图像标签与向量搜索系统 - 支持OpenAI标准视觉模型和嵌入模型"
 requires-python = ">=3.10"
 license = { text = "MIT" }
