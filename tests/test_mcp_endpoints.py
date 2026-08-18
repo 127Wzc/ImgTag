@@ -162,6 +162,7 @@ async def test_streamable_public_full_flow() -> None:
         })
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("application/json")
+        assert resp.headers["MCP-Protocol-Version"] == "2025-06-18"
         result = resp.json()["result"]
         assert result["protocolVersion"] == "2025-06-18"
         assert "只读" in result["instructions"]
@@ -227,3 +228,155 @@ async def test_streamable_protocol_and_error_edges() -> None:
             "jsonrpc": "2.0", "id": 3, "method": "ping",
         })
         assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_tools_call_protocol_and_result_shapes(monkeypatch) -> None:
+    """tools/call 遵循 JSON-RPC 2.0 与标准 CallToolResult 分层。"""
+
+    async def fake_execute(name, arguments, session, api_user, scope):
+        assert name == "search_images"
+        assert arguments == {"keyword": "夕阳"}
+        return {"images": [], "total": 0}
+
+    monkeypatch.setattr(mcp, "execute_tool", fake_execute)
+
+    success = await mcp.process_jsonrpc(
+        mcp.JsonRpcRequest(
+            jsonrpc="2.0",
+            id=10,
+            method="tools/call",
+            params={"name": "search_images", "arguments": {"keyword": "夕阳"}},
+        ),
+        scope=mcp.SCOPE_READONLY,
+        api_user=None,
+        session=None,
+    )
+    assert success is not None
+    payload = success.model_dump(exclude_none=True)
+    assert payload["jsonrpc"] == "2.0"
+    assert payload["id"] == 10
+    assert payload["result"]["content"][0]["type"] == "text"
+    assert json.loads(payload["result"]["content"][0]["text"]) == {
+        "images": [], "total": 0
+    }
+    assert payload["result"]["structuredContent"] == {"images": [], "total": 0}
+    assert payload["result"]["isError"] is False
+
+    unknown = await mcp.process_jsonrpc(
+        mcp.JsonRpcRequest(
+            jsonrpc="2.0",
+            id=11,
+            method="tools/call",
+            params={"name": "not_registered", "arguments": {}},
+        ),
+        scope=mcp.SCOPE_READONLY,
+        api_user=None,
+        session=None,
+    )
+    assert unknown is not None
+    unknown_payload = unknown.model_dump(exclude_none=True)
+    assert unknown_payload["error"]["code"] == -32602
+    assert "result" not in unknown_payload
+
+    invalid_params = await mcp.process_jsonrpc(
+        mcp.JsonRpcRequest(
+            jsonrpc="2.0",
+            id=12,
+            method="tools/call",
+            params={"name": "search_images", "arguments": []},
+        ),
+        scope=mcp.SCOPE_READONLY,
+        api_user=None,
+        session=None,
+    )
+    assert invalid_params is not None
+    invalid_payload = invalid_params.model_dump(exclude_none=True)
+    assert invalid_payload["error"]["code"] == -32602
+    assert "result" not in invalid_payload
+
+
+@pytest.mark.asyncio
+async def test_streamable_rejects_non_jsonrpc2_requests() -> None:
+    """Streamable HTTP 拒绝错误版本、缺失请求 ID 与带 ID 的通知。"""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        for body in (
+            {"jsonrpc": "1.0", "id": 1, "method": "ping"},
+            {"jsonrpc": "2.0", "method": "ping"},
+            {"jsonrpc": "2.0", "id": 1, "method": "notifications/initialized"},
+        ):
+            resp = await client.post("/api/v1/mcp/public", json=body)
+            assert resp.status_code == 400
+            assert resp.json()["error"]["code"] == -32600
+
+
+@pytest.mark.asyncio
+async def test_mcp_input_validation_and_safe_internal_errors(monkeypatch) -> None:
+    """工具参数严格校验，内部异常不把实现细节返回给客户端。"""
+    invalid = await mcp.process_jsonrpc(
+        mcp.JsonRpcRequest(
+            jsonrpc="2.0",
+            id=20,
+            method="tools/call",
+            params={
+                "name": "search_images",
+                "arguments": {"count": "10"},
+            },
+        ),
+        scope=mcp.SCOPE_READONLY,
+        api_user=None,
+        session=None,
+    )
+    assert invalid is not None
+    invalid_payload = invalid.model_dump(exclude_none=True)
+    assert invalid_payload["result"]["isError"] is True
+    assert "参数校验" in invalid_payload["result"]["content"][0]["text"]
+
+    async def exploding_execute(*args, **kwargs):
+        raise RuntimeError("database password=do-not-return")
+
+    monkeypatch.setattr(mcp, "execute_tool", exploding_execute)
+    failed = await mcp.process_jsonrpc(
+        mcp.JsonRpcRequest(
+            jsonrpc="2.0",
+            id=21,
+            method="tools/call",
+            params={"name": "search_images", "arguments": {}},
+        ),
+        scope=mcp.SCOPE_READONLY,
+        api_user=None,
+        session=None,
+    )
+    assert failed is not None
+    text = failed.result["content"][0]["text"]
+    assert "工具执行失败" in text
+    assert "password" not in text
+
+
+@pytest.mark.asyncio
+async def test_streamable_protocol_header_query_key_and_body_limits(monkeypatch) -> None:
+    """MCP 认证凭据不走 query，协议版本和请求体均有边界。"""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        unsupported = await client.post(
+            "/api/v1/mcp/public",
+            json={"jsonrpc": "2.0", "id": 30, "method": "ping"},
+            headers={"MCP-Protocol-Version": "1999-01-01"},
+        )
+        assert unsupported.status_code == 400
+        assert unsupported.json()["error"]["code"] == -32602
+
+        query_key = await client.post(
+            "/api/v1/mcp/public?api_key=secret",
+            json={"jsonrpc": "2.0", "id": 31, "method": "ping"},
+        )
+        assert query_key.status_code == 400
+
+        monkeypatch.setattr(mcp, "MCP_MAX_REQUEST_BYTES", 32)
+        too_large = await client.post(
+            "/api/v1/mcp/public",
+            content=b"{" + b"a" * 64,
+            headers={"content-type": "application/json"},
+        )
+        assert too_large.status_code == 413

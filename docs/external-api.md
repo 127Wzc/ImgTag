@@ -439,6 +439,42 @@ ImgTag 内置 MCP Server，同时支持两代传输协议（共享同一套工�
 | `GET /api/v1/mcp/sse` | HTTP+SSE（兼容） | 强制 API Key | 同上全功能 | 同上 |
 | `GET /api/v1/mcp/public/sse` | HTTP+SSE（兼容） | API Key 可选 | 同上只读 | 同上 |
 
+#### MCP 认证与请求头
+
+MCP 的 API Key **必须通过请求头传递**，不接受 URL query 参数中的 `api_key`。支持以下三种等价写法：
+
+```http
+Authorization: Bearer YOUR_KEY
+```
+
+```http
+X-API-Key: YOUR_KEY
+```
+
+```http
+api_key: YOUR_KEY
+```
+
+`Authorization` 与其他 Header 同时传递时，两个值必须一致。REST API 仍兼容文档前面说明的 `?api_key=...` 方式，但不要将该方式用于 MCP。
+
+Streamable HTTP 请求使用 JSON-RPC 2.0。初始化请求可以不带 `MCP-Protocol-Version`；初始化之后的请求建议携带该请求头，当前支持：`2024-11-05`、`2025-03-26`、`2025-06-18`。服务端会在响应中返回协商后的 `MCP-Protocol-Version`。
+
+示例（全功能 Streamable HTTP）：
+
+```bash
+curl -X POST "http://your-server:8000/api/v1/mcp" \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {"protocolVersion": "2025-06-18"}
+  }'
+```
+
+公共只读端点可以省略认证头；如果携带有效 Key，可额外查看本人上传的图片，但仍不能调用写工具。
+
 **支持的 Tools：**
 | Tool | 只读 | 说明 |
 |------|------|------|
@@ -449,27 +485,48 @@ ImgTag 内置 MCP Server，同时支持两代传输协议（共享同一套工�
 **`search_images` 参数：**
 | 参数 | 类型 / 默认 | 说明 |
 |------|------------|------|
-| `keyword` | string | 搜索词。不传时进入随机抽取模式 |
-| `tags` | string[] | 标签名列表（AND 关系，所有模式下硬过滤） |
+| `keyword` | string，最长 500 字符 | 搜索词。不传时进入随机抽取模式 |
+| `tags` | string[]，最多 50 项；每项最长 100 字符 | 标签名列表（AND 关系，所有模式下硬过滤） |
 | `match` | `auto` / `semantic` / `fuzzy`，默认 `auto` | keyword 匹配方式：semantic=语义向量；fuzzy=描述/标签名子串；auto=优先语义、失败降级模糊 |
 | `sort` | `auto` / `random` / `latest` / `relevance`，默认 `auto` | auto=有 keyword 按相关度、无 keyword 随机；latest=最新排序（唯一支持分页）；random 仅无 keyword 时有效 |
 | `count` | int 1-50，默认 10 | 返回数量（latest 模式下为每页数量） |
-| `page` | int ≥1，默认 1 | 页码，仅 `sort=latest` 时生效 |
+| `page` | int 1-10000，默认 1 | 页码，仅 `sort=latest` 时生效 |
+
+**其他 Tool 参数：**
+
+| Tool | 参数 | 约束 |
+|------|------|------|
+| `get_image_detail` | `image_id` | 必须为正整数 |
+| `add_image` | `image_url` | 必填，1-2048 字符 |
+| `add_image` | `tags` | 最多 50 项；每项 1-100 字符 |
+| `add_image` | `description` | 最长 10000 字符 |
+| `add_image` | `category_id` | 可选正整数 |
+| `add_image` | `auto_analyze` / `is_public` | 可选布尔值，默认均为 `true` |
+| `add_image` | `idempotency_key` | 可选，1-128 字符；跨请求重试时建议复用 |
+
+`add_image` 会把同一 JSON-RPC 请求的重试视为幂等操作；如果重试请求使用了新的 JSON-RPC `id`，请显式复用 `idempotency_key`。图片、存储位置和 AI 任务会在同一事务中提交，存储失败或任务入队失败不会提交半成品记录。
+
+#### MCP 传输保护
+
+- 单个 JSON 请求体最大 1 MiB。
+- 匿名请求默认每个进程每分钟最多 60 次，认证请求最多 300 次；超过后返回 `429`。
+- 旧 SSE 会话空闲超过 1 小时会过期；认证 SSE 的每个 `/message` 请求都必须重新携带与建连时一致的 API Key，`session_id` 不能单独作为认证凭据。
+- 工具业务错误通过 `result.isError: true` 返回；JSON-RPC 协议错误通过顶层 `error` 返回。
 
 **端点地址：**
 ```
 推荐（Streamable HTTP）:
-  全功能:   http://your-server:8000/api/v1/mcp?api_key=YOUR_KEY
+  全功能:   http://your-server:8000/api/v1/mcp       （API Key 放请求头）
   公共只读: http://your-server:8000/api/v1/mcp/public                    （匿名，仅公开图片）
-  公共只读: http://your-server:8000/api/v1/mcp/public?api_key=YOUR_KEY   （公开 + 本人上传）
+  公共只读: http://your-server:8000/api/v1/mcp/public                    （请求头带 Key 可查看本人上传）
 
 兼容（HTTP+SSE，已弃用，仅供旧客户端）:
-  全功能:   http://your-server:8000/api/v1/mcp/sse?api_key=YOUR_KEY
+  全功能:   http://your-server:8000/api/v1/mcp/sse    （建连及每次 message 均带请求头）
   公共只读: http://your-server:8000/api/v1/mcp/public/sse
 ```
 
 > 新客户端会自动探测传输协议：POST initialize 成功即 Streamable HTTP；失败（4xx）则回退旧 SSE。
-> 旧 SSE 公共端点对匿名连接数设有上限（默认 20），超出返回 `429`；Streamable HTTP 无长连接，不受此限制。
+> 旧 SSE 公共端点对匿名连接数设有上限（默认 20），认证连接也有总量和单用户上限；Streamable HTTP 无长连接，不受 SSE 连接上限限制。
 
 #### 客户端配置
 
@@ -479,19 +536,22 @@ ImgTag 内置 MCP Server，同时支持两代传输协议（共享同一套工�
 {
   "mcpServers": {
     "imgtag": {
-      "url": "http://your-server:8000/api/v1/mcp?api_key=YOUR_KEY"
+      "url": "http://your-server:8000/api/v1/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_KEY"
+      }
     }
   }
 }
 ```
 
-> 接入公共只读端点时，将 `url` 换成 `/api/v1/mcp/public`，`api_key` 可省略（省略后仅能访问公开图片）。
+> 接入公共只读端点时，将 `url` 换成 `/api/v1/mcp/public`，认证 Header 可省略（省略后仅能访问公开图片）。
 > 仅支持旧协议的客户端可继续使用 `/api/v1/mcp/sse` 并声明 `"transport": "sse"`。
 
 **方式二：使用 mcp-remote 代理（仅支持 stdio 的客户端，如部分版本 Claude Desktop）**
 
 ```bash
-npx -y mcp-remote http://your-server:8000/api/v1/mcp?api_key=YOUR_KEY
+npx -y mcp-remote http://your-server:8000/api/v1/mcp
 ```
 
 Claude Desktop 配置（`~/.claude/claude_desktop_config.json`）：
@@ -504,12 +564,14 @@ Claude Desktop 配置（`~/.claude/claude_desktop_config.json`）：
       "args": [
         "-y",
         "mcp-remote",
-        "http://your-server:8000/api/v1/mcp?api_key=YOUR_KEY"
+        "http://your-server:8000/api/v1/mcp"
       ]
     }
   }
 }
 ```
+
+> `mcp-remote` 或其他桥接客户端需要额外配置 `Authorization: Bearer YOUR_KEY` 请求头时，请使用该客户端自身的 Header 配置项；不要把密钥拼接到 MCP URL 的 query 参数中。公共只读端点无需额外配置 Header。
 
 ---
 

@@ -57,6 +57,7 @@ class ImageRepository(BaseRepository[Image]):
         embedding: Optional[list[float]] = None,
         uploaded_by: Optional[int] = None,
         is_public: bool = True,
+        mcp_idempotency_key: Optional[str] = None,
     ) -> Image:
         """Create a new image record.
 
@@ -90,6 +91,7 @@ class ImageRepository(BaseRepository[Image]):
             embedding=embedding,
             uploaded_by=uploaded_by,
             is_public=is_public,
+            mcp_idempotency_key=mcp_idempotency_key,
         )
 
     async def get_by_hash(
@@ -107,6 +109,20 @@ class ImageRepository(BaseRepository[Image]):
             Image instance or None if not found.
         """
         return await self.get_by_field(session, "file_hash", file_hash)
+
+    async def get_by_mcp_idempotency_key(
+        self,
+        session: AsyncSession,
+        uploaded_by: int,
+        key: str,
+    ) -> Optional[Image]:
+        """查找同一用户的 MCP 幂等写入记录。"""
+        stmt = select(Image).where(
+            Image.uploaded_by == uploaded_by,
+            Image.mcp_idempotency_key == key,
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def get_with_tags(
         self,
