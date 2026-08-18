@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.core.logging_config import get_logger
 from imgtag.core.storage_constants import StorageTaskStatus, get_mime_type
@@ -118,6 +119,7 @@ class TaskQueueService:
         task_type: str = "analyze_image",
         callback_url: str | None = None,
         force_analyze: bool = False,
+        session: AsyncSession | None = None,
     ) -> int:
         """添加任务到队列
         
@@ -127,6 +129,8 @@ class TaskQueueService:
             callback_url: 分析完成后的回调 URL
             force_analyze: 强制执行视觉分析（跳过“已有描述+标签”的短路检查，
                 用于主体纠正后重新生成描述）
+            session: 可选的调用方事务。传入时任务写入该事务但不提交，
+                用于把图片记录、存储位置和任务入队原子化。
             
         Returns:
             实际添加的任务数量
@@ -134,18 +138,17 @@ class TaskQueueService:
         if not image_ids:
             return 0
         
-        added = 0
-        async with async_session_maker() as session:
+        async def add_in_session(db_session: AsyncSession) -> int:
             # 批量获取已有 pending/processing 任务的 image_ids
             existing_ids = await self._get_pending_image_ids(
-                session, image_ids, task_type
+                db_session, image_ids, task_type
             )
-            
+
+            added_count = 0
             for image_id in image_ids:
                 if image_id in existing_ids:
                     continue
-                
-                # 创建任务
+
                 task_id = str(uuid.uuid4())
                 payload: dict[str, Any] = {
                     "image_id": image_id,
@@ -154,14 +157,20 @@ class TaskQueueService:
                 if force_analyze:
                     payload["force_analyze"] = True
                 await task_repository.create_task(
-                    session,
+                    db_session,
                     task_id=task_id,
                     task_type=task_type,
                     payload=payload,
                 )
-                added += 1
-            
-            await session.commit()
+                added_count += 1
+            return added_count
+
+        if session is not None:
+            added = await add_in_session(session)
+        else:
+            async with async_session_maker() as db_session:
+                added = await add_in_session(db_session)
+                await db_session.commit()
         
         if added > 0:
             logger.info(f"添加了 {added} 个任务到队列 (类型: {task_type})")

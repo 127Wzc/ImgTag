@@ -69,6 +69,11 @@ class Image(Base, TimestampMixin):
     # Original source
     original_url: Mapped[Optional[str]] = mapped_column(Text, comment="原始URL")
 
+    # MCP 写入幂等键（按上传用户隔离）
+    mcp_idempotency_key: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True, comment="MCP 写入幂等键"
+    )
+
     # Content
     description: Mapped[Optional[str]] = mapped_column(Text, comment="图片描述")
     embedding: Mapped[Optional[list[float]]] = mapped_column(

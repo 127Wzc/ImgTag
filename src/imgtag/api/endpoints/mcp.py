@@ -21,16 +21,32 @@ import asyncio
 import hashlib
 import json
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Optional
+from time import monotonic
+from typing import Annotated, Any, Awaitable, Callable, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    ValidationError,
+)
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from imgtag.api.dependencies import require_api_key, verify_api_key
+from imgtag.api.dependencies import (
+    extract_mcp_api_key,
+    get_user_by_api_key,
+    require_mcp_api_key,
+    verify_mcp_api_key,
+)
 from imgtag.core.logging_config import get_logger
 from imgtag.core.permissions import (
     Permission,
@@ -71,10 +87,28 @@ SCOPE_READONLY = "readonly"
 
 # 公共端点匿名 SSE 并发连接上限（防止无界内存占用）
 MAX_ANONYMOUS_CONNECTIONS = 20
+MAX_AUTHENTICATED_CONNECTIONS = 100
+MAX_CONNECTIONS_PER_USER = 5
+MCP_SESSION_TTL_SECONDS = 3600
+
+# Streamable HTTP / SSE message 端点的基础保护。限流是进程级的；多实例部署
+# 时仍应在网关配置全局限流，但服务端本身不能因缺少网关而完全裸奔。
+MCP_RATE_LIMIT_WINDOW_SECONDS = 60.0
+MCP_RATE_LIMIT_ANONYMOUS = 60
+MCP_RATE_LIMIT_AUTHENTICATED = 300
+MCP_MAX_REQUEST_BYTES = 1_048_576
 
 # search_images 参数枚举
 _MATCH_VALUES = {"auto", "semantic", "fuzzy"}
 _SORT_VALUES = {"auto", "random", "latest", "relevance"}
+
+
+class MCPUserError(ValueError):
+    """可安全返回给 MCP 客户端的业务错误。"""
+
+
+class MCPRequestTooLarge(ValueError):
+    """请求体超过 MCP 传输边界。"""
 
 
 # ============================================================
@@ -156,14 +190,16 @@ async def _tool_search_images(
         count = int(arguments.get("count") or 10)
         page = int(arguments.get("page") or 1)
     except (TypeError, ValueError):
-        raise ValueError("count 和 page 必须为整数")
-    count = max(1, min(count, 50))
-    page = max(1, page)
+        raise MCPUserError("count 和 page 必须为整数")
+    if not 1 <= count <= 50:
+        raise MCPUserError("count 必须在 1 到 50 之间")
+    if not 1 <= page <= 10_000:
+        raise MCPUserError("page 必须在 1 到 10000 之间")
 
     if match not in _MATCH_VALUES:
-        raise ValueError(f"match 参数无效: {match}，可选 auto/semantic/fuzzy")
+        raise MCPUserError(f"match 参数无效: {match}，可选 auto/semantic/fuzzy")
     if sort not in _SORT_VALUES:
-        raise ValueError(f"sort 参数无效: {sort}，可选 auto/random/latest/relevance")
+        raise MCPUserError(f"sort 参数无效: {sort}，可选 auto/random/latest/relevance")
 
     visibility = _visibility_kwargs(api_user)
 
@@ -228,7 +264,7 @@ async def _tool_search_images(
             }
         except Exception as e:
             if match == "semantic":
-                raise ValueError(f"语义搜索暂不可用: {e}")
+                raise MCPUserError("语义搜索暂不可用，请稍后重试") from e
             logger.warning(f"[MCP] 语义搜索失败，自动降级为模糊匹配: {e}")
 
     # 显式 fuzzy 或 auto 降级
@@ -251,7 +287,7 @@ async def _tool_get_image_detail(
     """获取图片详情（含可见性校验）"""
     image_id = arguments.get("image_id")
     if not image_id:
-        raise ValueError("image_id is required")
+        raise MCPUserError("image_id is required")
 
     image = await image_repository.get_with_tags(session, int(image_id))
 
@@ -261,7 +297,7 @@ async def _tool_get_image_detail(
     )
     # 私有图对无权者与不存在返回一致错误，避免泄露图片存在性
     if image is None or (not image.is_public and not is_admin and not is_owner):
-        raise ValueError(f"Image {image_id} not found")
+        raise MCPUserError("Image not found")
 
     display_url = await storage_service.get_read_url(image) or ""
 
@@ -286,20 +322,52 @@ async def _tool_add_image(
 
     image_url = arguments.get("image_url")
     if not image_url:
-        raise ValueError("image_url is required")
+        raise MCPUserError("image_url is required")
 
     tags = arguments.get("tags", [])
     description = arguments.get("description", "")
     category_id = arguments.get("category_id")  # 主分类 ID
     auto_analyze = arguments.get("auto_analyze", True)
     is_public = arguments.get("is_public", True)  # 是否公开
+    idempotency_key = (
+        arguments.get("idempotency_key")
+        or arguments.get("_mcp_request_id")
+    )
+    if idempotency_key:
+        idempotency_key = str(idempotency_key)[:128]
+
+    async def existing_result(image) -> dict:
+        """返回幂等重试的既有记录，不重复下载、落库或入队。"""
+        image_with_tags = await image_repository.get_with_tags(session, image.id)
+        if image_with_tags is None:
+            raise MCPUserError("幂等记录暂不可用，请稍后重试")
+        display_url = await storage_service.get_read_url(image_with_tags) or ""
+        return {
+            "id": image_with_tags.id,
+            "status": "已存在（幂等重试）",
+            "url": display_url,
+            "width": image_with_tags.width,
+            "height": image_with_tags.height,
+            "tags": [t.name for t in image_with_tags.tags if t.level == 2],
+            "auto_analyze": False,
+        }
+
+    # JSON-RPC request id 由服务端自动作为默认幂等键；客户端也可显式提供
+    # idempotency_key，以便跨请求重试时继续复用同一写入语义。
+    uploaded_by = api_user.get("id")
+    if idempotency_key and uploaded_by:
+        existing = await image_repository.get_by_mcp_idempotency_key(
+            session, uploaded_by, idempotency_key
+        )
+        if existing is not None:
+            return await existing_result(existing)
 
     # 权限校验需在上传/落库前完成，避免产生副作用
     has_valid_tags = bool([t for t in tags if t and str(t).strip()])
     has_valid_desc = bool(description and str(description).strip())
     need_analysis = auto_analyze and not (has_valid_tags and has_valid_desc)
     if need_analysis and not check_permission(api_user, Permission.AI_ANALYZE):
-        raise ValueError(permission_denied_detail(Permission.AI_ANALYZE))
+        raise MCPUserError(permission_denied_detail(Permission.AI_ANALYZE))
 
     if tags:
         normalized_tags = [t.strip() for t in tags if t and str(t).strip()]
@@ -308,11 +376,13 @@ async def _tool_add_image(
         if reserved:
             preview = ", ".join(reserved[:10])
             suffix = "..." if len(reserved) > 10 else ""
-            raise ValueError(f"标签名已被主分类/分辨率占用，不能作为普通标签使用: {preview}{suffix}")
+            raise MCPUserError(
+                f"标签名已被主分类/分辨率占用，不能作为普通标签使用: {preview}{suffix}"
+            )
 
         missing = [name for name in sorted(set(normalized_tags)) if name not in name_levels]
         if missing and not check_permission(api_user, Permission.CREATE_TAGS):
-            raise ValueError(
+            raise MCPUserError(
                 permission_denied_with_missing_detail(
                     Permission.CREATE_TAGS,
                     missing,
@@ -340,24 +410,33 @@ async def _tool_add_image(
         embedding=None,
         uploaded_by=api_user.get("id"),
         is_public=is_public,
+        mcp_idempotency_key=idempotency_key,
     )
 
-    # 保存到本地存储
+    # 保存到默认存储。没有可用端点或上传失败时不得提交一个无法访问的图片记录。
     object_key = storage_service.generate_object_key(file_hash, file_type)
     default_endpoint, _ = await storage_endpoint_repository.resolve_upload_endpoint(session, None)
-    if default_endpoint:
-        full_key = storage_service.get_full_object_key(object_key, None)
-        await storage_service.upload_to_endpoint(content, full_key, default_endpoint)
+    if default_endpoint is None:
+        await upload_service.delete_temp_file(file_path)
+        raise MCPUserError("未配置默认存储端点，无法保存图片")
 
-        await image_location_repository.create(
-            session,
-            image_id=new_image.id,
-            endpoint_id=default_endpoint.id,
-            object_key=full_key,
-            is_primary=True,
-            sync_status="synced",
-            synced_at=datetime.now(timezone.utc),
-        )
+    full_key = storage_service.get_full_object_key(object_key, None)
+    uploaded = await storage_service.upload_to_endpoint(
+        content, full_key, default_endpoint
+    )
+    if not uploaded:
+        await upload_service.delete_temp_file(file_path)
+        raise MCPUserError("图片存储失败，请稍后重试")
+
+    await image_location_repository.create(
+        session,
+        image_id=new_image.id,
+        endpoint_id=default_endpoint.id,
+        object_key=full_key,
+        is_primary=True,
+        sync_status="synced",
+        synced_at=datetime.now(timezone.utc),
+    )
 
     # 设置标签
     if tags:
@@ -371,14 +450,28 @@ async def _tool_add_image(
             session, new_image.id, category_id, source="user", sort_order=0
         )
 
-    await session.commit()
-
-    # 判断是否需要 AI 分析
-    if need_analysis:
-        await task_queue.add_tasks([new_image.id])
-        status = "已加入 AI 分析队列"
-    else:
-        status = "已保存（跳过 AI 分析）"
+    try:
+        # 判断是否需要 AI 分析。与图片、存储位置共享同一事务；入队失败时
+        # 不会留下半成品图片记录。
+        if need_analysis:
+            await task_queue.add_tasks([new_image.id], session=session)
+            status = "已加入 AI 分析队列"
+        else:
+            status = "已保存（跳过 AI 分析）"
+        await session.commit()
+    except IntegrityError:
+        await upload_service.delete_temp_file(file_path)
+        await session.rollback()
+        if idempotency_key and uploaded_by:
+            existing = await image_repository.get_by_mcp_idempotency_key(
+                session, uploaded_by, idempotency_key
+            )
+            if existing is not None:
+                return await existing_result(existing)
+        raise
+    except Exception:
+        await upload_service.delete_temp_file(file_path)
+        raise
 
     return {
         "id": new_image.id,
@@ -394,6 +487,39 @@ async def _tool_add_image(
 # Tool 注册表
 # ============================================================
 
+_TagArgument = Annotated[StrictStr, Field(min_length=1, max_length=100)]
+
+
+class _MCPArguments(BaseModel):
+    """工具参数基类：类型严格，忽略客户端不认识的扩展字段。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class SearchImagesArguments(_MCPArguments):
+    keyword: StrictStr | None = Field(default=None, max_length=500)
+    tags: list[_TagArgument] = Field(default_factory=list, max_length=50)
+    match: Literal["auto", "semantic", "fuzzy"] = "auto"
+    sort: Literal["auto", "random", "latest", "relevance"] = "auto"
+    count: StrictInt = Field(default=10, ge=1, le=50)
+    page: StrictInt = Field(default=1, ge=1, le=10_000)
+
+
+class GetImageDetailArguments(_MCPArguments):
+    image_id: StrictInt = Field(..., ge=1)
+
+
+class AddImageArguments(_MCPArguments):
+    image_url: StrictStr = Field(..., min_length=1, max_length=2048)
+    tags: list[_TagArgument] = Field(default_factory=list, max_length=50)
+    description: StrictStr = Field(default="", max_length=10_000)
+    category_id: StrictInt | None = Field(default=None, ge=1)
+    auto_analyze: StrictBool = True
+    is_public: StrictBool = True
+    idempotency_key: StrictStr | None = Field(
+        default=None, min_length=1, max_length=128
+    )
+
 @dataclass(frozen=True)
 class McpToolDef:
     """MCP 工具定义：schema + 只读标记 + 所需权限 + 执行函数"""
@@ -402,6 +528,7 @@ class McpToolDef:
     input_schema: dict
     readonly: bool
     handler: Callable[[dict, AsyncSession, Optional[dict]], Awaitable[dict]]
+    input_model: type[BaseModel] | None = None
     required_permission: Permission | None = None
 
 
@@ -419,11 +546,13 @@ _TOOL_DEFS = [
             "properties": {
                 "keyword": {
                     "type": "string",
+                    "maxLength": 500,
                     "description": "搜索关键词。不传时进入随机抽取模式"
                 },
                 "tags": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {"type": "string", "minLength": 1, "maxLength": 100},
+                    "maxItems": 50,
                     "description": "标签名筛选列表（AND 关系，精确匹配标签名，所有模式下均为硬过滤）"
                 },
                 "match": {
@@ -448,6 +577,7 @@ _TOOL_DEFS = [
                 "page": {
                     "type": "integer",
                     "minimum": 1,
+                    "maximum": 10000,
                     "default": 1,
                     "description": "页码，仅 sort=latest 时生效"
                 }
@@ -455,6 +585,7 @@ _TOOL_DEFS = [
         },
         readonly=True,
         handler=_tool_search_images,
+        input_model=SearchImagesArguments,
     ),
     McpToolDef(
         name="get_image_detail",
@@ -471,6 +602,7 @@ _TOOL_DEFS = [
         },
         readonly=True,
         handler=_tool_get_image_detail,
+        input_model=GetImageDetailArguments,
     ),
     McpToolDef(
         name="add_image",
@@ -480,15 +612,19 @@ _TOOL_DEFS = [
             "properties": {
                 "image_url": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048,
                     "description": "图片 URL（必须可公网访问）"
                 },
                 "tags": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {"type": "string", "minLength": 1, "maxLength": 100},
+                    "maxItems": 50,
                     "description": "用户自定义标签列表"
                 },
                 "description": {
                     "type": "string",
+                    "maxLength": 10000,
                     "description": "图片描述（若同时提供 tags 和 description 则跳过 AI 分析）"
                 },
                 "category_id": {
@@ -504,12 +640,19 @@ _TOOL_DEFS = [
                     "type": "boolean",
                     "default": True,
                     "description": "是否公开可见"
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "跨请求重试时复用的幂等键"
                 }
             },
             "required": ["image_url"]
         },
         readonly=False,
         handler=_tool_add_image,
+        input_model=AddImageArguments,
         required_permission=Permission.UPLOAD_IMAGE,
     ),
 ]
@@ -549,13 +692,26 @@ async def execute_tool(
     """
     tool = TOOL_REGISTRY.get(name)
     if tool is None:
-        raise ValueError(f"Unknown tool: {name}")
+        raise MCPUserError(f"Unknown tool: {name}")
     if scope == SCOPE_READONLY and not tool.readonly:
-        raise ValueError(f"当前为公共只读端点，工具 {name} 不可用")
+        raise MCPUserError(f"当前为公共只读端点，工具 {name} 不可用")
     if tool.required_permission and not check_permission(
         api_user or {}, tool.required_permission
     ):
-        raise ValueError(permission_denied_detail(tool.required_permission))
+        raise MCPUserError(permission_denied_detail(tool.required_permission))
+
+    if tool.input_model is not None:
+        try:
+            validated = tool.input_model.model_validate(arguments)
+        except ValidationError as exc:
+            raise MCPUserError("工具参数校验失败，请检查输入") from exc
+        validated_arguments = validated.model_dump(exclude_none=True)
+        # 该字段只由服务端注入，用于以 JSON-RPC request id 作为默认幂等键；
+        # 不让它出现在公开 inputSchema 中，也不接受客户端伪造的内部字段。
+        if name == "add_image" and arguments.get("_mcp_request_id"):
+            validated_arguments["_mcp_request_id"] = arguments["_mcp_request_id"]
+        arguments = validated_arguments
+
     return await tool.handler(arguments, session, api_user)
 
 
@@ -565,18 +721,113 @@ async def execute_tool(
 
 class JsonRpcRequest(BaseModel):
     """JSON-RPC 2.0 请求"""
-    jsonrpc: str = "2.0"
-    id: int | str | None = None
-    method: str
-    params: dict | None = None
+    jsonrpc: Literal["2.0"]
+    id: StrictInt | StrictStr | None = None
+    method: StrictStr
+    params: dict[str, Any] | None = None
 
 
 class JsonRpcResponse(BaseModel):
     """JSON-RPC 2.0 响应"""
-    jsonrpc: str = "2.0"
-    id: int | str | None = None
+    jsonrpc: Literal["2.0"] = "2.0"
+    id: StrictInt | StrictStr | None = None
     result: Any = None
     error: dict | None = None
+
+
+class MCPProtocolError(ValueError):
+    """需要通过 JSON-RPC 顶层 error 返回的协议错误。"""
+
+    def __init__(self, message: str, *, code: int = -32602):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _protocol_error_response(
+    request_id: StrictInt | StrictStr | None,
+    error: MCPProtocolError,
+) -> JsonRpcResponse:
+    """构造 JSON-RPC 顶层协议错误响应。"""
+    return JsonRpcResponse(
+        id=request_id,
+        error={"code": error.code, "message": error.message},
+    )
+
+
+def _parse_tool_call_params(
+    params: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any]]:
+    """校验 tools/call 的协议参数。
+
+    工具名和 arguments 的容器类型属于 CallToolRequest 协议的一部分；
+    参数值本身交由具体工具处理，并以 CallToolResult.isError 返回业务错误。
+    """
+    if params is None:
+        raise MCPProtocolError("Invalid params: tools/call requires an object")
+
+    tool_name = params.get("name")
+    if not isinstance(tool_name, str) or not tool_name.strip():
+        raise MCPProtocolError("Invalid params: tools/call requires a non-empty name")
+
+    arguments = params.get("arguments", {})
+    if not isinstance(arguments, dict):
+        raise MCPProtocolError("Invalid params: arguments must be an object")
+
+    return tool_name, arguments
+
+
+def _tool_success_result(result: Any) -> dict[str, Any]:
+    """构造标准 CallToolResult，同时保留文本兼容层。"""
+    tool_result: dict[str, Any] = {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(result, ensure_ascii=False, indent=2),
+            }
+        ],
+        "isError": False,
+    }
+    # 当前所有内置工具均返回 object。仅在结果满足 MCP structuredContent
+    # 的 object 要求时输出，避免将未来的数组/标量结果伪装成结构化对象。
+    if isinstance(result, dict):
+        tool_result["structuredContent"] = result
+    return tool_result
+
+
+def _tool_error_result(error: Exception) -> dict[str, Any]:
+    """构造工具执行错误（与 JSON-RPC 协议错误区分）。"""
+    message = str(error) if isinstance(error, MCPUserError) else "工具执行失败，请稍后重试"
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": f"Error: {message}",
+            }
+        ],
+        "isError": True,
+    }
+
+
+def _parse_rpc_request(body: Any) -> JsonRpcRequest:
+    """解析并校验 JSON-RPC 2.0 请求及 MCP 的请求/通知 ID 规则。"""
+    try:
+        request = JsonRpcRequest.model_validate(body)
+    except (ValidationError, TypeError) as exc:
+        raise MCPProtocolError("Invalid Request", code=-32600) from exc
+
+    is_notification = request.method.startswith("notifications/")
+    if is_notification and request.id is not None:
+        raise MCPProtocolError(
+            "Invalid Request: notifications must not include an id",
+            code=-32600,
+        )
+    if not is_notification and request.id is None:
+        raise MCPProtocolError(
+            "Invalid Request: requests must include a string or integer id",
+            code=-32600,
+        )
+    return request
 
 
 # ============================================================
@@ -592,23 +843,150 @@ class MCPConnection:
         self.scope = scope
         self.initialized = False
         self.message_queue: asyncio.Queue = asyncio.Queue()
+        self.last_activity = monotonic()
 
     async def send(self, data: dict):
         """发送消息到队列"""
+        self.touch()
         await self.message_queue.put(data)
 
     async def receive(self) -> dict:
         """从队列接收消息"""
+        self.touch()
         return await self.message_queue.get()
+
+    def touch(self) -> None:
+        self.last_activity = monotonic()
+
+    def is_expired(self) -> bool:
+        return monotonic() - self.last_activity > MCP_SESSION_TTL_SECONDS
 
 
 # 活跃连接存储
 _connections: dict[str, MCPConnection] = {}
+_mcp_rate_windows: dict[str, deque[float]] = {}
 
 
 def _anonymous_connection_count() -> int:
     """当前匿名连接数"""
     return sum(1 for c in _connections.values() if c.api_user is None)
+
+
+def _purge_expired_connections() -> None:
+    """清理闲置 SSE 会话，防止 session_id 永久有效。"""
+    expired = [sid for sid, connection in _connections.items() if connection.is_expired()]
+    for sid in expired:
+        _connections.pop(sid, None)
+        logger.info("[MCP] 会话过期清理: session=%s", sid)
+
+
+def _connection_user_key(api_user: dict | None) -> str | None:
+    if not api_user:
+        return None
+    return str(api_user.get("id") or api_user.get("username") or "unknown")
+
+
+def _authenticated_connection_count() -> int:
+    return sum(1 for c in _connections.values() if c.api_user is not None)
+
+
+def _user_connection_count(api_user: dict | None) -> int:
+    user_key = _connection_user_key(api_user)
+    if user_key is None:
+        return 0
+    return sum(
+        1 for c in _connections.values()
+        if _connection_user_key(c.api_user) == user_key
+    )
+
+
+def _check_connection_limit(api_user: dict | None) -> None:
+    _purge_expired_connections()
+    if api_user is None:
+        if _anonymous_connection_count() >= MAX_ANONYMOUS_CONNECTIONS:
+            raise HTTPException(status_code=429, detail="匿名连接数已达上限，请稍后重试")
+        return
+    if _authenticated_connection_count() >= MAX_AUTHENTICATED_CONNECTIONS:
+        raise HTTPException(status_code=429, detail="认证连接数已达上限，请稍后重试")
+    if _user_connection_count(api_user) >= MAX_CONNECTIONS_PER_USER:
+        raise HTTPException(status_code=429, detail="当前用户连接数已达上限，请复用已有连接")
+
+
+def _rate_limit_key(request: Request, api_user: dict | None) -> str:
+    if api_user and api_user.get("id") is not None:
+        return f"user:{api_user['id']}"
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", None) or "unknown"
+    return f"ip:{host}"
+
+
+def _check_rate_limit(request: Request, api_user: dict | None) -> None:
+    """进程级滑动窗口限流，避免公共 MCP 被单一调用方打穿。"""
+    now = monotonic()
+    key = _rate_limit_key(request, api_user)
+    window = _mcp_rate_windows.setdefault(key, deque())
+    cutoff = now - MCP_RATE_LIMIT_WINDOW_SECONDS
+    while window and window[0] <= cutoff:
+        window.popleft()
+    limit = MCP_RATE_LIMIT_AUTHENTICATED if api_user else MCP_RATE_LIMIT_ANONYMOUS
+    if len(window) >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail="MCP 请求过于频繁，请稍后重试",
+            headers={
+                "Retry-After": str(max(1, int(MCP_RATE_LIMIT_WINDOW_SECONDS)))
+            },
+        )
+    window.append(now)
+    # 防止攻击者通过伪造大量来源地址让限流字典无界增长。
+    if len(_mcp_rate_windows) > 10_000:
+        for stale_key in list(_mcp_rate_windows)[:1_000]:
+            _mcp_rate_windows.pop(stale_key, None)
+
+
+def _request_content_length(request: Request) -> int | None:
+    headers = getattr(request, "headers", None)
+    raw = headers.get("content-length") if headers is not None else None
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise MCPRequestTooLarge("invalid content length")
+
+
+async def _read_mcp_json(request: Request) -> Any:
+    """读取有限大小的单个 JSON-RPC 请求。"""
+    content_length = _request_content_length(request)
+    if content_length is not None and content_length > MCP_MAX_REQUEST_BYTES:
+        raise MCPRequestTooLarge("MCP request body is too large")
+
+    # 测试桩/旧调用方可能只实现 json()；真实 Request 优先读取原始字节，
+    # 这样可以在 JSON 解码前强制限制大小。
+    if hasattr(request, "body"):
+        raw = await request.body()
+        if len(raw) > MCP_MAX_REQUEST_BYTES:
+            raise MCPRequestTooLarge("MCP request body is too large")
+        return json.loads(raw)
+    return await request.json()
+
+
+def _validate_protocol_version_header(request: Request) -> None:
+    version = getattr(request, "headers", {}).get("mcp-protocol-version")
+    if version and version not in SUPPORTED_PROTOCOL_VERSIONS:
+        raise MCPProtocolError("Unsupported MCP-Protocol-Version", code=-32602)
+
+
+def _response_protocol_version(request: Request, rpc_request: "JsonRpcRequest") -> str:
+    """确定响应中的 MCP-Protocol-Version，保持握手与后续请求一致。"""
+    header_version = getattr(request, "headers", {}).get("mcp-protocol-version")
+    if header_version in SUPPORTED_PROTOCOL_VERSIONS:
+        return header_version
+    if rpc_request.method == "initialize":
+        requested = (rpc_request.params or {}).get("protocolVersion")
+        if requested in SUPPORTED_PROTOCOL_VERSIONS:
+            return requested
+    return DEFAULT_PROTOCOL_VERSION
 
 
 # ============================================================
@@ -671,37 +1049,52 @@ async def process_jsonrpc(
 
         elif method == "tools/call":
             # 执行 Tool 调用
-            tool_name = params.get("name")
-            arguments = params.get("arguments", {})
+            try:
+                tool_name, arguments = _parse_tool_call_params(request.params)
+            except MCPProtocolError as error:
+                return _protocol_error_response(request.id, error)
+
+            # 未知工具属于协议错误，不是工具执行错误。
+            if tool_name not in TOOL_REGISTRY:
+                return _protocol_error_response(
+                    request.id,
+                    MCPProtocolError(f"Unknown tool: {tool_name}"),
+                )
 
             try:
+                # 对写工具默认启用 request-id 幂等，客户端可通过显式
+                # idempotency_key 覆盖它以支持跨请求重试。
+                if tool_name == "add_image" and request.id is not None:
+                    arguments = dict(arguments)
+                    fingerprint = hashlib.sha256(
+                        json.dumps(
+                            arguments,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()[:32]
+                    request_token = hashlib.sha256(
+                        str(request.id).encode("utf-8")
+                    ).hexdigest()[:32]
+                    arguments["_mcp_request_id"] = f"{request_token}:{fingerprint}"
                 result = await execute_tool(
                     tool_name, arguments, session, api_user, scope,
                 )
                 return JsonRpcResponse(
                     id=request.id,
-                    result={
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": json.dumps(result, ensure_ascii=False, indent=2)
-                            }
-                        ]
-                    }
+                    result=_tool_success_result(result),
                 )
             except Exception as e:
-                logger.error(f"[MCP] Tool 执行失败: {tool_name}, error={e}")
+                logger.error(f"[MCP] Tool 执行失败: {tool_name}", exc_info=True)
+                if session is not None:
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        logger.error("[MCP] 工具失败后的事务回滚失败", exc_info=True)
                 return JsonRpcResponse(
                     id=request.id,
-                    result={
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"Error: {str(e)}"
-                            }
-                        ],
-                        "isError": True
-                    }
+                    result=_tool_error_result(e),
                 )
 
         elif method == "ping":
@@ -717,13 +1110,13 @@ async def process_jsonrpc(
                 }
             )
 
-    except Exception as e:
-        logger.error(f"[MCP] 消息处理失败: {e}")
+    except Exception:
+        logger.error("[MCP] 消息处理失败", exc_info=True)
         return JsonRpcResponse(
             id=request.id,
             error={
                 "code": -32603,
-                "message": str(e)
+                "message": "Internal server error",
             }
         )
 
@@ -762,8 +1155,14 @@ async def _handle_streamable_post(
     session: AsyncSession,
 ) -> Response:
     """Streamable HTTP 消息处理（full / public 共用）"""
+    _check_rate_limit(request, api_user)
     try:
-        body = await request.json()
+        body = await _read_mcp_json(request)
+    except MCPRequestTooLarge:
+        return JSONResponse(
+            status_code=413,
+            content={"error": "MCP request body is too large"},
+        )
     except Exception:
         return JSONResponse(
             status_code=400,
@@ -786,14 +1185,15 @@ async def _handle_streamable_post(
         )
 
     try:
-        rpc_request = JsonRpcRequest(**body)
-    except (ValidationError, TypeError):
+        rpc_request = _parse_rpc_request(body)
+        _validate_protocol_version_header(request)
+    except MCPProtocolError as error:
         return JSONResponse(
             status_code=400,
             content={
                 "jsonrpc": "2.0",
                 "id": None,
-                "error": {"code": -32600, "message": "Invalid Request"},
+                "error": {"code": error.code, "message": error.message},
             },
         )
 
@@ -805,15 +1205,25 @@ async def _handle_streamable_post(
 
     if response is None:
         # 通知类消息：202 Accepted 无响应体
-        return Response(status_code=202)
+        return Response(
+            status_code=202,
+            headers={
+                "MCP-Protocol-Version": _response_protocol_version(request, rpc_request)
+            },
+        )
 
-    return JSONResponse(content=response.model_dump(exclude_none=True))
+    return JSONResponse(
+        content=response.model_dump(exclude_none=True),
+        headers={
+            "MCP-Protocol-Version": _response_protocol_version(request, rpc_request)
+        },
+    )
 
 
 @router.post("")
 async def mcp_streamable_endpoint(
     request: Request,
-    api_user: dict = Depends(require_api_key),
+    api_user: dict = Depends(require_mcp_api_key),
     session: AsyncSession = Depends(get_async_session),
 ):
     """MCP Streamable HTTP 端点（全功能）- 强制 API Key"""
@@ -823,7 +1233,7 @@ async def mcp_streamable_endpoint(
 @router.post("/public")
 async def mcp_public_streamable_endpoint(
     request: Request,
-    api_user: dict | None = Depends(verify_api_key),
+    api_user: dict | None = Depends(verify_mcp_api_key),
     session: AsyncSession = Depends(get_async_session),
 ):
     """MCP Streamable HTTP 端点（公共只读）- 允许匿名
@@ -855,6 +1265,9 @@ def _create_sse_response(
             while True:
                 if await request.is_disconnected():
                     break
+                if connection.is_expired():
+                    logger.info("[MCP] SSE 会话超时: session=%s", connection.session_id)
+                    break
 
                 try:
                     # 等待消息（带超时避免阻塞）
@@ -865,6 +1278,8 @@ def _create_sse_response(
                     yield f"event: message\ndata: {json.dumps(message, ensure_ascii=False)}\n\n"
                 except asyncio.TimeoutError:
                     # 发送心跳
+                    if connection.is_expired():
+                        break
                     yield ": heartbeat\n\n"
         finally:
             # 清理连接
@@ -888,12 +1303,59 @@ async def _dispatch_message(
     session: AsyncSession,
 ) -> dict:
     """message 端点共用逻辑：查连接、解析并处理 JSON-RPC 消息"""
+    _purge_expired_connections()
     connection = _connections.get(session_id)
     if not connection:
         return {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Session not found"}}
+    if connection.is_expired():
+        _connections.pop(session_id, None)
+        return {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Session expired"}}
 
-    body = await request.json()
-    rpc_request = JsonRpcRequest(**body)
+    # 旧 SSE 的 session_id 仍用于路由，但不再单独构成认证凭据。认证会话的
+    # message 请求必须重新携带同一 API Key，泄露 session_id 也无法直接操作。
+    if connection.api_user is not None:
+        provided_key = extract_mcp_api_key(request)
+        if not provided_key:
+            raise HTTPException(status_code=401, detail="SSE message 请求需要 API Key 请求头")
+        message_user = await get_user_by_api_key(session, provided_key)
+        if message_user.get("id") != connection.api_user.get("id"):
+            raise HTTPException(status_code=403, detail="SSE 会话与 API Key 不匹配")
+
+    _check_rate_limit(request, connection.api_user)
+    connection.touch()
+
+    try:
+        body = await _read_mcp_json(request)
+    except MCPRequestTooLarge:
+        await connection.send(
+            JsonRpcResponse(
+                id=None,
+                error={"code": -32600, "message": "Request body is too large"},
+            ).model_dump(exclude_none=True)
+        )
+        return {"status": "ok"}
+    except Exception:
+        # SSE 的 HTTP message 端点只负责确认入队；解析错误仍需通过
+        # 连接对应的 SSE 响应通道返回 JSON-RPC error。
+        await connection.send(
+            JsonRpcResponse(
+                id=None,
+                error={"code": -32700, "message": "Parse error"},
+            ).model_dump(exclude_none=True)
+        )
+        return {"status": "ok"}
+
+    try:
+        rpc_request = _parse_rpc_request(body)
+        _validate_protocol_version_header(request)
+    except MCPProtocolError as error:
+        await connection.send(
+            JsonRpcResponse(
+                id=None,
+                error={"code": error.code, "message": error.message},
+            ).model_dump(exclude_none=True)
+        )
+        return {"status": "ok"}
 
     logger.debug(f"[MCP] 收到消息: method={rpc_request.method}, session={session_id}")
 
@@ -909,12 +1371,14 @@ async def _dispatch_message(
 @router.get("/sse")
 async def mcp_sse_endpoint(
     request: Request,
-    api_user: dict = Depends(require_api_key),
+    api_user: dict = Depends(require_mcp_api_key),
 ):
     """MCP SSE 端点（全功能）- 强制 API Key
 
     创建 SSE 连接，返回 session_id 用于后续消息发送。
     """
+    _check_connection_limit(api_user)
+    _check_rate_limit(request, api_user)
     session_id = str(uuid.uuid4())
     connection = MCPConnection(session_id, api_user, SCOPE_FULL)
     _connections[session_id] = connection
@@ -932,7 +1396,8 @@ async def mcp_message_endpoint(
 ):
     """MCP 消息端点（全功能）- 接收客户端 JSON-RPC 消息
 
-    认证通过 session_id 关联的连接获取，无需重复传递 API Key。
+    session_id 仅用于定位连接；认证会话仍需在每次 message 请求中重复
+    携带同一 API Key 请求头。
     """
     return await _dispatch_message(request, session_id, session)
 
@@ -940,15 +1405,15 @@ async def mcp_message_endpoint(
 @router.get("/public/sse")
 async def mcp_public_sse_endpoint(
     request: Request,
-    api_user: dict | None = Depends(verify_api_key),
+    api_user: dict | None = Depends(verify_mcp_api_key),
 ):
     """MCP SSE 端点（公共只读）- 允许匿名访问
 
     仅暴露只读工具；即使携带有效 API Key 也保持只读（作用域由 URL 决定）。
     匿名连接数超过上限时返回 429。
     """
-    if api_user is None and _anonymous_connection_count() >= MAX_ANONYMOUS_CONNECTIONS:
-        raise HTTPException(status_code=429, detail="匿名连接数已达上限，请稍后重试")
+    _check_connection_limit(api_user)
+    _check_rate_limit(request, api_user)
 
     session_id = str(uuid.uuid4())
     connection = MCPConnection(session_id, api_user, SCOPE_READONLY)
