@@ -29,7 +29,7 @@ curl "http://your-domain/api/v1/external/images/search?api_key=YOUR_KEY&keyword=
 
 # 添加图片
 curl -X POST "http://your-domain/api/v1/external/images" \
-  -H "api_key: YOUR_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"image_url": "https://example.com/image.jpg"}'
 ```
@@ -39,17 +39,18 @@ curl -X POST "http://your-domain/api/v1/external/images" \
 ## 认证方式
 
 > [!IMPORTANT]
-> 所有 API 请求都需要携带 API 密钥。在「用户中心」生成密钥后，通过以下两种方式传递：
+> 所有 API 请求都需要携带「用户中心」生成的 API Key。推荐放在 `X-API-Key` 请求头；也可用 URL 查询参数传递。两种方式使用同一串 API Key。
 
-**方式一：Query 参数**
+**方式一：请求头（推荐）**
+```
+X-API-Key: YOUR_API_KEY
+```
+
+**方式二：API Key 查询参数**
 ```
 GET /api/v1/external/images/random?api_key=YOUR_API_KEY
 ```
-
-**方式二：Header**
-```
-api_key: YOUR_API_KEY
-```
+不要通过 `api_key` 下划线请求头传递；默认 Nginx 配置可能会忽略该请求头。
 
 ---
 
@@ -127,7 +128,7 @@ curl "http://your-domain/api/v1/external/images/random?api_key=YOUR_KEY&tags=风
 ```bash
 # AI 自动分析
 curl -X POST "http://your-domain/api/v1/external/images" \
-  -H "api_key: YOUR_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "image_url": "https://example.com/image.jpg",
@@ -137,7 +138,7 @@ curl -X POST "http://your-domain/api/v1/external/images" \
 
 # 跳过 AI 分析（手动提供标签）
 curl -X POST "http://your-domain/api/v1/external/images" \
-  -H "api_key: YOUR_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "image_url": "https://example.com/image.jpg",
@@ -419,7 +420,7 @@ if response.choices[0].message.tool_calls:
         result = httpx.get(
             f"{IMGTAG_API_BASE}/images/search",
             params=args,
-            headers={"api_key": IMGTAG_API_KEY}
+            headers={"X-API-Key": IMGTAG_API_KEY}
         ).json()
 ```
 
@@ -442,6 +443,8 @@ ImgTag 内置 MCP Server，同时支持两代传输协议（共享同一套工�
 #### MCP 认证与请求头
 
 MCP 的 API Key **必须通过请求头传递**，不接受 URL query 参数中的 `api_key`。支持以下三种等价写法：
+
+> 注意：MCP 的 `Authorization: Bearer` 后面也放用户 API Key；MCP 与外部 REST 的 `X-API-Key` 使用同一串 API Key。登录接口签发的 JWT 是另一种凭据，外部 REST API 不使用它。
 
 ```http
 Authorization: Bearer YOUR_KEY
@@ -579,7 +582,7 @@ Claude Desktop 配置（`~/.claude/claude_desktop_config.json`）：
 
 | 状态码 | 说明 |
 |--------|------|
-| `401` | 无效的 API 密钥 |
+| `401` | 缺少或无效的 API Key |
 | `404` | 资源不存在 |
 | `422` | 参数验证失败 |
 | `500` | 服务器内部错误 |
