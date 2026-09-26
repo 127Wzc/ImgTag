@@ -2,6 +2,7 @@
   "name": "imgtag-web",
   "private": true,
   "version": "0.1.9",
+  "packageManager": "pnpm@10.26.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
