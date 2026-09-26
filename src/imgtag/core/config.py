@@ -36,6 +36,17 @@ class Settings(BaseSettings):
         description="PostgreSQL 连接字符串"
     )
     
+    # PostgreSQL 通用连接池：默认每个进程最多 5 个连接，可通过环境变量调整。
+    DB_POOL_SIZE: int = Field(default=5, ge=1)
+    DB_MAX_OVERFLOW: int = Field(default=0, ge=0)
+    DB_POOL_TIMEOUT: float = Field(default=30, gt=0)
+    DB_POOL_RECYCLE: int = Field(default=600, ge=1)
+    DB_POOL_PRE_PING: bool = True
+
+    STORAGE_SYNC_CONCURRENCY: int = Field(default=2, ge=1)
+    STORAGE_SYNC_DB_MAX_ATTEMPTS: int = Field(default=5, ge=1, le=10)
+    STORAGE_SYNC_DB_RETRY_DELAY: float = Field(default=2, gt=0, le=30)
+
     # 视觉模型配置 (OpenAI 兼容)
     VISION_API_BASE_URL: str = Field(
         default="https://api.openai.com/v1",

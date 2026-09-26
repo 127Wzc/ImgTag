@@ -71,3 +71,25 @@ uv run alembic upgrade head && uv run python -m uvicorn imgtag.main:app
 # 标记为已迁移（不执行任何 DDL）
 uv run alembic stamp head
 ```
+
+## 连接池与同步参数
+
+以下环境变量适用于 PostgreSQL。每个应用进程独立维护连接池，默认最多 5 个连接；
+多进程、多副本部署时，连接上限按各进程的 `DB_POOL_SIZE + DB_MAX_OVERFLOW` 累加。
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DB_POOL_SIZE` | 5 | 连接池容量，至少 1 |
+| `DB_MAX_OVERFLOW` | 0 | 额外连接上限，0 表示不扩容 |
+| `DB_POOL_TIMEOUT` | 30 | 等待可用连接的超时秒数 |
+| `DB_POOL_RECYCLE` | 600 | 连接借出时超过此年龄则重建，单位秒 |
+| `DB_POOL_PRE_PING` | true | 借出前检查连接健康 |
+| `STORAGE_SYNC_CONCURRENCY` | 2 | 同时运行的手动同步批次数 |
+| `STORAGE_SYNC_DB_MAX_ATTEMPTS` | 5 | 临时数据库异常最大尝试次数，包含首次 |
+| `STORAGE_SYNC_DB_RETRY_DELAY` | 2 | 初始退避秒数，逐次翻倍，基础等待最多 30 秒，另加随机抖动 |
+
+Compose 示例支持在其 `.env` 文件中设置上述参数。修改后重新创建容器生效：
+
+```bash
+docker compose up -d --force-recreate imgtag
+```

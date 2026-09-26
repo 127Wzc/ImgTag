@@ -9,6 +9,8 @@ import hashlib
 import io
 import os
 import random
+import re
+import tempfile
 from typing import Optional, Sequence
 
 import boto3
@@ -507,14 +509,22 @@ class StorageService:
         full_key = self._apply_path_prefix(object_key, endpoint.path_prefix)
         full_path = os.path.join(base_path, full_key)
         
-        # Create directories
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        
-        # Write file asynchronously
+        # 先写同目录临时文件，再原子替换，避免中断留下半份目标文件。
         def _write():
-            with open(full_path, "wb") as f:
-                f.write(file_content)
-        
+            directory = os.path.dirname(full_path)
+            os.makedirs(directory, exist_ok=True)
+            temporary_path = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=directory, delete=False) as temporary:
+                    temporary_path = temporary.name
+                    temporary.write(file_content)
+                    temporary.flush()
+                    os.fsync(temporary.fileno())
+                os.replace(temporary_path, full_path)
+            finally:
+                if temporary_path and os.path.exists(temporary_path):
+                    os.unlink(temporary_path)
+
         await asyncio.to_thread(_write)
         logger.info(f"Uploaded to local: {full_path}")
         return True
@@ -627,12 +637,37 @@ class StorageService:
         
         return await asyncio.to_thread(_do_download)
 
+    @staticmethod
+    def _object_hash(object_key: str) -> tuple[str, str] | None:
+        """从文件名提取 MD5 或 SHA-256，不受分类目录、端点前缀影响。"""
+        filename = object_key.rsplit("/", 1)[-1]
+        digest = filename.rsplit(".", 1)[0]
+        if re.fullmatch(r"[0-9a-fA-F]{32}", digest):
+            return "md5", digest.lower()
+        if re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            return "sha256", digest.lower()
+        return None
+
+    async def verify_content_hash(self, content: bytes, object_key: str) -> bool:
+        """校验下载内容，避免将源端损坏文件写入目标并标记成功。"""
+        expected = self._object_hash(object_key)
+        if expected is None:
+            # 兼容历史非哈希文件名；此类文件不能通过本地检查而跳过传输。
+            logger.warning("文件名不含受支持的哈希，无法校验下载内容：%s", object_key)
+            return True
+        algorithm, digest = expected
+        actual = await asyncio.to_thread(lambda: hashlib.new(algorithm, content).hexdigest())
+        if actual != digest:
+            logger.error("源文件内容哈希不匹配：%s", object_key)
+            return False
+        return True
+
     async def file_exists(
         self,
         object_key: str,
         endpoint: StorageEndpoint,
     ) -> bool:
-        """Check if file exists on endpoint.
+        """检查端点文件：本地校验文件名哈希，S3 仅检查对象是否存在。
         
         Args:
             object_key: Object key to check.
@@ -646,10 +681,30 @@ class StorageService:
                 base_path = self._resolve_local_path(endpoint)
                 full_key = self._apply_path_prefix(object_key, endpoint.path_prefix)
                 full_path = os.path.join(base_path, full_key)
-                return os.path.exists(full_path)
+                expected = self._object_hash(object_key)
+                if expected is None:
+                    logger.warning("本地文件名不含受支持的哈希，将重新同步：%s", object_key)
+                    return False
+
+                def _check_local():
+                    if not os.path.isfile(full_path) or os.path.getsize(full_path) == 0:
+                        return False
+                    algorithm, digest = expected
+                    checksum = hashlib.new(algorithm)
+                    # 分块读取避免整份文件占用内存；读取和哈希计算都在线程中完成。
+                    with open(full_path, "rb") as local_file:
+                        for chunk in iter(lambda: local_file.read(1024 * 1024), b""):
+                            checksum.update(chunk)
+                    return checksum.hexdigest() == digest
+
+                valid = await asyncio.to_thread(_check_local)
+                if not valid:
+                    logger.info("本地文件缺失、为空或哈希不匹配，将重新同步：%s", object_key)
+                return valid
             else:
                 return await self._s3_file_exists(object_key, endpoint)
         except Exception:
+            logger.exception("检查目标文件是否存在失败：%s", object_key)
             return False
 
     async def _s3_file_exists(

@@ -72,13 +72,13 @@ _async_url = get_async_database_url(settings.PG_CONNECTION_STRING)
 engine = create_async_engine(
     _async_url,
     # 连接池大小（根据并发量调整）
-    pool_size=10,  # 常驻连接数
-    max_overflow=20,  # 超出 pool_size 时可额外创建的连接数
+    pool_size=settings.DB_POOL_SIZE,  # 常驻连接数
+    max_overflow=settings.DB_MAX_OVERFLOW,  # 超出 pool_size 时可额外创建的连接数
     # 超时设置
-    pool_timeout=10,  # 获取连接的超时时间（秒）
-    pool_recycle=600,  # 连接回收时间（秒），防止连接被数据库服务端关闭
+    pool_timeout=settings.DB_POOL_TIMEOUT,  # 获取连接的超时时间（秒）
+    pool_recycle=settings.DB_POOL_RECYCLE,  # 连接回收时间（秒），防止连接被数据库服务端关闭
     # 连接健康检查（略微增加延迟但防止使用失效连接）
-    pool_pre_ping=True,
+    pool_pre_ping=settings.DB_POOL_PRE_PING,
     # 调试模式
     echo=False,  # Set to True for SQL debugging
     # 连接参数 - 减少连接建立时间

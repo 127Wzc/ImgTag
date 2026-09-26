@@ -105,7 +105,7 @@ api_router.include_router(
     tags=["存储管理"]
 )
 
-# 注册外部 API 路由（第三方接入，使用 API 密钥认证）
+# 注册外部 API 路由（第三方接入，支持 X-API-Key 请求头或 API Key 查询参数）
 from imgtag.api.endpoints import external
 api_router.include_router(
     external.router, 
