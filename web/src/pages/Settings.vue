@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, onUnmounted } from 'vue'
+import { ref, onMounted, computed, onUnmounted, watch } from 'vue'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
 import ImageDetailModal from '@/components/ImageDetailModal.vue'
+import ModelTestButton from '@/components/ModelTestButton.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { getErrorMessage } from '@/utils/api-error'
@@ -97,6 +98,54 @@ const saving = ref(false)
 const configs = ref<Record<string, string>>({})
 const originalConfigs = ref<Record<string, string>>({})
 
+type ModelTestKind = 'vision' | 'embedding'
+const modelTesting = ref<Record<ModelTestKind, boolean>>({ vision: false, embedding: false })
+const modelTestResults = ref<Partial<Record<ModelTestKind, { success: boolean; message: string }>>>({})
+
+function modelRequestKey(kind: ModelTestKind): string | null {
+  const key = `${kind}_api_key`
+  const current = configs.value[key]
+  // 未修改的密钥只传空标记，由后端读取原始值；显式清空则传空字符串。
+  return current === originalConfigs.value[key] || current === '******' ? null : current || ''
+}
+
+function modelTestConfig(kind: ModelTestKind) {
+  const mode = kind === 'embedding' ? configs.value['embedding_mode'] || 'local' : 'api'
+  return {
+    kind,
+    mode,
+    model: String(configs.value[mode === 'local' ? 'embedding_local_model' : `${kind}_model`] || ''),
+    api_base_url: String(configs.value[`${kind}_api_base_url`] || ''),
+    api_key: modelRequestKey(kind),
+    ...(kind === 'embedding' ? {
+      dimensions: targetDimensions.value,
+      hf_endpoint: configs.value['hf_endpoint'] || 'https://hf-mirror.com',
+    } : {}),
+  }
+}
+
+async function testModel(kind: ModelTestKind) {
+  if (modelTesting.value[kind]) return
+  const payload = modelTestConfig(kind)
+  const signature = JSON.stringify(payload)
+  modelTesting.value[kind] = true
+  delete modelTestResults.value[kind]
+  try {
+    const { data } = await apiClient.post<{ message: string; elapsed_ms: number }>(
+      '/config/test-model', payload, { timeout: payload.mode === 'local' ? 900000 : 90000 },
+    )
+    if (signature === JSON.stringify(modelTestConfig(kind))) {
+      modelTestResults.value[kind] = { success: true, message: `${data.message}（${data.elapsed_ms} ms）` }
+    }
+  } catch (error) {
+    if (signature === JSON.stringify(modelTestConfig(kind))) {
+      modelTestResults.value[kind] = { success: false, message: `测试失败：${getErrorMessage(error)}` }
+    }
+  } finally {
+    modelTesting.value[kind] = false
+  }
+}
+
 // 模型列表（用于 combobox）
 const availableModels = ref<string[]>([])
 const modelsLoading = ref(false)
@@ -108,9 +157,9 @@ async function fetchModels() {
   
   // 使用表单中的值验证，通过后端代理请求避免 CORS 问题
   const apiBaseUrl = configs.value['vision_api_base_url']
-  const apiKey = configs.value['vision_api_key']
+  const apiKey = modelRequestKey('vision')
   
-  if (!apiBaseUrl || !apiKey || apiKey === '******') {
+  if (!apiBaseUrl) {
     modelsError.value = '未配置 API 地址或密钥'
     modelsLoading.value = false
     return
@@ -125,7 +174,7 @@ async function fetchModels() {
     availableModels.value = data.models || []
     if (data.error) modelsError.value = data.error
   } catch (e: any) {
-    modelsError.value = '获取模型列表失败'
+    modelsError.value = `获取模型列表失败：${getErrorMessage(e)}`
   } finally {
     modelsLoading.value = false
   }
@@ -137,7 +186,7 @@ const hasChanges = computed(() => {
     const original = originalConfigs.value[key]
     // 跳过未修改的密码（保持为 ******）
     if (current === original) continue
-    if (current === '******' || original === '******') continue
+    if (current === '******') continue
     return true
   }
   return false
@@ -332,6 +381,17 @@ function formatDate(iso: string): string {
 }
 
 // ========== 向量管理 ==========
+interface RebuildStatus {
+  is_running: boolean
+  total: number
+  processed: number
+  succeeded: number
+  skipped: number
+  failed: number
+  last_error: string
+  message: string
+}
+
 interface VectorStatus {
   image_count: number
   embedding_mode: string
@@ -339,19 +399,19 @@ interface VectorStatus {
   embedding_dimensions: number
   db_dimensions: number
   dimensions_match: boolean
-  rebuild_status: {
-    is_running: boolean
-    total: number
-    processed: number
-    failed: number
-    message: string
-  }
+  rebuild_status: RebuildStatus
 }
 
 const vectorStatus = ref<VectorStatus | null>(null)
 const vectorLoading = ref(false)
 const rebuilding = ref(false)
 const resizing = ref(false)
+const rebuildPollError = ref('')
+const rebuildProgress = computed(() => {
+  const status = vectorStatus.value?.rebuild_status
+  if (!status?.total) return 0
+  return Math.min(100, Math.max(0, status.processed / status.total * 100))
+})
 
 const localModelOptions = [
   { value: 'BAAI/bge-small-zh-v1.5', label: 'BAAI BGE Small (推荐, 512维)', dim: 512 },
@@ -385,6 +445,7 @@ async function fetchVectorStatus() {
   try {
     const { data } = await apiClient.get<VectorStatus>('/vectors/status')
     vectorStatus.value = data
+    rebuilding.value = data.rebuild_status?.is_running ?? false
     if (data.rebuild_status?.is_running) {
        rebuilding.value = true
        pollRebuildStatus()
@@ -409,6 +470,7 @@ async function rebuildVectors() {
   try {
     await apiClient.post('/vectors/rebuild')
     notifySuccess('重建任务已启动', { once: true })
+    await fetchVectorStatus()
     pollRebuildStatus()
   } catch(e: any) {
     notifyError(getErrorMessage(e))
@@ -437,33 +499,54 @@ async function resizeVectorTable() {
   }
 }
 
-let pollTimer: any = null
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let pollActive = false
+let pollGeneration = 0
+
+function stopRebuildPolling() {
+  pollActive = false
+  pollGeneration++
+  if (pollTimer) clearTimeout(pollTimer)
+  pollTimer = null
+}
+
 function pollRebuildStatus() {
-  if (pollTimer) clearInterval(pollTimer)
-  pollTimer = setInterval(async () => {
+  if (pollActive) return
+  pollActive = true
+  const generation = ++pollGeneration
+  // 上一次请求完成后再安排下一次，避免慢请求重叠、旧响应覆盖新进度。
+  async function poll() {
     try {
-      const { data } = await apiClient.get('/vectors/rebuild/status')
+      const { data } = await apiClient.get<RebuildStatus>('/vectors/rebuild/status')
+      if (generation !== pollGeneration) return
+      rebuildPollError.value = ''
       if (vectorStatus.value) {
         vectorStatus.value.rebuild_status = data
       }
       if (!data.is_running) {
-        clearInterval(pollTimer)
-        pollTimer = null
+        stopRebuildPolling()
         rebuilding.value = false
-        if (data.processed > 0) notifySuccess('向量重建完成', { once: true })
-        fetchVectorStatus()
+        if (data.failed > 0 || data.last_error) {
+          notifyError(data.message, { once: true })
+        } else {
+          notifySuccess(data.message || '向量重建完成', { once: true })
+        }
+        await fetchVectorStatus()
       } else {
         rebuilding.value = true
       }
     } catch {
-      clearInterval(pollTimer)
-      pollTimer = null
+      if (generation !== pollGeneration) return
+      rebuildPollError.value = '进度刷新暂时失败，正在自动重试…'
+    } finally {
+      if (pollActive && generation === pollGeneration) pollTimer = setTimeout(poll, 2000)
     }
-  }, 2000)
+  }
+  void poll()
 }
 
 onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
+  stopRebuildPolling()
 })
 
 // ========== 用户管理 ==========
@@ -646,7 +729,6 @@ async function deleteUser(user: UserItem) {
 }
 
 // 监听分类切换
-import { watch } from 'vue'
 watch(activeCategory, (newVal) => {
   if (newVal === 'embedding') {
     fetchVectorStatus()
@@ -654,6 +736,10 @@ watch(activeCategory, (newVal) => {
     fetchUsers()
   }
 })
+
+for (const kind of ['vision', 'embedding'] as const) {
+  watch(() => JSON.stringify(modelTestConfig(kind)), () => { delete modelTestResults.value[kind] })
+}
 
 onMounted(() => fetchConfigs())
 </script>
@@ -1218,6 +1304,13 @@ onMounted(() => fetchConfigs())
                     </div>
                   </div>
 
+                  <ModelTestButton
+                    :loading="modelTesting.embedding"
+                    :result="modelTestResults.embedding"
+                    description="使用当前配置生成一条测试向量"
+                    @test="testModel('embedding')"
+                  />
+
                   <!-- 向量状态卡片 -->
                   <div v-if="vectorStatus" class="mt-4 p-4 bg-muted/50 rounded-xl space-y-3">
                     <div class="flex items-center justify-between">
@@ -1241,7 +1334,7 @@ onMounted(() => fetchConfigs())
                         <div class="font-mono">{{ vectorStatus.db_dimensions }}</div>
                       </div>
                       <div class="p-2 bg-background rounded-lg border border-border/50">
-                        <div class="text-muted-foreground mb-0.5">模型输出维度</div>
+                        <div class="text-muted-foreground mb-0.5">配置向量维度</div>
                         <div class="font-mono transition-colors" :class="{'text-amber-500 font-bold': dimensionsMismatch}">
                           {{ targetDimensions }}
                           <span v-if="hasChanges" class="text-[10px] font-normal opacity-70">(未保存)</span>
@@ -1272,24 +1365,38 @@ onMounted(() => fetchConfigs())
                         :disabled="rebuilding || dimensionsMismatch || hasChanges"
                       >
                          <Loader2 v-if="rebuilding" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
-                         <span v-else>
+                         <span>
                            {{ rebuilding ? '重建中...' : '重建所有向量' }}
                          </span>
                       </Button>
                     </div>
 
                     <!-- 重建进度条 -->
-                    <div v-if="vectorStatus.rebuild_status.is_running || rebuilding" class="space-y-1.5 pt-2 border-t border-border/50">
+                    <div v-if="vectorStatus.rebuild_status.message || rebuilding" class="space-y-1.5 pt-2 border-t border-border/50">
                        <div class="flex justify-between text-xs text-muted-foreground">
                          <span>重建进度</span>
-                         <span>{{ vectorStatus.rebuild_status.processed }} / {{ vectorStatus.rebuild_status.total }}</span>
+                         <span>{{ vectorStatus.rebuild_status.processed }} / {{ vectorStatus.rebuild_status.total }} · {{ Math.round(rebuildProgress) }}%</span>
                        </div>
-                       <div class="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                       <div
+                         role="progressbar"
+                         aria-label="向量重建进度"
+                         :aria-valuenow="Math.round(rebuildProgress)"
+                         :aria-valuemin="0"
+                         :aria-valuemax="100"
+                         class="h-1.5 w-full bg-muted rounded-full overflow-hidden"
+                       >
                          <div 
                            class="h-full bg-primary transition-all duration-500"
-                           :style="{ width: `${(vectorStatus.rebuild_status.processed / (vectorStatus.rebuild_status.total || 1)) * 100}%` }"
+                           :style="{ width: `${rebuildProgress}%` }"
                          />
                        </div>
+                       <p class="text-xs text-muted-foreground" role="status" aria-live="polite">
+                         {{ vectorStatus.rebuild_status.message }}
+                       </p>
+                       <p v-if="vectorStatus.rebuild_status.last_error" class="text-xs text-destructive break-words">
+                         最近一次错误：{{ vectorStatus.rebuild_status.last_error }}
+                       </p>
+                       <p v-if="rebuildPollError" class="text-xs text-amber-500">{{ rebuildPollError }}</p>
                     </div>
                   </div>
                 </div>
@@ -1428,6 +1535,13 @@ onMounted(() => fetchConfigs())
                       </div>
                     </div>
                   </template>
+                  <ModelTestButton
+                    v-if="def.key === 'vision_model'"
+                    :loading="modelTesting.vision"
+                    :result="modelTestResults.vision"
+                    description="使用当前配置发送一条文本测试请求"
+                    @test="testModel('vision')"
+                  />
                 </div>
               </template>
             </div>

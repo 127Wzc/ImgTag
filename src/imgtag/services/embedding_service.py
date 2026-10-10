@@ -6,13 +6,12 @@
 支持在线 API 和本地 ONNX 模型两种模式
 """
 
+import asyncio
 import os
-from typing import List, Optional, TYPE_CHECKING
 from pathlib import Path
+from typing import List, Optional, TYPE_CHECKING
 
 import httpx
-import asyncio
-
 
 from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
@@ -415,7 +414,15 @@ class EmbeddingService:
             logger.error(f"本地向量生成失败: {str(e)}")
             raise
     
-    async def _get_embedding_api(self, text: str) -> list[float]:
+    async def _get_embedding_api(
+        self,
+        text: str,
+        *,
+        api_base: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        dimensions: int | None = None,
+    ) -> list[float]:
         """Generate embedding using API.
 
         Args:
@@ -427,14 +434,32 @@ class EmbeddingService:
         Raises:
             ValueError: If API is not configured or request fails.
         """
-        api_base = await config_cache.get("embedding_api_base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"
-        api_key = await config_cache.get("embedding_api_key", "") or ""
-        model = await config_cache.get("embedding_model", "text-embedding-3-small") or "text-embedding-3-small"
-        dim_str = await config_cache.get("embedding_dimensions", "1536")
-        dimensions = int(dim_str) if dim_str else 1536
+        if api_base is None:
+            api_base = await config_cache.get("embedding_api_base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"
+        if api_key is None:
+            api_key = await config_cache.get("embedding_api_key", "") or ""
+        if model is None:
+            model = await config_cache.get("embedding_model", "text-embedding-3-small") or "text-embedding-3-small"
+        if dimensions is None:
+            dim_str = await config_cache.get("embedding_dimensions", "1536")
+            dimensions = int(dim_str) if dim_str else 1536
 
         if not api_key:
             raise ValueError("嵌入模型 API 密钥未配置，请在系统设置中配置")
+
+        payload: dict[str, str | int] = {
+            "model": model,
+            "input": text.strip(),
+            "encoding_format": "float",
+        }
+        # 固定维度模型（如 BGE-M3）不支持 dimensions，传入会被部分服务商拒绝。
+        # 配置维度仍用于校验输出；仅向支持自定义维度的模型发送该参数。
+        if model.startswith((
+            "text-embedding-3-",
+            "Qwen/Qwen3-Embedding-",
+            "Pro/Qwen/Qwen3-Embedding-",
+        )):
+            payload["dimensions"] = dimensions
 
         logger.info(f"使用 API 生成向量: {text[:50]}...")
 
@@ -446,11 +471,7 @@ class EmbeddingService:
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "model": model,
-                        "input": text.strip(),
-                        "dimensions": dimensions,
-                    },
+                    json=payload,
                 )
 
                 if response.status_code != 200:
@@ -460,6 +481,11 @@ class EmbeddingService:
 
                 data = response.json()
                 embedding = data["data"][0]["embedding"]
+                if len(embedding) != dimensions:
+                    raise ValueError(
+                        f"嵌入模型 {model} 实际输出维度为 {len(embedding)}，"
+                        f"与配置维度 {dimensions} 不一致，请修改向量维度配置"
+                    )
                 logger.info(f"API 向量生成成功，维度: {len(embedding)}")
                 return embedding
 

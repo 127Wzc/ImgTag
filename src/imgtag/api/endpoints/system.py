@@ -14,10 +14,8 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
@@ -26,7 +24,9 @@ from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
 from imgtag.db import get_async_session
 from imgtag.db.repositories import image_repository
+from imgtag.schemas.model_test import ModelListRequest, ModelListResponse
 from imgtag.services.embedding_service import embedding_service
+from imgtag.services.model_test_service import fetch_vision_models
 from imgtag.services.task_queue import task_queue
 
 logger = get_logger(__name__)
@@ -193,100 +193,19 @@ async def get_config():
     }
 
 
-@router.get("/models")
-async def get_available_models():
-    """Get available model list from saved config.
-
-    Returns:
-        Available models from API.
-    """
-    logger.info("获取可用模型列表")
-
-    try:
-        api_base_url = await config_cache.get("vision_api_base_url", settings.VISION_API_BASE_URL)
-        api_key = await config_cache.get("vision_api_key", "")
-
-        if not api_base_url or not api_key:
-            return {"models": [], "error": "未配置 API 地址或密钥"}
-
-        return await _fetch_models(api_base_url, api_key)
-
-    except httpx.TimeoutException:
-        return {"models": [], "error": "请求超时"}
-    except Exception as e:
-        logger.error(f"获取模型列表失败: {e}")
-        return {"models": [], "error": str(e)}
-
-class ModelsRequest(BaseModel):
-    """Request body for models endpoint."""
-    api_base_url: str | None = None
-    api_key: str | None = None
+@router.get("/models", response_model=ModelListResponse)
+async def get_available_models(admin: dict = Depends(require_admin)):
+    """使用服务器保存的配置获取视觉模型列表，需管理员权限。"""
+    return await fetch_vision_models()
 
 
-@router.post("/models")
-async def get_models_with_config(request: ModelsRequest):
-    """Get available model list with custom config (for validation before save).
-    
-    Allows frontend to test API config without saving.
-    Proxies through backend to avoid CORS issues.
-
-    Args:
-        request: Request body with API config.
-
-    Returns:
-        Available models from API.
-    """
-    logger.info("获取可用模型列表 (临时配置)")
-
-    api_base_url = request.api_base_url
-    api_key = request.api_key
-
-    # Use provided values or fall back to saved config
-    if not api_base_url:
-        api_base_url = await config_cache.get("vision_api_base_url", settings.VISION_API_BASE_URL)
-    if not api_key or api_key == "******":
-        api_key = await config_cache.get("vision_api_key", "")
-
-    if not api_base_url or not api_key:
-        return {"models": [], "error": "未配置 API 地址或密钥"}
-
-    return await _fetch_models(api_base_url, api_key)
-
-
-async def _fetch_models(api_base_url: str, api_key: str) -> dict:
-    """Internal helper to fetch models from API.
-    
-    Args:
-        api_base_url: API base URL.
-        api_key: API key.
-        
-    Returns:
-        Dict with models list or error.
-    """
-    try:
-        models_url = f"{api_base_url.rstrip('/')}/models"
-
-        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-            response = await client.get(
-                models_url, headers={"Authorization": f"Bearer {api_key}"}
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                models = []
-                if "data" in data:
-                    models = [m.get("id") for m in data["data"] if m.get("id")]
-                elif isinstance(data, list):
-                    models = [m.get("id") for m in data if m.get("id")]
-                return {"models": sorted(models)}
-            else:
-                return {"models": [], "error": f"API 返回 {response.status_code}"}
-
-    except httpx.TimeoutException:
-        return {"models": [], "error": "请求超时"}
-    except Exception as e:
-        logger.error(f"获取模型列表失败: {e}")
-        return {"models": [], "error": str(e)}
+@router.post("/models", response_model=ModelListResponse)
+async def get_models_with_config(
+    request: ModelListRequest,
+    admin: dict = Depends(require_admin),
+):
+    """使用当前表单获取模型列表；未修改密钥时由服务器读取原值。"""
+    return await fetch_vision_models(request.api_base_url, request.api_key)
 
 
 # ========== Export/Import (keep legacy db calls for now) ==========
