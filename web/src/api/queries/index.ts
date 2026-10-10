@@ -59,6 +59,9 @@ export {
     type DashboardStats
 } from './system'
 
+// 配置
+export { getConfig, type ConfigResponse } from './config'
+
 // Subjects
 export {
     useSubjects,

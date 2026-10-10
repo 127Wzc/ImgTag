@@ -17,6 +17,8 @@ from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
 from imgtag.db.database import get_async_session
 from imgtag.db.repositories import config_repository
+from imgtag.schemas.model_test import ModelTestRequest, ModelTestResponse
+from imgtag.services.model_test_service import test_model_config
 
 logger = get_logger(__name__)
 
@@ -26,6 +28,18 @@ router = APIRouter()
 class ConfigUpdate(BaseModel):
     """配置更新请求"""
     configs: Dict[str, str]
+
+
+@router.post("/test-model", response_model=ModelTestResponse)
+async def test_model(
+    request: ModelTestRequest,
+    admin: Dict = Depends(require_admin),
+):
+    """使用当前表单测试模型，需管理员权限。"""
+    try:
+        return await test_model_config(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/", response_model=Dict[str, Any])

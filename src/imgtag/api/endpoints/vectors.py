@@ -12,29 +12,25 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
 from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger, get_perf_logger
 from imgtag.db import get_async_session
-from imgtag.db.database import async_session_maker, engine
+from imgtag.db.database import engine
 from imgtag.db.repositories import image_repository, config_repository
 from imgtag.services import embedding_service
+from imgtag.services.vector_rebuild_service import vector_rebuild_service
 
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
 
 router = APIRouter()
 
-# Rebuild status (module-level state)
-rebuild_status = {
-    "is_running": False,
-    "total": 0,
-    "processed": 0,
-    "failed": 0,
-    "message": "",
-}
+# 重建状态由 Service 统一维护。
+rebuild_status = vector_rebuild_service.status
 
 # Install status
 install_status = {
@@ -46,26 +42,8 @@ install_status = {
 
 
 async def get_db_vector_dimensions(session: AsyncSession) -> int:
-    """Get vector column dimensions from database.
-
-    Args:
-        session: Database session.
-
-    Returns:
-        Vector dimensions (default 1536).
-    """
-    try:
-        result = await session.execute(text("""
-            SELECT atttypmod FROM pg_attribute 
-            WHERE attrelid = 'images'::regclass 
-            AND attname = 'embedding'
-        """))
-        row = result.fetchone()
-        if row and row[0]:
-            return row[0]
-        return 1536
-    except Exception:
-        return 1536
+    """读取数据库向量维度。"""
+    return await image_repository.get_embedding_dimensions(session)
 
 
 @router.get("/status", response_model=dict[str, Any])
@@ -341,66 +319,14 @@ async def start_rebuild(
     admin: dict = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Start vector rebuild task (admin only).
-
-    Args:
-        background_tasks: FastAPI background tasks.
-        admin: Admin user.
-        session: Database session.
-
-    Returns:
-        Rebuild start message.
-    """
-    global rebuild_status
-
-    if rebuild_status["is_running"]:
-        raise HTTPException(status_code=400, detail="重建任务正在进行中")
-
-    # Get expected dimensions
-    mode = await config_cache.get("embedding_mode", "local") or "local"
-    if mode == "local":
-        model_name = await config_cache.get("embedding_local_model", "BAAI/bge-small-zh-v1.5") or "BAAI/bge-small-zh-v1.5"
-        if "small" in model_name:
-            expected_dim = 512
-        elif "base" in model_name:
-            expected_dim = 768
-        else:
-            expected_dim = 512
-    else:
-        dim_str = await config_cache.get("embedding_dimensions", "1536")
-        expected_dim = int(dim_str) if dim_str else 1536
-
-    db_dim = await get_db_vector_dimensions(session)
-
-    # Auto-adjust dimensions if needed
-    if expected_dim != db_dim:
-        logger.info(f"自动调整向量维度: {db_dim} -> {expected_dim}")
-        try:
-            conn = await session.connection()
-            await conn.execute(text("DROP INDEX IF EXISTS idx_images_embedding"))
-            await conn.execute(text(f"""
-                ALTER TABLE images 
-                ALTER COLUMN embedding TYPE vector({expected_dim})
-                USING (ARRAY_FILL(0::float, ARRAY[{expected_dim}])::vector({expected_dim}))
-            """))
-            await conn.execute(text(f"""
-                CREATE INDEX idx_images_embedding ON public.images 
-                USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)
-            """))
-            await config_repository.set_value(session, "embedding_dimensions", str(expected_dim))
-            await session.commit()
-            await config_cache.refresh()
-            logger.info(f"向量维度调整完成: {expected_dim}")
-        except Exception as e:
-            await session.rollback()
-            logger.error(f"调整维度失败: {e}")
-            raise HTTPException(status_code=500, detail=f"调整维度失败: {e}")
-
-    # Force reload model to ensure we use the correct one matches config
-    embedding_service.reload_model()
-
+    """准备并启动全库向量重建，需管理员权限。"""
+    try:
+        expected_dim = await vector_rebuild_service.prepare(session)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=500, detail="准备向量重建失败，请检查数据库") from exc
     background_tasks.add_task(rebuild_vectors_task)
-
     return {"message": f"向量重建任务已启动 (维度: {expected_dim})"}
 
 
@@ -442,84 +368,5 @@ async def clear_vectors(
 
 
 async def rebuild_vectors_task():
-    """Background task: rebuild all image vectors."""
-    global rebuild_status
-
-    rebuild_status = {
-        "is_running": True,
-        "total": 0,
-        "processed": 0,
-        "failed": 0,
-        "message": "正在获取图片列表...",
-    }
-
-    try:
-        async with async_session_maker() as session:
-            # Get all images with tags
-            result = await session.execute(text("""
-                SELECT i.id, i.description,
-                       ARRAY(
-                           SELECT t.name FROM tags t
-                           JOIN image_tags it ON t.id = it.tag_id
-                           WHERE it.image_id = i.id AND t.level = 2
-                       ) as tags
-                FROM images i ORDER BY i.id
-            """))
-            images = result.fetchall()
-
-        rebuild_status["total"] = len(images)
-        rebuild_status["message"] = f"开始重建 {len(images)} 张图片的向量..."
-
-        logger.info(f"开始重建向量: 共 {len(images)} 张图片")
-
-        for image_id, description, tags in images:
-            try:
-                # Skip if no description and no tags
-                if not description and not tags:
-                    logger.info(f"跳过图片 {image_id}: 无描述和标签")
-                    rebuild_status["processed"] += 1
-                    rebuild_status["message"] = (
-                        f"已处理 {rebuild_status['processed']}/{rebuild_status['total']}"
-                    )
-                    continue
-
-                # Generate embedding
-                embedding = await embedding_service.get_embedding_combined(
-                    description or "",
-                    tags or [],
-                )
-
-                # Update database
-                # Update database
-                async with async_session_maker() as session:
-                    image_model = await image_repository.get_by_id(session, image_id)
-                    if image_model:
-                        await image_repository.update_image(
-                            session, image_model, embedding=embedding
-                        )
-                    await session.commit()
-
-                rebuild_status["processed"] += 1
-                rebuild_status["message"] = (
-                    f"已处理 {rebuild_status['processed']}/{rebuild_status['total']}"
-                )
-
-            except Exception as e:
-                logger.error(f"重建图片 {image_id} 向量失败: {e}")
-                rebuild_status["failed"] += 1
-
-        rebuild_status["is_running"] = False
-        rebuild_status["message"] = (
-            f"重建完成: 成功 {rebuild_status['processed']}, "
-            f"失败 {rebuild_status['failed']}"
-        )
-
-        logger.info(
-            f"向量重建完成: 成功 {rebuild_status['processed']}, "
-            f"失败 {rebuild_status['failed']}"
-        )
-
-    except Exception as e:
-        logger.error(f"重建向量任务失败: {e}")
-        rebuild_status["is_running"] = False
-        rebuild_status["message"] = f"重建失败: {e}"
+    """后台运行由 Service 管理的重建任务。"""
+    await vector_rebuild_service.run()

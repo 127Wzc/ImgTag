@@ -33,6 +33,51 @@ class ImageRepository(BaseRepository[Image]):
 
     model = Image
 
+    async def get_embedding_dimensions(self, session: AsyncSession) -> int:
+        """读取 pgvector 列的实际维度。"""
+        result = await session.execute(text("""
+            SELECT atttypmod FROM pg_attribute
+            WHERE attrelid = 'images'::regclass AND attname = 'embedding'
+        """))
+        dimensions = result.scalar_one_or_none()
+        return dimensions if dimensions and dimensions > 0 else 1536
+
+    async def resize_embedding_dimensions(self, session: AsyncSession, dimensions: int) -> None:
+        """在调用方事务内调整向量列和索引。"""
+        if dimensions <= 0:
+            raise ValueError("向量维度必须大于 0")
+        await session.execute(text("DROP INDEX IF EXISTS idx_images_embedding"))
+        await session.execute(text(f"""
+            ALTER TABLE images ALTER COLUMN embedding TYPE vector({dimensions})
+            USING (ARRAY_FILL(0::float, ARRAY[{dimensions}])::vector({dimensions}))
+        """))
+        await session.execute(text("""
+            CREATE INDEX idx_images_embedding ON public.images
+            USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)
+        """))
+
+    async def list_embedding_inputs(self, session: AsyncSession) -> Sequence[Any]:
+        """一次读取重建所需描述和二级标签，避免逐张加载关联。"""
+        result = await session.execute(text("""
+            SELECT i.id, i.description,
+                   ARRAY(
+                       SELECT t.name FROM tags t
+                       JOIN image_tags it ON t.id = it.tag_id
+                       WHERE it.image_id = i.id AND t.level = 2
+                   ) AS tags
+            FROM images i ORDER BY i.id
+        """))
+        return result.fetchall()
+
+    async def set_embedding(self, session: AsyncSession, image_id: int, embedding: list[float]) -> bool:
+        """写入单张图片向量，图片被删除时返回 False。"""
+        result = await session.execute(
+            update(Image).where(Image.id == image_id).values(
+                embedding=embedding, updated_at=func.now()
+            )
+        )
+        return result.rowcount > 0
+
     async def get_by_id_for_update(
         self,
         session: AsyncSession,
