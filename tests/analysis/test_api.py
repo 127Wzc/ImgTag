@@ -38,6 +38,29 @@ async def test_queue_api_preserves_custom_field_and_checks_permission_before_enq
         enqueue.assert_not_awaited()
 
 
+@pytest.mark.parametrize('single', [False, True])
+@pytest.mark.parametrize('value', ['', '0', '4', '2.5', 'invalid'])
+async def test_gif_frame_config_rejects_invalid_values_before_writing(monkeypatch, single, value):
+    from imgtag.api.endpoints import config as config_api
+
+    app = FastAPI()
+    app.include_router(config_api.router, prefix='/config')
+    app.dependency_overrides[get_current_user] = lambda: {'id': 1, 'role': 'admin'}
+    app.dependency_overrides[config_api.get_async_session] = lambda: object()
+    batch_write = AsyncMock()
+    single_write = AsyncMock()
+    monkeypatch.setattr(config_api.config_repository, 'update_multiple', batch_write)
+    monkeypatch.setattr(config_api.config_repository, 'set_value', single_write)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        if single:
+            response = await client.put('/config/vision_gif_frame_count', params={'value': value})
+        else:
+            response = await client.put('/config/', json={'configs': {'vision_gif_frame_count': value}})
+    assert response.status_code == 400
+    batch_write.assert_not_awaited()
+    single_write.assert_not_awaited()
+
+
 @pytest.mark.parametrize('model', [ImageCreateByUrl, external.ExternalImageCreate, mcp.AddImageArguments])
 async def test_url_and_mcp_upload_inputs_support_bounded_optional_instructions(model):
     assert model(image_url='https://example.com/a.png', analysis_instructions='描述图中文字').analysis_instructions == '描述图中文字'

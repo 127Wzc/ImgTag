@@ -8,7 +8,6 @@
 """
 
 import asyncio
-import io
 import uuid
 from typing import Any
 
@@ -513,6 +512,7 @@ class TaskQueueService:
             
             # 确定 MIME 类型
             mime_type = get_mime_type(file_ext)
+            analysis_content, analysis_mime_type = file_content, mime_type
             
             # GIF 转 PNG
             if file_ext == "gif" and convert_gif:
@@ -544,8 +544,8 @@ class TaskQueueService:
 
             # 分类与主体资料分别传递，由视觉服务组装请求。
             analysis = await vision_service.analyze_image_base64(
-                file_content,
-                mime_type,
+                analysis_content,
+                analysis_mime_type,
                 category_id=image.get("category_id"),
                 subject_contexts=subject_contexts,
                 analysis_instructions=analysis_instructions,
@@ -631,25 +631,9 @@ class TaskQueueService:
         await self._mark_task_failed(task_id, f"未调用视觉模型: {reason}")
 
     async def _convert_gif_to_png(self, content: bytes) -> tuple[bytes, str]:
-        """将 GIF 转换为 PNG"""
-        def _convert(data: bytes) -> bytes:
-            from PIL import Image as PILImage
-            img = PILImage.open(io.BytesIO(data))
-            if hasattr(img, 'n_frames') and img.n_frames > 1:
-                img.seek(0)
-            if img.mode in ('RGBA', 'LA', 'P'):
-                img = img.convert('RGB')
-            output = io.BytesIO()
-            img.save(output, format='PNG')
-            return output.getvalue()
-        
-        try:
-            converted = await asyncio.to_thread(_convert, content)
-            logger.info("GIF 已转换为 PNG")
-            return converted, "image/png"
-        except Exception as e:
-            logger.warning(f"GIF 转换失败: {e}，使用原始格式")
-            return content, "image/gif"
+        """主体匹配使用首帧；视觉分析保留原 GIF 以便等分取帧。"""
+        frames = await asyncio.to_thread(vision_service.sample_gif_frames, content, 1)
+        return frames[0][0], "image/png"
     
     async def _send_callback(
         self,

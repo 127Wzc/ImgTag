@@ -47,7 +47,7 @@ def test_positive_reference_default_and_trusted_identity_survives_uncertainty():
     assert report['checks'][0]['status'] == 'supported'
     prompt = VisionService._subject_prompt([{'subject_id':1, 'name':'菲比', 'status':'confirmed'}])
     from imgtag.core.config_defaults import DEFAULT_CONFIG
-    assert '不必每次重新证明身份' in DEFAULT_CONFIG['vision_prompt']
+    assert 'status=confirmed 采用已确认身份，默认核实为 supported' in DEFAULT_CONFIG['vision_prompt']
     assert 'subject_checks' in prompt
 
 

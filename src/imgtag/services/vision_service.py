@@ -24,6 +24,7 @@ from PIL import Image
 from imgtag.core.analysis_instructions import normalize_analysis_instructions
 from imgtag.core.config_cache import config_cache
 from imgtag.core.config_defaults import DEFAULT_CONFIG
+from imgtag.core.gif_analysis import DEFAULT_GIF_FRAME_COUNT, GIF_FRAME_COUNT_KEY, parse_gif_frame_count
 from imgtag.core.logging_config import get_logger
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import tag_repository
@@ -110,6 +111,30 @@ class VisionService:
 
         return api_base, api_key, model
     
+    def sample_gif_frames(self, content: bytes, count: int) -> list[tuple[bytes, int]]:
+        """按帧序号等分提取静态帧，由 Pillow 合成透明与局部更新帧。"""
+        count = parse_gif_frame_count(str(count))
+        try:
+            with Image.open(io.BytesIO(content)) as image:
+                if image.format != "GIF":
+                    raise ValueError("图片内容不是 GIF")
+                total = image.n_frames
+                count = min(count, total)
+                indices = [0] if count == 1 else [round(index * (total - 1) / (count - 1)) for index in range(count)]
+                frames = []
+                for frame_index in indices:
+                    image.seek(frame_index)
+                    frame = image.convert("RGBA")
+                    background = Image.new("RGB", frame.size, "white")
+                    background.paste(frame, mask=frame.getchannel("A"))
+                    output = io.BytesIO()
+                    background.save(output, format="PNG")
+                    frames.append((output.getvalue(), frame_index))
+                return frames
+        except (OSError, EOFError, ValueError, Image.DecompressionBombError) as exc:
+            logger.error("GIF 取帧失败: %s", exc)
+            raise ValueError("GIF 取帧失败，请检查图片是否完整") from exc
+
     def _compress_image(self, image_data: bytes, max_size: int = 1024 * 1024, max_dimension: int = 2048) -> tuple:
         """压缩图片到指定大小以内（优化识别效果）
         
@@ -266,7 +291,7 @@ class VisionService:
         # 动态数据及机器核实协议保留在此；可编辑的分析规则统一存放于 vision_prompt。
         protocol = (
             "\n在原 JSON 中增加 subject_observations 和 subject_checks，description 继续遵守分类格式。"
-            "subject_observations:[{subject_id:已提供的ID或null,position:位置,appearance:可见外观动作,multiple:是否多个}]；"
+            "subject_observations:[{subject_id:已提供的ID或null,position:位置,appearance:可见外观动作且不含姓名,multiple:同一画面是否有多个该主体}]；"
             "subject_checks:[{subject_id:已提供的ID,status:supported或uncertain或conflict,evidence:核实依据}]。"
             "每份主体资料返回一条核实结果，观察可按位置返回多条。"
             if contexts else ""
@@ -392,14 +417,21 @@ class VisionService:
         max_image_size_kb = int(max_size_str) if max_size_str else 2048
         max_image_size = max_image_size_kb * 1024  # 转为字节
         
-        # 图片过大时自动压缩
-        if original_size > max_image_size:
-            logger.info(f"图片过大 ({original_size/1024:.1f} KB > {max_image_size_kb} KB)，正在压缩...")
-            # 图片压缩是 CPU 密集型操作，使用线程池避免阻塞
-            image_data, mime_type = await asyncio.to_thread(
-                self._compress_image, image_data, max_image_size
-            )
-            logger.info(f"压缩后: {len(image_data)/1024:.1f} KB, 类型: {mime_type}")
+        gif_frames = []
+        if mime_type == "image/gif" and (await config_cache.get("vision_convert_gif", "true", fresh=fresh) or "true").lower() == "true":
+            try:
+                frame_count = parse_gif_frame_count(await config_cache.get(GIF_FRAME_COUNT_KEY, "3", fresh=fresh))
+            except ValueError as exc:
+                logger.warning("%s，使用默认值 %s", exc, DEFAULT_GIF_FRAME_COUNT)
+                frame_count = DEFAULT_GIF_FRAME_COUNT
+            gif_frames = await asyncio.to_thread(self.sample_gif_frames, image_data, frame_count)
+        inputs = [(data, "image/png") for data, _ in gif_frames] if gif_frames else [(image_data, mime_type)]
+        prepared_images = []
+        for data, content_type in inputs:
+            if len(data) > max_image_size:
+                data, content_type = await asyncio.to_thread(self._compress_image, data, max_image_size)
+            prepared_images.append((data, content_type))
+        image_data, mime_type = prepared_images[0]
         
         try:
             # 使用异步方法确保能从数据库读取配置
@@ -411,8 +443,9 @@ class VisionService:
             if not api_key:
                 raise ValueError("视觉模型 API 密钥未配置")
             
-            base64_image = base64.b64encode(image_data).decode("utf-8")
-            data_url = f"data:{mime_type};base64,{base64_image}"
+            image_parts = [{"type": "image_url", "image_url": {
+                "url": f"data:{content_type};base64,{base64.b64encode(data).decode('utf-8')}"
+            }} for data, content_type in prepared_images]
             
             # 完整请求 URL
             request_url = f"{api_base.rstrip('/')}/chat/completions"
@@ -431,12 +464,29 @@ class VisionService:
                     "请将以下要求与全局、分类规则共同执行，保持现有输出字段，并以图片可见事实为准：\n"
                     + analysis_instructions
                 )})
+            if len(gif_frames) > 1:
+                text_parts.append({"type": "text", "text": (
+                    "本次分析只对应一个资产，以下静态图来自同一个 GIF，是该资产的不同状态，仅用于辅助识别；"
+                    "各帧按原动画帧序号等分取样并按播放顺序排列，"
+                    "请结合各帧描述可见动作、表情与文字的变化，输出一份综合分析结果。"
+                    "不要逐帧输出独立结果，也不要将不同帧的动作写成同时发生；不推测未采样到的过程。"
+                    "主体数量以单帧同时可见的形象为准，不跨帧累计；同一主体跨帧出现不代表有多个主体，"
+                    "仅同一帧同时出现多个该主体才视为多个。"
+                    "变化应标明先后，description 仍遵守分类格式。"
+                    + ("subject_checks 按主体身份返回一次，subject_observations 可综合各帧；"
+                       "仅同一帧同时出现多个该主体时才设置 multiple=true。" if contexts else "")
+                )})
             metadata = {
                 **request_context, "analysis_instructions": analysis_instructions, "model": model, "category_id": category_id,
                 "subject_ids": [c["subject_id"] for c in contexts if "subject_id" in c],
                 "input_messages": [{"role": "user", "content": text_parts}],
                 "image": {"mime_type": mime_type, "bytes": len(image_data)},
             }
+            if gif_frames:
+                metadata["gif_frames"] = [
+                    {"frame_index": source[1], "mime_type": prepared[1], "bytes": len(prepared[0])}
+                    for source, prepared in zip(gif_frames, prepared_images)
+                ]
             # 一条结构化日志包含完整实际文本，避免并发交错；不包含密钥与图片 Base64。
             logger.info("视觉分析输入: %s", json.dumps(metadata, ensure_ascii=False))
             if input_observer is not None:
@@ -457,7 +507,7 @@ class VisionService:
                                 "role": "user",
                                 "content": [
                                     *text_parts,
-                                    {"type": "image_url", "image_url": {"url": data_url}}
+                                    *image_parts,
                                 ]
                             }
                         ],

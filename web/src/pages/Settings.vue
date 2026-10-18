@@ -72,7 +72,12 @@ const configDefinitions: Record<string, ConfigDef[]> = {
     { key: 'vision_model', label: '模型名称', type: 'combobox', description: '可选择或手动输入' },
     { key: 'vision_prompt', label: '全局分析提示词（含主体融合规则）', type: 'textarea', description: '统一管理通用分析和主体资料使用规则；description 的具体结构优先遵守标签分类提示词。表情包四段格式在标签管理的表情包分类中维护。' },
     { key: 'vision_allowed_extensions', label: '允许的扩展名', type: 'text' },
-    { key: 'vision_convert_gif', label: 'GIF 转静态图', type: 'boolean' },
+    { key: 'vision_convert_gif', label: 'GIF 转静态图', type: 'boolean', description: '提取静态帧辅助分析，保留 GIF 原文件' },
+    { key: 'vision_gif_frame_count', label: 'GIF 取帧数量', type: 'select', options: [
+      { value: '1', label: '1 帧（首帧）' },
+      { value: '2', label: '2 帧（首尾）' },
+      { value: '3', label: '3 帧（首、中、尾）' },
+    ], showWhen: { key: 'vision_convert_gif', value: 'true' }, description: '默认 3 帧，按帧序号等分取样，在一次请求中综合分析；不足时使用实际帧数' },
     { key: 'subject_extraction_max_images', label: '主体提炼图片上限', type: 'number', min: 1, max: 3, step: 1, description: '默认3张，可设1–3张' },
     { key: 'vision_max_image_size', label: '压缩阈值 (KB)', type: 'number' },
     { key: 'queue_max_workers', label: '最大并发数', type: 'number', description: '同时分析多少张图片' },
@@ -221,7 +226,7 @@ async function fetchConfigs() {
   loading.value = true
   try {
     const { data } = await apiClient.get('/config/')
-    configs.value = { subject_extraction_max_images: '3', ...data }
+    configs.value = { subject_extraction_max_images: '3', vision_gif_frame_count: '3', ...data }
     originalConfigs.value = { ...configs.value }
   } catch (e) {
     console.error('Failed to load configs', e)

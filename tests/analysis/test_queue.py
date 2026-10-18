@@ -1,19 +1,72 @@
 """重分析、队列合并和主体上下文的回归测试。"""
 
 import asyncio
+import base64
+import io
 import json
 import importlib
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
+from PIL import Image
 from sqlalchemy.dialects import postgresql
 
 from imgtag.services import storage_service, embedding_service, vision_service
 from imgtag.services.task_queue import task_queue
 from imgtag.services.subject_context_service import subject_context_service
 from imgtag.services.vision_service import ImageAnalysisResult, VisionService
+from imgtag.core.gif_analysis import parse_gif_frame_count
+
+
+def make_gif(frame_count):
+    frames = [Image.new('RGB', (12, 12), (index * 25, 50, 100)) for index in range(frame_count)]
+    output = io.BytesIO()
+    frames[0].save(output, format='GIF', save_all=True, append_images=frames[1:], duration=100, loop=0, disposal=2)
+    return output.getvalue()
+
+
+@pytest.mark.parametrize('total', [1, 2, 3, 8])
+@pytest.mark.parametrize('count', [1, 2, 3])
+def test_gif_sampling_is_even_ordered_and_handles_short_animations(total, count):
+    frames = VisionService().sample_gif_frames(make_gif(total), count)
+    expected_count = min(total, count)
+    indices = [0] if expected_count == 1 else [round(index * (total - 1) / (expected_count - 1)) for index in range(expected_count)]
+    assert [index for _, index in frames] == indices
+    for data, index in frames:
+        with Image.open(io.BytesIO(data)) as frame:
+            assert frame.format == 'PNG'
+            assert frame.getpixel((0, 0)) == (index * 25, 50, 100)
+
+
+def test_gif_transparency_and_disposal_are_composited():
+    frames = []
+    for index in range(3):
+        frame = Image.new('P', (12, 12), 0)
+        frame.putpalette([0, 0, 0, 255, 0, 0] + [0] * 762)
+        frame.putpixel((index + 1, 1), 1)
+        frames.append(frame)
+    output = io.BytesIO()
+    frames[0].save(output, format='GIF', save_all=True, append_images=frames[1:], duration=100,
+        transparency=0, disposal=2, optimize=False)
+    for data, index in VisionService().sample_gif_frames(output.getvalue(), 3):
+        with Image.open(io.BytesIO(data)) as frame:
+            assert frame.getpixel((0, 0)) == (255, 255, 255)
+            assert frame.getpixel((index + 1, 1)) == (255, 0, 0)
+            if index:
+                assert frame.getpixel((index, 1)) == (255, 255, 255)
+
+
+@pytest.mark.parametrize('invalid', ['', '0', '4', '-1', '1.5', 'bad'])
+def test_gif_frame_count_rejects_invalid_configuration(invalid):
+    with pytest.raises(ValueError, match='1至3'):
+        parse_gif_frame_count(invalid)
+
+
+def test_corrupt_gif_fails_instead_of_sending_original_to_model():
+    with pytest.raises(ValueError, match='GIF 取帧失败'):
+        VisionService().sample_gif_frames(b'GIF89a-invalid', 3)
 
 
 class Session:
@@ -267,6 +320,98 @@ async def test_request_separates_category_and_subject_logs_full_input(vision_tra
     assert "修改后的全局规则" in requests[1]["messages"][0]["content"][0]["text"]
 
 
+@pytest.mark.parametrize('configured,expected', [(None, [0, 4, 7]), ('1', [0]), ('2', [0, 7]), ('3', [0, 4, 7]), ('invalid', [0, 4, 7])])
+async def test_gif_analysis_sends_selected_frames_in_one_request(vision_transport, configured, expected, caplog):
+    requests, _, values = vision_transport
+    if configured is not None:
+        values['vision_gif_frame_count'] = configured
+    observed = AsyncMock()
+    result = await VisionService().analyze_image_base64(make_gif(8), 'image/gif',
+        analysis_instructions='关注表情变化', input_observer=observed)
+    assert len(requests) == 1
+    parts = requests[0]['messages'][0]['content']
+    images = [part for part in parts if part['type'] == 'image_url']
+    assert len(images) == len(expected)
+    for part, index in zip(images, expected):
+        prefix, encoded = part['image_url']['url'].split(',', 1)
+        assert prefix == 'data:image/png;base64'
+        with Image.open(io.BytesIO(base64.b64decode(encoded))) as frame:
+            assert frame.getpixel((0, 0)) == (index * 25, 50, 100)
+    text = '\n'.join(part['text'] for part in parts if part['type'] == 'text')
+    assert '关注表情变化' in text
+    assert ('同一个 GIF' in text) is (len(expected) > 1)
+    if len(expected) > 1:
+        assert '本次分析只对应一个资产' in text
+        assert '该资产的不同状态，仅用于辅助识别' in text
+        assert '不跨帧累计' in text
+        assert '仅同一帧同时出现多个该主体才视为多个' in text
+        assert '不要将不同帧的动作写成同时发生' in text
+        assert 'description 仍遵守分类格式' in text
+        assert 'subject_checks' not in text
+        assert 'multiple=true' not in text
+    assert [frame['frame_index'] for frame in result.request_metadata['gif_frames']] == expected
+    assert observed.await_args.args[0] == result.request_metadata
+    assert 'data:image' not in caplog.text
+
+
+async def test_gif_frames_are_compressed_individually(vision_transport, monkeypatch):
+    requests, _, values = vision_transport
+    values['vision_max_image_size'] = '1'
+    service = VisionService()
+    monkeypatch.setattr(service, 'sample_gif_frames', Mock(return_value=[(b'x' * 2048, index) for index in range(3)]))
+    compress = Mock(return_value=(b'compressed', 'image/jpeg'))
+    monkeypatch.setattr(service, '_compress_image', compress)
+    await service.analyze_image_base64(b'GIF', 'image/gif')
+    assert compress.call_count == 3
+    assert all(call.args[1] == 1024 for call in compress.call_args_list)
+    images = [part for part in requests[0]['messages'][0]['content'] if part['type'] == 'image_url']
+    assert len(images) == 3
+    assert all(part['image_url']['url'].startswith('data:image/jpeg;base64,') for part in images)
+
+
+async def test_gif_subject_protocol_keeps_one_identity_across_frames(vision_transport):
+    requests, _, _ = vision_transport
+    await VisionService().analyze_image_base64(make_gif(3), 'image/gif', subject_contexts=[
+        {'subject_id': 12, 'name': '小白', 'status': 'confirmed'},
+    ])
+    parts = requests[0]['messages'][0]['content']
+    assert len([part for part in parts if part['type'] == 'image_url']) == 3
+    protocol = parts[1]['text']
+    assert 'appearance:可见外观动作且不含姓名' in protocol
+    assert 'multiple:同一画面是否有多个该主体' in protocol
+    assert '每份主体资料返回一条核实结果' in protocol
+    instructions = '\n'.join(part['text'] for part in parts if part['type'] == 'text')
+    assert 'subject_checks 按主体身份返回一次' in instructions
+    assert '仅同一帧同时出现多个该主体时才设置 multiple=true' in instructions
+
+
+async def test_queue_preserves_gif_for_vision_but_matches_subject_on_first_frame(queue, processing, monkeypatch):
+    vision = processing[0]
+    content = make_gif(8)
+    queue_module = importlib.import_module('imgtag.services.task_queue')
+    queue_module.image_repository.get_with_tags.return_value.file_type = 'gif'
+    monkeypatch.setattr(storage_service, 'get_file_content', AsyncMock(return_value=content))
+    await queue._process_task(SimpleNamespace(id='task', type='analyze_image', payload={'image_id': 1, 'force_analyze': True}), 0)
+    assert vision.await_args.args == (content, 'image/gif')
+    memory_input = queue._resolve_subject_memory.await_args.kwargs
+    assert memory_input['mime_type'] == 'image/png'
+    with Image.open(io.BytesIO(memory_input['file_content'])) as frame:
+        assert frame.getpixel((0, 0)) == (0, 50, 100)
+
+
+async def test_disabled_gif_conversion_skips_queue_analysis(queue, processing, monkeypatch):
+    queue_module = importlib.import_module('imgtag.services.task_queue')
+    queue_module.image_repository.get_with_tags.return_value.file_type = 'gif'
+    monkeypatch.setattr(queue_module.config_repository, 'get_value', AsyncMock(
+        side_effect=lambda session, key, default: 'false' if key == 'vision_convert_gif' else default))
+    skip = AsyncMock()
+    monkeypatch.setattr(queue, '_skip_task', skip)
+    await queue._process_task(SimpleNamespace(id='task', type='analyze_image', payload={'image_id': 1, 'force_analyze': True}), 0)
+    skip.assert_awaited_once()
+    processing[0].assert_not_awaited()
+    storage_service.get_file_content.assert_not_awaited()
+
+
 async def test_concurrent_images_do_not_share_subject_context(vision_transport):
     requests, _, _ = vision_transport
     service = VisionService()
@@ -433,6 +578,8 @@ async def test_default_prompt_keeps_meme_format_and_manages_subject_rules_global
         subject_contexts=[{'subject_id': 1, 'name': '菲比', 'status': 'confirmed'}])
     text = requests[0]['messages'][0]['content']
     assert DEFAULT_CONFIG['vision_prompt'] in text[0]['text']
+    assert '每次分析只对应一份图片资产' in text[0]['text']
+    assert '一个资产中可以包含多个主体' in text[0]['text']
     assert text[0]['text'].endswith(category)
     assert '自然融合到对应的主体段' in text[0]['text']
     assert '分类提示词负责 description 的具体结构' in text[0]['text']
@@ -450,9 +597,8 @@ def test_prompt_migration_preserves_custom_config_and_matches_defaults(monkeypat
     from pathlib import Path
     import runpy
     from sqlalchemy import create_engine, text
-    from imgtag.core.config_defaults import SUBJECT_ANALYSIS_RULES, DEFAULT_CONFIG
+    from imgtag.core.config_defaults import DEFAULT_CONFIG
     migration = runpy.run_path(str(Path(__file__).parents[2] / 'src/imgtag/alembic/versions/0007_subject_workflow.py'))
-    assert migration['RULES'] == SUBJECT_ANALYSIS_RULES
     engine = create_engine('sqlite://')
     with engine.begin() as connection:
         connection.execute(text('CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL)'))
@@ -462,7 +608,7 @@ def test_prompt_migration_preserves_custom_config_and_matches_defaults(monkeypat
         monkeypatch.setattr(migration['op'], 'execute', connection.execute)
         migration['update_default_prompt']()
         values = dict(connection.execute(text('SELECT key, value FROM config')).all())
-        assert values['vision_prompt'] == (DEFAULT_CONFIG['vision_prompt'] if saved == 'legacy' else original)
+        assert values['vision_prompt'] == (migration['LEGACY_VISION_PROMPT'] + '\n\n' + migration['RULES'] if saved == 'legacy' else original)
         assert values['vision_model'] == 'test-model'
         migration['update_default_prompt']()
         assert connection.execute(text("SELECT value FROM config WHERE key='vision_prompt'")).scalar_one() == values['vision_prompt']

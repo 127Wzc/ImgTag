@@ -16,6 +16,7 @@ from imgtag.api.endpoints.auth import require_admin
 from imgtag.core.config_cache import config_cache
 from imgtag.core.config_defaults import DEFAULT_CONFIG, DEFAULT_CATEGORY_PROMPTS
 from imgtag.core.logging_config import get_logger
+from imgtag.core.gif_analysis import validate_gif_analysis_config
 from imgtag.core.subject_extraction_limits import validate_subject_extraction_config
 from imgtag.db.database import get_async_session
 from imgtag.db.repositories import config_repository
@@ -94,6 +95,7 @@ async def update_configs(
     logger.info(f"更新配置: {list(request.configs.keys())}")
     try:
         validate_subject_extraction_config(request.configs)
+        validate_gif_analysis_config(request.configs)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
     
@@ -144,6 +146,7 @@ async def update_single_config(
     logger.info(f"更新单个配置: {key}")
     try:
         validate_subject_extraction_config({key: value})
+        validate_gif_analysis_config({key: value})
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
     

@@ -124,6 +124,8 @@ curl "http://your-domain/api/v1/external/images/random?api_key=YOUR_KEY&tags=风
 > [!TIP]
 > 同时提供有效的 `tags` 和 `description` 且未填写补充要求时会跳过 AI 分析，只生成向量嵌入。`auto_analyze=true` 且补充要求非空时仍调用模型；`auto_analyze=false` 始终不调用模型。补充要求仅用于本次分析，不修改全局提示词或主体资料。
 
+上传的 `tags` 以人工来源保存。新图片实际进入视觉分析时，若标签唯一命中已启用主体的名称或别名，且没有当前主体关联或显式选择记录，可自动建立 `source=tag、state=confirmed` 的关联；这是标签驱动的信任，不是先经过视觉验证。跳过视觉分析时不触发此流程。字段与完整条件见[主体资料与状态说明](subject-extraction.md#输入状态如何产生)。
+
 #### 示例
 
 ```bash
