@@ -1,6 +1,7 @@
 """任务队列主体记忆判定层测试。"""
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -12,10 +13,18 @@ class _FakeSessionCtx:
         async def _commit():
             return None
 
-        return SimpleNamespace(commit=_commit)
+        return SimpleNamespace(commit=_commit, flush=_commit)
 
     async def __aexit__(self, *args):
         return False
+
+
+@pytest.fixture(autouse=True)
+def repo_defaults(monkeypatch):
+    monkeypatch.setattr("imgtag.services.task_queue.image_repository.get_by_id_for_update", AsyncMock(return_value=SimpleNamespace(id=1)))
+    monkeypatch.setattr("imgtag.services.task_queue.image_repository.get_image_tags_with_source", AsyncMock(return_value=[]))
+    monkeypatch.setattr("imgtag.services.task_queue.subject_repository.list_matching_tags", AsyncMock(return_value=[]))
+    monkeypatch.setattr("imgtag.services.task_queue.subject_repository.get_by_id", AsyncMock(return_value=None))
 
 
 @pytest.mark.asyncio
@@ -29,21 +38,21 @@ async def test_confirmed_manual_subject_short_circuits_matcher(monkeypatch) -> N
         subject_id=3,
         source="manual",
         state="confirmed",
-        confidence=None,
-        subject=SimpleNamespace(name="张三", is_active=True),
+        confidence=None, updated_at="v1",
+        subject=SimpleNamespace(id=3, name="张三", is_active=True, aliases=["阿三"], description="人物定义", updated_at="v1"),
     )
     match_calls: list = []
 
     async def fake_get_primary(session, image_id):
         _ = session, image_id
-        return confirmed
+        return [confirmed]
 
     async def fake_match(**kwargs):
         match_calls.append(kwargs)
         return {"status": "no_match", "subject_id": None, "confidence": None}
 
     monkeypatch.setattr(
-        "imgtag.db.repositories.image_subject_repository.get_primary", fake_get_primary
+        "imgtag.db.repositories.image_subject_repository.get_current", fake_get_primary
     )
     monkeypatch.setattr(
         "imgtag.services.subject_memory_service.subject_memory_service.match_primary_subject",
@@ -56,7 +65,10 @@ async def test_confirmed_manual_subject_short_circuits_matcher(monkeypatch) -> N
         mime_type="image/jpeg",
     )
 
-    assert hints == ["已确认主体：张三。请保持主体一致，不要猜测其他主体。"]
+    assert hints[0]["name"] == "张三"
+    assert hints[0]["definition"] == "人物定义"
+    assert hints[0]["aliases"] == ["阿三"]
+    assert hints[0]["status"] == "confirmed"
     assert match_calls == []
 
 
@@ -69,7 +81,7 @@ async def test_low_conf_skips_when_pending_suggestion_exists(monkeypatch) -> Non
 
     async def fake_get_primary(session, image_id):
         _ = session, image_id
-        return None
+        return []
 
     async def fake_match(**kwargs):
         _ = kwargs
@@ -94,7 +106,7 @@ async def test_low_conf_skips_when_pending_suggestion_exists(monkeypatch) -> Non
         return SimpleNamespace(id=1)
 
     monkeypatch.setattr(
-        "imgtag.db.repositories.image_subject_repository.get_primary", fake_get_primary
+        "imgtag.db.repositories.image_subject_repository.get_current", fake_get_primary
     )
     monkeypatch.setattr(
         "imgtag.services.subject_memory_service.subject_memory_service.match_primary_subject",
@@ -131,10 +143,9 @@ async def test_add_tasks_force_analyze_flag(monkeypatch) -> None:
     created_payloads: list[dict] = []
     pending_calls: list[str] = []
 
-    async def fake_get_pending(session, image_ids, task_type):
-        _ = session, image_ids
+    async def fake_get_pending(session, image_id, task_type):
         pending_calls.append(task_type)
-        return set()
+        return []
 
     async def fake_create_task(session, *, task_id, task_type, payload):
         _ = session, task_id, task_type
@@ -144,7 +155,7 @@ async def test_add_tasks_force_analyze_flag(monkeypatch) -> None:
     monkeypatch.setattr(
         "imgtag.services.task_queue.task_repository.create_task", fake_create_task
     )
-    monkeypatch.setattr(task_queue, "_get_pending_image_ids", fake_get_pending)
+    monkeypatch.setattr("imgtag.services.task_queue.task_repository.list_active_for_image", fake_get_pending)
 
     added = await task_queue.add_tasks([101], force_analyze=True)
     assert added == 1

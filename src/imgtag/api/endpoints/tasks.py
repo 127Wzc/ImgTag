@@ -30,10 +30,12 @@ router = APIRouter()
 async def get_tasks(
     page: int = Query(1, ge=1, description="页码 (从 1 开始)"),
     size: int = Query(50, ge=1, le=100, description="每页数量"),
-    status: str = Query(None, description="任务状态筛选")
+    status: str = Query(None, description="任务状态筛选"),
+    user: Dict = Depends(get_current_user),
 ):
     """获取任务列表"""
-    result = await task_service.get_tasks(size, (page - 1) * size, status)
+    result = await task_service.get_tasks(size, (page - 1) * size, status,
+                                          include_extraction=user.get("role") == "admin")
     # 使用 PaginatedResponse 格式化响应（data 字段而非 tasks）
     return PaginatedResponse.create(
         items=result["tasks"],
@@ -44,11 +46,13 @@ async def get_tasks(
 
 
 @router.get("/{task_id}", response_model=Task)
-async def get_task(task_id: str):
+async def get_task(task_id: str, user: Dict = Depends(get_current_user)):
     """获取任务详情"""
     task = await task_service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    if task["type"] == "extract_subject" and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="主体提炼任务仅管理员可查看")
     return task
 
 
@@ -111,6 +115,11 @@ async def retry_task(
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     
+    if task.type == "extract_subject":
+        if user.get("role") != "admin":
+            raise HTTPException(403, "主体提炼任务仅管理员可操作")
+        raise HTTPException(400, "请在主体管理中重新选择参考图后提炼")
+
     # 检查任务类型是否支持重试
     if task.type not in RETRYABLE_TASK_TYPES:
         raise HTTPException(

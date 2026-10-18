@@ -72,9 +72,11 @@ from imgtag.schemas import (
     SuggestSubjectRequest,
 )
 from imgtag.services import embedding_service, storage_service, upload_service
+from imgtag.services.analysis_review_service import analysis_review_service
 from imgtag.services.image_update_service import image_update_service
 from imgtag.services.suggestion_service import suggestion_service
 from imgtag.services.subject_assignment_service import subject_assignment_service
+from imgtag.schemas.subject import SetImageSubjectsRequest
 from imgtag.services.backup_service import trigger_backup_for_image
 from imgtag.services.task_queue import task_queue
 from imgtag.services.rebuild_vector_service import enqueue_rebuild_vector
@@ -149,6 +151,7 @@ async def _image_to_response(
         original_url=image.original_url,
         description=image.description,
         subjects=subjects or [],
+        subject_analysis=getattr(image, "subject_analysis", None),
         tags=tags_with_source or [],
         is_public=image.is_public,
         created_at=str(image.created_at) if image.created_at else None,
@@ -199,6 +202,7 @@ async def _images_to_responses(
             original_url=img.original_url,
             description=img.description,
             subjects=(subjects_map or {}).get(img.id, []),
+            subject_analysis=getattr(img, "subject_analysis", None),
             tags=tags_map.get(img.id, []),
             is_public=img.is_public,
             created_at=str(img.created_at) if img.created_at else None,
@@ -400,6 +404,7 @@ async def analyze_and_create_from_url(
                 width=width,
                 height=height,
                 auto_analyze=request.auto_analyze,
+                analysis_instructions=request.analysis_instructions,
                 log=logger,
             )
         )
@@ -434,6 +439,7 @@ async def _post_upload_process(
     height: int | None,
     auto_analyze: bool,
     log: logging.Logger,
+    analysis_instructions: str = "",
 ) -> None:
     """后台异步处理上传后的标签、分辨率、AI分析任务。
     
@@ -441,7 +447,8 @@ async def _post_upload_process(
     使用独立的数据库会话，确保事务独立性。
     
     标签处理逻辑：
-    - 若同时提供 tags 和 description，跳过 AI 分析，只生成向量
+    - 若同时提供 tags 和 description 且无补充要求，跳过 AI 分析，只生成向量
+    - 若填写本次补充要求且启用分析，仍强制调用模型
     - 若只提供 tags，AI 分析会补充标签并合并（优先用户标签）
     - 若都不提供，完整 AI 分析
     
@@ -500,12 +507,12 @@ async def _post_upload_process(
             has_valid_tags = bool([t for t in tags if t and t.strip()])
             has_valid_description = bool(description and description.strip())
             user_provided_full = has_valid_tags and has_valid_description
-            need_analysis = auto_analyze and not user_provided_full
+            need_analysis = auto_analyze and (bool(analysis_instructions.strip()) or not user_provided_full)
             
             if need_analysis:
                 # 加入 AI 分析任务队列
                 t4 = time.time()
-                await task_queue.add_tasks([image_id])
+                await task_queue.add_tasks([image_id], analysis_instructions=analysis_instructions)
                 perf_logger.debug(f"[Async] 添加AI分析任务耗时: {time.time() - t4:.4f}秒")
                 if not task_queue._running:
                     asyncio.create_task(task_queue.start_processing())
@@ -528,6 +535,7 @@ async def upload_and_analyze(
     file: UploadFile = File(..., description="上传的图片文件"),
     auto_analyze: bool = Form(default=True, description="是否自动分析"),
     skip_analyze: bool = Form(default=False, description="跳过分析，只上传"),
+    analysis_instructions: str = Form(default="", max_length=6000, description="仅本次图片分析的补充要求"),
     tags: str = Form(default="", description="手动标签，逗号分隔"),
     description: str = Form(default="", description="手动描述"),
     category_id: Optional[int] = Form(default=None, description="主分类ID"),
@@ -574,7 +582,7 @@ async def upload_and_analyze(
             has_valid_tags = bool([t for t in final_tags if t and t.strip()])
             has_valid_description = bool(final_description and final_description.strip())
             user_provided_full = has_valid_tags and has_valid_description
-            if not user_provided_full:
+            if analysis_instructions.strip() or not user_provided_full:
                 ensure_permission(user, Permission.AI_ANALYZE)
 
         file_content = await file.read()
@@ -700,6 +708,7 @@ async def upload_and_analyze(
                 width=width,
                 height=height,
                 auto_analyze=auto_analyze and not skip_analyze,
+                analysis_instructions=analysis_instructions,
                 log=logger,
             )
         )
@@ -1166,7 +1175,7 @@ async def update_image(
     logger.info(f"更新图像: ID {image_id}")
 
     try:
-        image = await image_repository.get_by_id(session, image_id)
+        image = await image_repository.get_by_id_for_update(session, image_id)
         if not image:
             raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
 
@@ -1271,6 +1280,10 @@ async def update_image(
             embedding_vector = await embedding_service.get_embedding_combined(
                 description, tag_names_for_embedding
             )
+
+        if has_desc_update and image_update.description != image.description:
+            await analysis_review_service.history(
+                session, image, await analysis_review_service.current(session, image_id))
 
         # Update image basic info
         await image_repository.update_image(
@@ -1411,20 +1424,45 @@ async def suggest_image_update(
         raise HTTPException(status_code=500, detail="提交修改建议失败，请稍后重试")
 
 
+@router.put("/{image_id}/subjects", response_model=dict[str, Any])
+async def set_image_subjects(
+    image_id: int, data: SetImageSubjectsRequest,
+    current_user: dict = Depends(require_admin), session: AsyncSession = Depends(get_async_session),
+):
+    image = await image_repository.get_by_id(session, image_id)
+    if image is None:
+        raise HTTPException(404, "图片不存在")
+    check_image_permission(image, current_user, "修改主体")
+    if data.reanalyze:
+        ensure_permission(current_user, Permission.AI_ANALYZE)
+    try:
+        assignments = await subject_assignment_service.assign_subjects(session, image_id=image_id,
+            subject_ids=data.subject_ids, primary_id=data.primary_subject_id, actor_id=current_user["id"])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if data.reanalyze:
+        await task_queue.add_tasks([image_id], force_analyze=True, session=session)
+    else:
+        await task_queue.add_tasks([image_id], task_type="rebuild_vector", session=session)
+    return {"assignments": assignments, "reanalyze_enqueued": data.reanalyze}
+
+
 @router.put("/{image_id}/subjects/primary", response_model=dict[str, Any])
 async def set_primary_subject(
     image_id: int,
     data: SetPrimarySubjectRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """上传者/管理员直接设置图片主主体。"""
+    """管理员直接设置图片主主体。"""
     try:
         image = await image_repository.get_by_id(session, image_id)
         if not image:
             raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
 
         check_image_permission(image, current_user, "修改主体")
+        if data.reanalyze:
+            ensure_permission(current_user, Permission.AI_ANALYZE)
 
         assignment = await subject_assignment_service.assign_primary_subject(
             session,
@@ -1438,27 +1476,17 @@ async def set_primary_subject(
             comment=data.comment,
         )
 
-        # 主体落地会同步图片标签，先提交再触发异步任务，避免任务读到旧数据
-        await session.commit()
-
         reanalyze_enqueued = False
         rebuild_enqueued = None
         rebuild_added = 0
         if data.reanalyze:
-            # 强制重新分析：跳过“已有描述+标签”短路，基于主体约束重新生成描述与标签，
-            # 分析完成后会自动重建向量，无需单独入队 rebuild_vector
-            try:
-                added = await task_queue.add_tasks([image_id], force_analyze=True)
-                reanalyze_enqueued = added > 0
-                if not reanalyze_enqueued:
-                    logger.info(f"图片 {image_id} 已有进行中的分析任务，跳过重复入队")
-            except Exception as e:
-                logger.warning(f"主体纠正触发重新分析失败（不影响主体落地）: image_id={image_id}, error={e}")
-        else:
+            # 主体与重新分析任务原子提交，避免已关联但任务丢失。
+            accepted = await task_queue.add_tasks([image_id], force_analyze=True, session=session)
+            reanalyze_enqueued = accepted > 0
+        await session.commit()
+        if not data.reanalyze:
             rebuild_enqueued, rebuild_added, _ = await enqueue_rebuild_vector(
-                [image_id],
-                context=f"set_primary_subject image_id={image_id}",
-                log=logger,
+                [image_id], context=f"set_primary_subject image_id={image_id}", log=logger,
             )
         return {
             "message": "主体已更新",
@@ -1478,49 +1506,14 @@ async def set_primary_subject(
         raise HTTPException(status_code=500, detail="设置主主体失败，请稍后重试")
 
 
-@router.post("/{image_id}/subjects/suggest", response_model=dict[str, Any], status_code=201)
+@router.post("/{image_id}/subjects/suggest", deprecated=True)
 async def suggest_primary_subject(
     image_id: int,
     data: SuggestSubjectRequest,
-    current_user: dict = Depends(get_current_user),
-    session: AsyncSession = Depends(get_async_session),
+    current_user: dict = Depends(require_admin),
 ):
-    """非上传者提交主体纠正建议（管理员审批后落地）。"""
-    try:
-        image = await image_repository.get_by_id(session, image_id)
-        if not image:
-            raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
-
-        if current_user.get("role") == "admin" or image.uploaded_by == current_user.get("id"):
-            raise HTTPException(status_code=400, detail="你有编辑权限，请直接修改该图片主体")
-
-        ensure_permission(current_user, Permission.SUGGEST_CHANGES)
-
-        if not getattr(image, "is_public", True):
-            raise HTTPException(status_code=403, detail="无权对该图片提交主体建议")
-
-        approval = await subject_assignment_service.create_subject_suggestion(
-            session,
-            image_id=image_id,
-            requester_id=int(current_user.get("id")),
-            subject_id=data.subject_id,
-            confidence=data.confidence,
-            comment=data.comment,
-            add_sample=bool(data.add_sample),
-        )
-        return {
-            "message": "主体建议已提交，等待管理员审批",
-            "approval_id": approval.id,
-        }
-    except HTTPException:
-        raise
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        if translate_exception(e):
-            raise
-        logger.error(f"提交主体建议失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="提交主体建议失败，请稍后重试")
+    """保留旧地址并鉴权；主体建议入口已收束为管理员直接关联。"""
+    raise HTTPException(status_code=400, detail="主体仅由管理员维护，请直接设置图片主体")
 
 
 @router.delete("/{image_id}", response_model=dict[str, Any])

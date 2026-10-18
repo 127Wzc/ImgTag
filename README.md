@@ -34,7 +34,7 @@
 
 - 发布历史（每个版本的更新细节）：[docs/release-history.md](docs/release-history.md)
 - 权限位与建议/审批说明：[docs/permissions.md](docs/permissions.md)
-- 主体记忆与纠正的完整设计：[docs/subject-correction-plan.md](docs/subject-correction-plan.md)
+- 主体管理、提炼与历史：[docs/subject-extraction.md](docs/subject-extraction.md)
 - 更多文档索引：[docs/README.md](docs/README.md)
 
 ---

@@ -34,7 +34,7 @@
 
 - Release history (detailed changes per tag): [docs/release-history.md](docs/release-history.md)
 - Permissions and suggestion/approval details: [docs/permissions.md](docs/permissions.md)
-- Subject memory and correction design: [docs/subject-correction-plan.md](docs/subject-correction-plan.md)
+- Subject management, extraction, and history: [docs/subject-extraction.md](docs/subject-extraction.md)
 - Docs index: [docs/README.md](docs/README.md)
 
 ---

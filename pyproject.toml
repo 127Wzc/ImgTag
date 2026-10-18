@@ -68,4 +68,7 @@ exclude = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = ["--import-mode=importlib"]
 testpaths = ["tests"]
+cache_dir = "tmp/agent/cache/pytest"
+markers = ["postgres: 显式启用的 PostgreSQL 隔离 schema 回滚测试"]

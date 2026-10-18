@@ -8,6 +8,7 @@ import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { getErrorMessage } from '@/utils/api-error'
 import { notifyError, notifySuccess } from '@/utils/notify'
+import { usePromptDefaults } from '@/composables/usePromptDefaults'
 import { 
   Settings,
   Save,
@@ -58,6 +59,9 @@ interface ConfigDef {
   placeholder?: string
   options?: { value: string; label: string }[]
   showWhen?: { key: string; value: string }
+  min?: number
+  max?: number
+  step?: number
 }
 
 const configDefinitions: Record<string, ConfigDef[]> = {
@@ -65,9 +69,10 @@ const configDefinitions: Record<string, ConfigDef[]> = {
     { key: 'vision_api_base_url', label: 'API 地址', type: 'text', description: 'OpenAI 兼容端点', placeholder: 'https://api.openai.com/v1' },
     { key: 'vision_api_key', label: 'API 密钥', type: 'password' },
     { key: 'vision_model', label: '模型名称', type: 'combobox', description: '可选择或手动输入' },
-    { key: 'vision_prompt', label: '分析提示词', type: 'textarea', description: '控制输出格式和风格' },
+    { key: 'vision_prompt', label: '全局分析提示词（含主体融合规则）', type: 'textarea', description: '统一管理通用分析和主体资料使用规则；description 的具体结构优先遵守标签分类提示词。表情包四段格式在标签管理的表情包分类中维护。' },
     { key: 'vision_allowed_extensions', label: '允许的扩展名', type: 'text' },
     { key: 'vision_convert_gif', label: 'GIF 转静态图', type: 'boolean' },
+    { key: 'subject_extraction_max_images', label: '主体提炼图片上限', type: 'number', min: 1, max: 3, step: 1, description: '默认3张，可设1–3张' },
     { key: 'vision_max_image_size', label: '压缩阈值 (KB)', type: 'number' },
     { key: 'queue_max_workers', label: '最大并发数', type: 'number', description: '同时分析多少张图片' },
     { key: 'queue_batch_interval', label: '任务间隔 (秒)', type: 'number', description: '每张图片分析后的等待时间' },
@@ -97,6 +102,13 @@ const loading = ref(false)
 const saving = ref(false)
 const configs = ref<Record<string, string>>({})
 const originalConfigs = ref<Record<string, string>>({})
+const { data: promptDefaults, isError: defaultsError, refetch: reloadDefaults } = usePromptDefaults(computed(() => activeCategory.value === 'vision'))
+function resetVisionPrompt() {
+  if (!promptDefaults.value || saving.value) return
+  configs.value.vision_prompt = promptDefaults.value.vision_prompt
+  notifySuccess('已填入默认提示词，保存后生效')
+}
+
 
 type ModelTestKind = 'vision' | 'embedding'
 const modelTesting = ref<Record<ModelTestKind, boolean>>({ vision: false, embedding: false })
@@ -208,8 +220,8 @@ async function fetchConfigs() {
   loading.value = true
   try {
     const { data } = await apiClient.get('/config/')
-    configs.value = { ...data }
-    originalConfigs.value = { ...data }
+    configs.value = { subject_extraction_max_images: '3', ...data }
+    originalConfigs.value = { ...configs.value }
   } catch (e) {
     console.error('Failed to load configs', e)
   } finally {
@@ -218,6 +230,11 @@ async function fetchConfigs() {
 }
 
 async function saveConfigs() {
+  const limit = Number(configs.value.subject_extraction_max_images)
+  if (!Number.isInteger(limit) || limit < 1 || limit > 3) {
+    notifyError('主体提炼图片上限必须是1至3之间的整数')
+    return
+  }
   saving.value = true
   try {
     const changedConfigs: Record<string, string> = {}
@@ -1417,11 +1434,16 @@ onMounted(() => fetchConfigs())
                     <p v-if="def.description" class="text-xs text-muted-foreground mb-2">
                       {{ def.description }}
                     </p>
+                    <div v-if="def.key === 'vision_prompt'" class="flex items-center gap-3 mb-2">
+                      <Button type="button" variant="outline" size="sm" :disabled="!promptDefaults || saving" @click="resetVisionPrompt">重置为默认提示词</Button>
+                      <span class="text-xs text-muted-foreground">仅修改当前表单，保存后生效</span>
+                    </div>
+                    <p v-if="def.key === 'vision_prompt' && defaultsError" class="text-xs text-destructive mb-2">默认提示词加载失败。<button type="button" class="underline" @click="reloadDefaults()">重试</button></p>
                     <textarea
                       :id="def.key"
                       v-model="configs[def.key]"
-                      rows="6"
-                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring resize-none"
+                      rows="16"
+                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring resize-y"
                     />
                   </template>
 
@@ -1528,6 +1550,9 @@ onMounted(() => fetchConfigs())
                             :id="def.key"
                             v-model="configs[def.key]"
                             :type="def.type"
+                            :min="def.min"
+                            :max="def.max"
+                            :step="def.step"
                             :placeholder="def.placeholder"
                             class="w-full px-3 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring"
                           />

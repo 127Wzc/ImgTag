@@ -6,8 +6,9 @@ Provides async access to task records for job queue management.
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from imgtag.core.logging_config import get_logger
 from imgtag.db.repositories.base import BaseRepository
@@ -26,6 +27,40 @@ class TaskRepository(BaseRepository[Task]):
     """
 
     model = Task
+
+    async def get_active_subject_extraction(self, session: AsyncSession, subject_id: int) -> Optional[Task]:
+        """调用方先锁主体父行；同一主体只允许一个未结束的提炼任务。"""
+        result = await session.execute(
+            select(Task).where(
+                Task.type == "extract_subject",
+                Task.status.in_(["pending", "processing"]),
+                Task.payload["subject_id"].as_integer() == subject_id,
+            ).order_by(Task.created_at, Task.id).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_active_for_image(
+        self, session: AsyncSession, image_id: int, task_type: str,
+    ) -> Sequence[Task]:
+        """调用方先锁图片父行，串行化同图入队；锁任务行以协调 worker 抢占。"""
+        result = await session.execute(
+            select(Task)
+            .where(Task.type == task_type, Task.status.in_(["pending", "processing"]))
+            .where(Task.payload["image_id"].as_integer() == image_id)
+            .order_by(Task.created_at, Task.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return result.scalars().all()
+
+    async def begin_attempt(self, session: AsyncSession, task_id: str) -> int:
+        task = await self.get_by_id(session, task_id)
+        if task is None:
+            raise ValueError(f"任务 {task_id} 不存在")
+        attempt = int((task.payload or {}).get("attempt", 0)) + 1
+        task.payload = {**(task.payload or {}), "attempt": attempt}
+        await session.flush()
+        return attempt
 
     async def create_task(
         self,
@@ -83,6 +118,10 @@ class TaskRepository(BaseRepository[Task]):
             return False
 
         task.status = status
+        if status == "pending":
+            task.error = None
+            task.result = None
+            task.completed_at = None
         if result is not None:
             task.result = result
         if error is not None:
@@ -100,6 +139,7 @@ class TaskRepository(BaseRepository[Task]):
         status: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        include_extraction: bool = True,
     ) -> tuple[Sequence[Task], int]:
         """Get tasks with optional status filter.
 
@@ -117,6 +157,10 @@ class TaskRepository(BaseRepository[Task]):
         # Build query
         stmt = select(Task).order_by(Task.created_at.desc())
         count_stmt = select(func.count()).select_from(Task)
+
+        if not include_extraction:
+            stmt = stmt.where(Task.type != "extract_subject")
+            count_stmt = count_stmt.where(Task.type != "extract_subject")
 
         if status:
             stmt = stmt.where(Task.status == status)
@@ -279,12 +323,29 @@ class TaskRepository(BaseRepository[Task]):
         Returns:
             Claimed task (already updated to 'processing'), or None.
         """
-        # Use FOR UPDATE SKIP LOCKED to atomically claim a task
+        # 同图只允许最早的待执行任务被抢占，且不能与分析/向量任务并行。
+        # 较早任务被另一 worker 锁住时，后续任务仍被该子查询挡住。
+        other = aliased(Task)
+        same_image = other.payload["image_id"].as_integer() == Task.payload["image_id"].as_integer()
+        blocked = select(other.id).where(
+            same_image,
+            other.id != Task.id,
+            other.type.in_(task_types),
+            or_(
+                other.status == "processing",
+                and_(
+                    other.status == "pending",
+                    or_(other.created_at < Task.created_at,
+                        and_(other.created_at == Task.created_at, other.id < Task.id)),
+                ),
+            ),
+        ).exists()
         stmt = (
             select(Task)
             .where(Task.status == "pending")
             .where(Task.type.in_(task_types))
-            .order_by(Task.created_at)
+            .where(~blocked)
+            .order_by(Task.created_at, Task.id)
             .limit(1)
             .with_for_update(skip_locked=True)
         )

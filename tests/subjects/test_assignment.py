@@ -56,11 +56,12 @@ def _patch_common_repos(monkeypatch, *, new_subject, previous):
 
 
 @pytest.mark.asyncio
-async def test_assign_auto_does_not_override_manual(monkeypatch) -> None:
+@pytest.mark.parametrize("protected_source", ["manual", "approval", "tag"])
+async def test_assign_auto_does_not_override_manual(monkeypatch, protected_source) -> None:
     """自动结果不得覆盖人工确认的主体。"""
     service = SubjectAssignmentService()
     new_subject = SimpleNamespace(id=2, name="新主体", is_active=True, primary_tag_id=22)
-    previous = _make_previous(subject_id=1, source="manual", primary_tag_id=11)
+    previous = _make_previous(subject_id=1, source=protected_source, primary_tag_id=11)
     _patch_common_repos(monkeypatch, new_subject=new_subject, previous=previous)
 
     async def fail_set_primary(session, **kwargs):
@@ -81,7 +82,7 @@ async def test_assign_auto_does_not_override_manual(monkeypatch) -> None:
 
     assert result["changed"] is False
     assert result["subject_id"] == 1
-    assert result["source"] == "manual"
+    assert result["source"] == protected_source
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ class Task(BaseSchema):
     """任务响应模型"""
     id: str = Field(..., description="任务 ID")
     type: str = Field(..., description="任务类型")
-    payload: Dict[str, Any] = Field(default_factory=dict, description="任务数据")
+    payload: Optional[Dict[str, Any]] = Field(default_factory=dict, description="任务数据")
     status: str = Field(..., description="任务状态: pending/processing/completed/failed")
     result: Optional[Dict[str, Any]] = Field(default=None, description="任务结果")
     error: Optional[str] = Field(default=None, description="错误信息")

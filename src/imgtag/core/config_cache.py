@@ -39,7 +39,7 @@ class ConfigCache:
     # ==================== Async Read Operations ====================
     
     @classmethod
-    async def get(cls, key: str, default: str | None = None) -> str | None:
+    async def get(cls, key: str, default: str | None = None, *, fresh: bool = False) -> str | None:
         """Get configuration value with caching.
         
         Args:
@@ -52,7 +52,7 @@ class ConfigCache:
         now = time.time()
         
         # Check cache first
-        if now - cls._cache_time < cls._ttl and key in cls._cache:
+        if not fresh and now - cls._cache_time < cls._ttl and key in cls._cache:
             return cls._cache.get(key, default)
         
         # Query database directly (no repository dependency)
@@ -73,6 +73,8 @@ class ConfigCache:
                 return value
         except Exception as e:
             logger.warning(f"配置读取失败 [{key}]: {e}")
+            if fresh:
+                raise
             return cls._cache.get(key, default)
     
     @classmethod

@@ -1,11 +1,11 @@
-import { toast } from 'vue-sonner'
+import { toast, type Action } from 'vue-sonner'
 import { getErrorMessage } from '@/utils/api-error'
 
 type NotifyKind = 'success' | 'error' | 'warning' | 'info'
 
 const lastToastAt = new Map<string, number>()
 
-type ToastOptions = { description?: string }
+type ToastOptions = { description?: string; action?: Action; duration?: number }
 
 function toastOnce(kind: NotifyKind, message: string, options?: ToastOptions & { withinMs?: number }) {
   const msg = (message || '').trim()
@@ -19,7 +19,7 @@ function toastOnce(kind: NotifyKind, message: string, options?: ToastOptions & {
   if (now - last < withinMs) return
   lastToastAt.set(key, now)
 
-  const toastOptions: ToastOptions | undefined = desc ? { description: desc } : undefined
+  const toastOptions: ToastOptions = { description: desc || undefined, action: options?.action, duration: options?.duration }
   if (kind === 'success') toast.success(msg, toastOptions)
   else if (kind === 'warning') toast.warning(msg, toastOptions)
   else if (kind === 'info') toast.info(msg, toastOptions)
@@ -28,21 +28,21 @@ function toastOnce(kind: NotifyKind, message: string, options?: ToastOptions & {
 
 export function notifySuccess(message: string, options?: ToastOptions & { once?: boolean }) {
   if (options?.once) return toastOnce('success', message, options)
-  toast.success(message, options?.description ? { description: options.description } : undefined)
+  toast.success(message, options)
 }
 
 export function notifyWarning(message: string, options?: ToastOptions & { once?: boolean }) {
   if (options?.once) return toastOnce('warning', message, options)
-  toast.warning(message, options?.description ? { description: options.description } : undefined)
+  toast.warning(message, options)
 }
 
 export function notifyInfo(message: string, options?: ToastOptions & { once?: boolean }) {
   if (options?.once) return toastOnce('info', message, options)
-  toast.info(message, options?.description ? { description: options.description } : undefined)
+  toast.info(message, options)
 }
 
 export function notifyError(error: unknown, options?: ToastOptions & { once?: boolean }) {
   const msg = typeof error === 'string' ? error : getErrorMessage(error as any)
   if (options?.once ?? true) return toastOnce('error', msg, options)
-  toast.error(msg, options?.description ? { description: options.description } : undefined)
+  toast.error(msg, options)
 }

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, type MaybeRefOrGetter, toValue, type Ref } from 'vue'
 import apiClient from '../client'
-import type { SubjectResponse } from '@/types'
+import type { ImageSubjectAssignment, SubjectResponse } from '@/types'
 
 export interface SubjectsQueryParams {
   page: number
@@ -11,8 +11,8 @@ export interface SubjectsQueryParams {
 }
 
 /**
- * 主体词典列表（后端要求登录）。
- * 通过 enabled 控制发起时机，避免匿名状态下触发 401 被拦截器强制跳转登录页。
+ * 主体词典列表（仅管理员）。
+ * 通过 enabled 控制发起时机，普通用户查看图片时不请求完整词典。
  */
 export function useSubjects(
   params: Ref<SubjectsQueryParams>,
@@ -99,7 +99,7 @@ export function useSetPrimarySubject() {
         subject_id: data.subject_id,
         confidence: data.confidence ?? null,
         add_sample: data.add_sample ?? false,
-        reanalyze: data.reanalyze ?? false,
+        reanalyze: data.reanalyze ?? true,
         comment: data.comment ?? null,
       })
       return result
@@ -112,30 +112,40 @@ export function useSetPrimarySubject() {
   })
 }
 
-export function useSuggestPrimarySubject() {
+export interface SubjectTemplate {
+  id: number
+  name: string
+  content: string
+  is_builtin: boolean
+  is_active: boolean
+}
+
+export interface SubjectVersion {
+  id: number
+  subject_id: number
+  state: 'history'
+  definition: string
+  recognition_notes: string
+  edit_revision: number
+  base_revision: number
+  published_revision: number | null
+  payload: Record<string, any>
+  input_snapshot: Record<string, any>
+  created_at: string
+}
+
+export function useSetImageSubjects() {
   const queryClient = useQueryClient()
   return useMutation({
-    meta: { successMessage: '主体建议已提交，等待管理员审批', toastError: true },
-    mutationFn: async (data: {
-      image_id: number
-      subject_id: number
-      confidence?: number | null
-      comment?: string
-      add_sample?: boolean
-    }) => {
-      const { data: result } = await apiClient.post<{
-        message: string
-        approval_id: number
-      }>(`/images/${data.image_id}/subjects/suggest`, {
-        subject_id: data.subject_id,
-        confidence: data.confidence ?? null,
-        comment: data.comment ?? null,
-        add_sample: data.add_sample ?? false,
-      })
-      return result
+    mutationFn: async (data: { image_id: number; subject_ids: number[]; primary_subject_id: number | null; reanalyze: boolean }) => {
+      const { image_id, ...payload } = data
+      const { data: result } = await apiClient.put(`/images/${image_id}/subjects`, payload)
+      return result as { assignments: ImageSubjectAssignment[]; reanalyze_enqueued: boolean }
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['approvals'] })
+    onSuccess: (_, vars) => {
+      for (const key of [['image', vars.image_id], ['images'], ['my-images']]) {
+        queryClient.invalidateQueries({ queryKey: key })
+      }
     },
   })
 }

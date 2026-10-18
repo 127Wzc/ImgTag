@@ -18,7 +18,7 @@ from typing import Literal
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from asyncpg.exceptions import InvalidCachedStatementError
 
-from imgtag.core.exceptions import APIError, DBSchemaChangedError, DBTimeoutError
+from imgtag.core.exceptions import APIError, DBSchemaChangedError, DBTimeoutError, EmbeddingAPIError
 
 LogLevel = Literal["debug", "info", "warning", "error"]
 
@@ -66,6 +66,16 @@ def translate_exception(exc: Exception) -> ExceptionTranslation | None:
 
     返回 None 表示“不识别”，由上层走默认 500 兜底。
     """
+    for e in _iter_exception_chain(exc):
+        if isinstance(e, EmbeddingAPIError):
+            details: dict[str, object] = {"service": "embedding"}
+            if e.upstream_status is not None:
+                details["upstream_status"] = e.upstream_status
+            return ExceptionTranslation(
+                api_error=APIError("EMBEDDING_API_ERROR", str(e), e.status_code, details),
+                log_level="info",
+            )
+
     # asyncpg prepared statement plan 失效（常见于运行时执行 ALTER TABLE/重建索引后）
     for e in _iter_exception_chain(exc):
         if isinstance(e, InvalidCachedStatementError):

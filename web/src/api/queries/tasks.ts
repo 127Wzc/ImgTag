@@ -1,7 +1,13 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
-import { computed, type Ref } from 'vue'
+import { computed, watch, type Ref } from 'vue'
 import apiClient from '../client'
 import type { Task, TaskListResponse } from '@/types'
+
+function refreshAnalysisContent(queryClient: ReturnType<typeof useQueryClient>) {
+    for (const key of [['subjects'], ['images'], ['my-images'], ['image']]) {
+        void queryClient.invalidateQueries({ queryKey: key })
+    }
+}
 
 /**
  * 获取任务列表
@@ -11,7 +17,8 @@ export function useTasks(params: Ref<{
     page?: number
     size?: number
 }>) {
-    return useQuery({
+    const queryClient = useQueryClient()
+    const query = useQuery({
         queryKey: computed(() => ['tasks', params.value]),
         queryFn: async () => {
             const searchParams = new URLSearchParams()
@@ -24,21 +31,39 @@ export function useTasks(params: Ref<{
         },
         refetchInterval: 5000, // 每5秒自动刷新
     })
+    const completed = new Set<string>()
+    watch(query.data, data => {
+        let changed = false
+        for (const task of data?.data || []) {
+            if (task.status === 'completed' && !completed.has(task.id)) {
+                completed.add(task.id)
+                changed = true
+            }
+        }
+        if (changed) refreshAnalysisContent(queryClient)
+    })
+    return query
 }
 
 /**
  * 获取单个任务详情
  */
-export function useTask(id: Ref<string | null>) {
-    return useQuery({
+export function useTask(id: Ref<string | null>, enabled: Ref<boolean>) {
+    const queryClient = useQueryClient()
+    const query = useQuery({
         queryKey: ['task', id],
         queryFn: async () => {
             if (!id.value) return null
             const { data } = await apiClient.get<Task>(`/tasks/${id.value}`)
             return data
         },
-        enabled: computed(() => id.value !== null),
+        enabled: computed(() => id.value !== null && enabled.value),
+        refetchInterval: query => ['pending', 'processing'].includes(query.state.data?.status || '') ? 3000 : false,
     })
+    watch(query.data, task => {
+        if (task?.status === 'completed') refreshAnalysisContent(queryClient)
+    })
+    return query
 }
 
 /**

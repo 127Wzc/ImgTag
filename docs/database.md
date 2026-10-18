@@ -23,6 +23,20 @@ uv run python scripts/test_db_init.py
 
 ## 修改数据库结构
 
+### 旧库字段补齐
+
+生产环境从 `0006_mcp_hardening` 直接升级到 `0007_subject_workflow`。
+
+0007 创建多主体当前关联、主体提炼模板、图片与主体的历史表、识别备注和封面字段，并直接使用最终的历史状态默认值。已有主体描述保留为当前资料；用户自定义提示词不覆盖。缺少 `image_subjects.synced_primary_tag_id` 的旧 0005 库也会补齐字段及 `ON DELETE SET NULL` 外键，不推断历史标签归属。
+
+应用启动时自动执行迁移，也可运行 `uv run alembic upgrade head`。本地已执行过开发迁移的库，必须先核实实际字段、外键、索引和默认值与合并后的 0007 一致，再将版本标识修正为 `0007_subject_workflow`；不要对这种库重新执行 0007 的建表步骤。
+迁移验证应同时核对实际表结构与模型字段，不能只检查版本号和数据行数。
+PostgreSQL 回归测试使用隔离 schema 并回滚：
+
+```bash
+IMGTAG_TEST_POSTGRES=1 uv run pytest tests/subjects/test_postgres.py -q
+```
+
 ### 步骤
 1. **修改 ORM 模型**：编辑 `src/imgtag/models/*.py`
 2. **生成迁移脚本**：

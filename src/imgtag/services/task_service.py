@@ -24,6 +24,7 @@ from imgtag.db.repositories import (
     image_repository,
     task_repository,
 )
+from imgtag.schemas.task import Task as TaskResponse
 from imgtag.services import embedding_service
 
 logger = get_logger(__name__)
@@ -172,26 +173,15 @@ class TaskService:
         limit: int = 50,
         offset: int = 0,
         status: Optional[str] = None,
+        *, include_extraction: bool = False,
     ) -> Dict[str, Any]:
         """获取任务列表"""
         async with async_session_maker() as session:
             tasks, total = await task_repository.get_tasks(
-                session, status=status, limit=limit, offset=offset
+                session, status=status, limit=limit, offset=offset, include_extraction=include_extraction,
             )
             return {
-                "tasks": [
-                    {
-                        "id": t.id,
-                        "type": t.type,
-                        "status": t.status,
-                        "payload": t.payload,
-                        "result": t.result,
-                        "error": t.error,
-                        "created_at": t.created_at.isoformat() if t.created_at else None,
-                        "completed_at": t.completed_at.isoformat() if t.completed_at else None,
-                    }
-                    for t in tasks
-                ],
+                "tasks": [TaskResponse.model_validate(task).model_dump(mode="json") for task in tasks],
                 "total": total,
             }
 
@@ -201,16 +191,8 @@ class TaskService:
             task = await task_repository.get_by_id(session, task_id)
             if not task:
                 return None
-            return {
-                "id": task.id,
-                "type": task.type,
-                "status": task.status,
-                "payload": task.payload,
-                "result": task.result,
-                "error": task.error,
-                "created_at": task.created_at.isoformat() if task.created_at else None,
-                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
-            }
+            # 列表与详情共用响应 Schema，避免手写字段漏掉 updated_at。
+            return TaskResponse.model_validate(task).model_dump(mode="json")
     
     async def cleanup_old_tasks(self, days: int = 7) -> int:
         """清理旧任务"""

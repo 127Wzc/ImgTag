@@ -1,8 +1,14 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { useTasks, useRetryTask } from '@/api/queries'
+import { ref, computed, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useTasks, useTask, useRetryTask } from '@/api/queries'
 import { useMutation, useQueryClient } from '@tanstack/vue-query'
 import apiClient from '@/api/client'
+import type { Task as TaskItem } from '@/types'
+import ImageAnalysisHistoryDialog from '@/components/ImageAnalysisHistoryDialog.vue'
+import SubjectVersionsDialog from '@/components/SubjectVersionsDialog.vue'
+const showImageHistory = ref(false)
+const showSubjectHistory = ref(false)
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { 
@@ -16,17 +22,6 @@ import {
   PlayCircle,
   Eye
 } from 'lucide-vue-next'
-
-interface TaskItem {
-  id: string
-  type: string
-  status: string
-  payload?: Record<string, any>
-  result?: Record<string, any>
-  error?: string
-  created_at: string
-  completed_at?: string
-}
 
 // 任务状态筛选
 const statusFilter = ref<string>('')
@@ -61,6 +56,30 @@ const selectedIds = ref<string[]>([])
 // 任务详情弹窗
 const showDetailDialog = ref(false)
 const selectedTask = ref<TaskItem | null>(null)
+const selectedTaskId = ref<string | null>(null)
+const route = useRoute()
+const router = useRouter()
+const { data: detailTask, isError: detailError, refetch: refreshDetail } = useTask(selectedTaskId, showDetailDialog)
+watch(detailTask, task => {
+  if (task && task.id === selectedTaskId.value) selectedTask.value = task
+})
+watch(() => route.query.task, id => {
+  if (typeof id !== 'string' || !id) return
+  selectedTask.value = detailTask.value?.id === id ? detailTask.value : null
+  selectedTaskId.value = id
+  showDetailDialog.value = true
+}, { immediate: true })
+watch(showDetailDialog, open => {
+  if (!open && route.query.task) {
+    const { task: _task, ...query } = route.query
+    void router.replace({ query })
+  }
+})
+const analysisInput = computed(() => selectedTask.value?.result?.analysis_input)
+const taskResult = computed(() => {
+  const { analysis_input: _input, ...result } = selectedTask.value?.result || {}
+  return result
+})
 
 // 可删除的任务（已完成或失败）
 const deletableTasks = computed(() => tasks.value.filter(t => t.status === 'completed' || t.status === 'failed'))
@@ -121,6 +140,7 @@ function getStatusLabel(status: string) {
 function getTaskTypeLabel(type: string) {
   switch (type) {
     case 'analyze_image': return '图片分析'
+    case 'extract_subject': return '主体资料提炼'
     case 'batch_analyze': return '批量分析'
     case 'vector_embed': return '向量嵌入'
     case 'storage_sync': return '存储同步'
@@ -145,6 +165,7 @@ async function handleRetry(taskId: string) {
 
 function openTaskDetail(task: TaskItem) {
   selectedTask.value = task
+  selectedTaskId.value = task.id
   showDetailDialog.value = true
 }
 
@@ -327,6 +348,8 @@ const canDelete = (status: string) => status === 'completed' || status === 'fail
         <DialogTitle>任务详情</DialogTitle>
       </DialogHeader>
       
+      <div v-if="detailError" role="alert" class="text-sm text-destructive">任务详情暂时无法加载<Button variant="ghost" size="sm" @click="refreshDetail()">重试</Button></div>
+      <p v-else-if="!selectedTask" class="text-sm text-muted-foreground" role="status">加载中…</p>
       <div v-if="selectedTask" class="space-y-4">
         <!-- 基本信息 -->
         <div class="grid grid-cols-2 gap-4 text-sm">
@@ -359,16 +382,33 @@ const canDelete = (status: string) => status === 'completed' || status === 'fail
           </div>
         </div>
 
+        <Button v-if="selectedTask.type === 'analyze_image' && selectedTask.status === 'completed'" @click="showImageHistory = true; showDetailDialog = false">查看图片分析历史</Button>
+        <Button v-if="selectedTask.type === 'extract_subject' && selectedTask.status === 'completed'" @click="showSubjectHistory = true; showDetailDialog = false">查看主体描述历史</Button>
+        <Button v-if="selectedTask.type === 'extract_subject' && selectedTask.status === 'failed'" variant="outline" @click="showDetailDialog = false; router.push('/subjects')">前往主体管理重新选图</Button>
         <!-- 任务参数 -->
         <div v-if="selectedTask.payload && Object.keys(selectedTask.payload).length > 0">
           <span class="text-sm text-muted-foreground">任务参数</span>
           <pre class="mt-2 p-3 bg-muted rounded-lg text-xs overflow-x-auto">{{ JSON.stringify(selectedTask.payload, null, 2) }}</pre>
         </div>
 
+        <div v-if="analysisInput" class="space-y-2">
+          <span class="text-sm text-muted-foreground">实际输入提示词</span>
+          <p class="text-xs text-muted-foreground">
+            模型：{{ analysisInput.model }} · 图片：{{ analysisInput.image_id }} · 第 {{ analysisInput.attempt }} 次调用
+          </p>
+          <div class="max-h-96 overflow-y-auto space-y-3">
+            <div v-for="(message, index) in analysisInput.input_messages" :key="index">
+              <p class="text-xs text-muted-foreground">{{ message.role }}</p>
+              <pre v-for="(part, partIndex) in message.content" :key="partIndex"
+                class="mt-2 p-3 bg-muted rounded-lg text-xs whitespace-pre-wrap break-words">{{ part.text }}</pre>
+            </div>
+          </div>
+        </div>
+
         <!-- 任务结果 -->
-        <div v-if="selectedTask.result && Object.keys(selectedTask.result).length > 0">
+        <div v-if="Object.keys(taskResult).length > 0">
           <span class="text-sm text-muted-foreground">任务结果</span>
-          <pre class="mt-2 p-3 bg-green-50 dark:bg-green-950/30 rounded-lg text-xs overflow-x-auto">{{ JSON.stringify(selectedTask.result, null, 2) }}</pre>
+          <pre class="mt-2 p-3 bg-green-50 dark:bg-green-950/30 rounded-lg text-xs overflow-x-auto">{{ JSON.stringify(taskResult, null, 2) }}</pre>
         </div>
 
         <!-- 错误信息 -->
@@ -379,4 +419,6 @@ const canDelete = (status: string) => status === 'completed' || status === 'fail
       </div>
     </DialogContent>
   </Dialog>
+  <ImageAnalysisHistoryDialog v-model:open="showImageHistory" :image-id="selectedTask?.payload?.image_id || null" />
+  <SubjectVersionsDialog v-model:open="showSubjectHistory" :subject-id="selectedTask?.payload?.subject_id || null" />
 </template>

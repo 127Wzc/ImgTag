@@ -7,7 +7,7 @@ import { computed, onMounted, onUnmounted, ref, watch, nextTick } from 'vue'
 import {
   X, ChevronLeft, ChevronRight, Info, Hash,
   Plus, Pencil, Loader2, Save, Link, Download,
-  PanelRightClose
+  PanelRightClose, UserRound
 } from 'lucide-vue-next'
 import {
   useUpdateImage,
@@ -16,24 +16,28 @@ import {
   useSearchTags,
   useCategories,
   useResolveTag,
-  useSubjects,
-  useSetPrimarySubject,
-  useSuggestPrimarySubject,
+  useTask,
 } from '@/api/queries'
 import { useUserStore } from '@/stores'
 import { getErrorMessage } from '@/utils/api-error'
 import { notifyError, notifySuccess } from '@/utils/notify'
 import CopyToast from '@/components/ui/CopyToast.vue'
+import { useTaskFeedback } from '@/composables/useTaskFeedback'
 import { usePermission } from '@/composables/usePermission'
-import type { ImageSubjectAssignment } from '@/types'
+import type { ImageResponse, ImageSubjectAssignment } from '@/types'
+import apiClient from '@/api/client'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
+import { Button } from '@/components/ui/button'
+import ImageAnalysisHistoryDialog from './ImageAnalysisHistoryDialog.vue'
 
 // 图片信息接口
 export interface ImageInfo {
   id: number
   image_url: string
   description?: string | null
-  tags?: Array<{ id?: number; name: string; level?: number; source?: string }>
+  tags?: Array<{ id?: number; name: string; level?: number; source?: string; is_subject?: boolean }>
   subjects?: ImageSubjectAssignment[]
+  subject_analysis?: ImageResponse['subject_analysis']
   width?: number | null
   height?: number | null
   file_size?: number | null
@@ -42,6 +46,8 @@ export interface ImageInfo {
   uploaded_by?: number | null
   uploaded_by_username?: string | null
 }
+
+const taskFeedback = useTaskFeedback()
 
 const props = withDefaults(defineProps<{
   image: ImageInfo | null
@@ -67,7 +73,7 @@ const showUnsavedConfirm = ref(false)
 
 // 用户权限
 const userStore = useUserStore()
-const { canCreateTags, canSuggestChanges } = usePermission()
+const { canCreateTags, canSuggestChanges, canUseAIAnalyze } = usePermission()
 
 const canEdit = computed(() => {
   if (!props.image) return false
@@ -120,32 +126,20 @@ async function copyImageUrl() {
 // API
 const updateMutation = useUpdateImage()
 const suggestMutation = useSuggestImageUpdate()
-const setPrimarySubjectMutation = useSetPrimarySubject()
-const suggestPrimarySubjectMutation = useSuggestPrimarySubject()
 const resolveMutation = useResolveTag()
 const { data: allTags } = useTags(200)
 const { data: categories } = useCategories()
-const subjectParams = ref({ page: 1, size: 200, active_only: true as boolean })
-// 词典接口需登录；仅在用户可编辑/可建议时才拉取，避免匿名请求触发 401 跳转
-const { data: subjectOptions } = useSubjects(
-  subjectParams,
-  () => canEdit.value || canSuggest.value,
-)
-
-const selectedSubjectId = ref<number | null>(null)
-const addSubjectSample = ref(false)
-const reanalyzeAfterSet = ref(false)
-const subjectComment = ref('')
-
-const currentPrimarySubject = computed(() => {
-  const subjects = props.image?.subjects || []
-  return subjects.find(s => s.is_primary) || null
-})
-
+const showReanalysisConfirm = ref(false)
+const analysisTaskIds = ref<Record<number, string>>({})
+const analysisTaskId = computed(() => props.image ? analysisTaskIds.value[props.image.id] || null : null)
+const taskEnabled = computed(() => !!props.image && canUseAIAnalyze.value)
+const { data: analysisTask, isError: analysisTaskError } = useTask(analysisTaskId, taskEnabled)
+const analysisPending = computed(() => !!analysisTaskId.value && !analysisTaskError.value && (!analysisTask.value || ['pending', 'processing'].includes(analysisTask.value.status)))
 // 编辑用标签对象类型
 interface DraftTag {
   id: number
   name: string
+  is_subject?: boolean
 }
 
 // ========== 编辑状态（本地草稿） ==========
@@ -153,6 +147,8 @@ const draftCategoryId = ref<number | null>(null)
 const draftNormalTags = ref<DraftTag[]>([])
 const draftDescription = ref('')
 const isEditingDescription = ref(false)
+const descriptionBeforeEdit = ref('')
+const analysisInstructions = ref('')
 const descriptionInput = ref<HTMLTextAreaElement | null>(null)
 
 // 标签输入
@@ -171,89 +167,71 @@ const originalNormalTags = ref<DraftTag[]>([])
 const originalDescription = ref('')
 
 // 同步 props.image 到本地草稿
-watch(() => props.image, (img) => {
+watch(() => props.image, (img, previous) => {
   if (img) {
-    const tags = img.tags || []
+    const keepDraft = previous?.id === img.id && hasChanges.value
+    if (!keepDraft) {
+      const tags = img.tags || []
 
-    const cat = tags.find(t => t.level === 0)
-    draftCategoryId.value = typeof cat?.id === 'number' ? cat.id : null
-    originalCategoryId.value = typeof cat?.id === 'number' ? cat.id : null
+      const cat = tags.find(t => t.level === 0)
+      draftCategoryId.value = typeof cat?.id === 'number' ? cat.id : null
+      originalCategoryId.value = typeof cat?.id === 'number' ? cat.id : null
 
-    const normalTagObjs = tags.filter(t => t.level === 2 || t.level === undefined)
-      .map(t => ({ id: t.id || 0, name: t.name }))
-    draftNormalTags.value = [...normalTagObjs]
-    originalNormalTagIds.value = normalTagObjs.map(t => t.id)
-    originalNormalTags.value = [...normalTagObjs]
+      const normalTagObjs = tags.filter(t => t.level === 2 || t.level === undefined)
+        .map(t => ({ id: t.id || 0, name: t.name, is_subject: t.is_subject }))
+      draftNormalTags.value = [...normalTagObjs]
+      originalNormalTagIds.value = normalTagObjs.map(t => t.id)
+      originalNormalTags.value = [...normalTagObjs]
 
-    draftDescription.value = img.description || ''
-    originalDescription.value = img.description || ''
+      draftDescription.value = img.description || ''
+      originalDescription.value = img.description || ''
 
-    isEditingDescription.value = false
-    showTagInput.value = false
-    newTagInput.value = ''
-    pendingAddAfterComposition.value = false
-    isComposing.value = false
-
-    selectedSubjectId.value = img.subjects?.find(s => s.is_primary)?.subject_id ?? null
-    addSubjectSample.value = false
-    reanalyzeAfterSet.value = false
-    subjectComment.value = ''
+      isEditingDescription.value = false
+      showTagInput.value = false
+      newTagInput.value = ''
+      pendingAddAfterComposition.value = false
+      isComposing.value = false
+    } else {
+      // 同图刷新（例如保存关联）时合并服务端标签，保留用户尚未保存的编辑。
+      const draftKeys = new Set(draftNormalTags.value.map(tagKey))
+      const originalKeys = new Set(originalNormalTags.value.map(tagKey))
+      const removed = new Set(originalNormalTags.value.filter(t => !draftKeys.has(tagKey(t))).map(tagKey))
+      const added = draftNormalTags.value.filter(t => !originalKeys.has(tagKey(t)))
+      const incoming = (img.tags || []).filter(t => t.level === 2 || t.level === undefined)
+        .map(t => ({ id: t.id || 0, name: t.name, is_subject: t.is_subject }))
+      const incomingKeys = new Set(incoming.map(tagKey))
+      draftNormalTags.value = [...incoming.filter(t => !removed.has(tagKey(t))), ...added.filter(t => !incomingKeys.has(tagKey(t)))]
+      originalNormalTags.value = incoming
+      originalNormalTagIds.value = incoming.map(t => t.id)
+      const category = img.tags?.find(t => t.level === 0)?.id ?? null
+      if (draftCategoryId.value === originalCategoryId.value) draftCategoryId.value = category
+      originalCategoryId.value = category
+      if (draftDescription.value === originalDescription.value) draftDescription.value = img.description || ''
+      originalDescription.value = img.description || ''
+    }
+    if (previous?.id !== img.id) {
+      showReanalysisConfirm.value = false
+      analysisInstructions.value = ''
+    }
   }
 }, { immediate: true })
 
-const canSetSubjectDirectly = computed(() => canEdit.value)
-const canSuggestSubjectChange = computed(() => canSuggest.value)
-
-const hasSubjectChange = computed(() => {
-  const current = currentPrimarySubject.value?.subject_id ?? null
-  return selectedSubjectId.value !== null && selectedSubjectId.value !== current
-})
-
-function buildSubjectPayload() {
-  if (!props.image || !selectedSubjectId.value) return null
-  return {
-    image_id: props.image.id,
-    subject_id: selectedSubjectId.value,
-    add_sample: addSubjectSample.value,
-    comment: subjectComment.value || undefined,
-  }
-}
-
-function resetSubjectForm() {
-  subjectComment.value = ''
-  addSubjectSample.value = false
-  reanalyzeAfterSet.value = false
-}
-
-async function applyPrimarySubject() {
-  if (!canSetSubjectDirectly.value) return
-  const payload = buildSubjectPayload()
-  if (!payload) return
+const reanalyzing = ref(false)
+const showAnalysisHistory = ref(false)
+async function reanalyzeImage() {
+  if (!props.image || !canUseAIAnalyze.value || reanalyzing.value || analysisPending.value || hasChanges.value) return
+  reanalyzing.value = true
   try {
-    const result = await setPrimarySubjectMutation.mutateAsync({
-      ...payload,
-      reanalyze: reanalyzeAfterSet.value,
-    })
-    if (result.reanalyze_enqueued) {
-      notifySuccess('已触发重新分析，描述与标签稍后自动更新')
-    }
-    emit('updated')
-    resetSubjectForm()
-  } catch (e: any) {
+    const imageId = props.image.id
+    const { data } = await apiClient.post('/queue/add', { image_ids: [imageId], force_analyze: true, analysis_instructions: analysisInstructions.value.trim() })
+    if (data.missing) throw new Error('图片已不存在')
+    if (data.task_ids?.[0]) analysisTaskIds.value[imageId] = data.task_ids[0]
+    taskFeedback(data.existing && !data.added && !data.upgraded ? '图片已有分析任务' : '图片描述生成已加入队列', data.task_ids?.[0])
+    if (props.image?.id === imageId) { showReanalysisConfirm.value = false; analysisInstructions.value = '' }
+  } catch (e) {
     notifyError(getErrorMessage(e))
-  }
-}
-
-async function submitPrimarySubjectSuggestion() {
-  if (!canSuggestSubjectChange.value) return
-  const payload = buildSubjectPayload()
-  if (!payload) return
-  try {
-    await suggestPrimarySubjectMutation.mutateAsync(payload)
-    resetSubjectForm()
-    selectedSubjectId.value = currentPrimarySubject.value?.subject_id ?? null
-  } catch (e: any) {
-    notifyError(getErrorMessage(e))
+  } finally {
+    reanalyzing.value = false
   }
 }
 
@@ -301,6 +279,7 @@ const hasChanges = computed(() => {
 
 async function startEditDescription() {
   if (!canEdit.value && !canSuggest.value) return
+  descriptionBeforeEdit.value = draftDescription.value
   isEditingDescription.value = true
   await nextTick()
   descriptionInput.value?.focus()
@@ -486,6 +465,10 @@ async function saveChanges(): Promise<boolean> {
   return true
 }
 
+async function saveDescription() {
+  if (await saveChanges()) isEditingDescription.value = false
+}
+
 function discardChanges() {
   draftCategoryId.value = originalCategoryId.value
   draftNormalTags.value = [...originalNormalTags.value]
@@ -527,7 +510,7 @@ function confirmDiscardAndClose() {
 
 function handleKeydown(e: KeyboardEvent) {
   if (!props.image) return
-  if (isEditingDescription.value || showTagInput.value) return
+  if (isEditingDescription.value || showTagInput.value || showAnalysisHistory.value || showReanalysisConfirm.value) return
 
   if (e.key === 'Escape') {
     handleBackdropClick()
@@ -551,7 +534,8 @@ onUnmounted(() => {
     <Transition name="fade">
       <div
         v-if="image"
-        class="fixed inset-0 z-[100] flex items-center justify-center bg-black/95 backdrop-blur-sm overflow-hidden"
+        :class="showAnalysisHistory || showReanalysisConfirm ? 'z-40' : 'z-[100]'"
+        class="fixed inset-0 flex items-center justify-center bg-black/95 backdrop-blur-sm overflow-hidden"
       >
         <!-- 背景点击层 -->
         <div class="absolute inset-0 z-0" @click="handleBackdropClick"></div>
@@ -644,8 +628,8 @@ onUnmounted(() => {
             <!-- Header (集成操作按钮) -->
             <div class="shrink-0 pl-6 pr-4 py-4 flex items-start justify-between bg-gradient-to-b from-white/5 to-transparent">
               <div class="mr-4 overflow-hidden pt-1.5">
-                <h2 class="text-lg font-medium text-white line-clamp-1 drop-shadow-md" :title="image.description || '无标题'">
-                  {{ image.description || '未命名图片' }}
+                <h2 class="text-lg font-medium text-white line-clamp-1 drop-shadow-md" >
+                  图片详情
                 </h2>
                 <div class="text-xs text-white/50 mt-1 font-mono">ID: {{ image.id }}</div>
                 <div v-if="editHint" class="text-[11px] text-white/45 mt-1">
@@ -698,29 +682,36 @@ onUnmounted(() => {
 
               <!-- 描述 -->
               <div class="space-y-3">
-                <div class="flex items-center justify-between text-xs text-white/40 uppercase tracking-wider font-medium">
-                  <span>描述</span>
-                  <Pencil v-if="canEdit || canSuggest" class="w-3 h-3" />
+                <div class="flex items-center justify-between text-xs text-white/40 font-medium">
+                  <span>图片描述</span>
+                  <div v-if="!isEditingDescription" class="flex gap-3"><button v-if="canEdit || canSuggest" @click="startEditDescription" class="text-white/70 hover:text-white inline-flex gap-1 items-center"><Pencil class="w-3 h-3" />编辑</button></div>
                 </div>
                 <div v-if="isEditingDescription" class="space-y-2">
                   <textarea
                     ref="descriptionInput"
                     v-model="draftDescription"
-                    maxlength="150"
+                    maxlength="1000"
                     class="w-full px-4 py-3 text-sm bg-white/5 text-white rounded-2xl focus:outline-none focus:bg-white/10 placeholder:text-white/20 resize-none transition-all"
                     style="min-height: 80px;"
                     placeholder="添加图片描述..."
                     @input="autoResizeTextarea"
-                    @keydown.escape="isEditingDescription = false"
+                    @keydown.escape.stop="draftDescription = descriptionBeforeEdit; isEditingDescription = false; analysisInstructions = ''"
                   />
-                  <div class="flex justify-end gap-2">
-                    <button @click="isEditingDescription = false" class="px-3 py-1.5 text-xs text-white/60 hover:text-white">取消</button>
-                    <button @click="isEditingDescription = false" class="px-3 py-1.5 text-xs bg-white/20 text-white rounded-lg hover:bg-white/30">完成</button>
+                  <label v-if="canUseAIAnalyze" class="block text-xs text-white/50">补充要求 <span class="text-white/30">仅本次生成</span><textarea v-model="analysisInstructions" maxlength="6000" rows="2" :disabled="reanalyzing" placeholder="例如：重点描述表情和动作，保留图中文字" class="mt-2 w-full px-3 py-2 text-xs bg-white/5 text-white/80 rounded-xl focus:outline-none focus:bg-white/10 placeholder:text-white/25 resize-y disabled:opacity-40" /></label>
+                  <button v-if="canUseAIAnalyze" :disabled="reanalyzing || analysisPending || hasChanges" @click="showReanalysisConfirm = true"
+                    class="w-full text-xs border border-white/10 rounded-xl px-3 py-2 text-white/70 hover:bg-white/5 hover:text-white disabled:opacity-40">
+                    {{ reanalyzing ? '提交中…' : analysisPending ? '描述生成中…' : '重新生成图片描述' }}
+                  </button>
+                  <p v-if="canUseAIAnalyze && hasChanges" class="text-xs text-white/40">先保存修改，再生成描述。</p>
+                  <div class="flex items-center gap-2">
+                    <button v-if="canEdit" :disabled="hasChanges" @click="showAnalysisHistory = true" class="mr-auto text-xs text-white/70 hover:text-white disabled:opacity-40">查看分析历史</button>
+                    <button @click="draftDescription = descriptionBeforeEdit; isEditingDescription = false; analysisInstructions = ''" class="px-3 py-1.5 text-xs text-white/60 hover:text-white">取消</button>
+                    <button :disabled="updateMutation.isPending.value || suggestMutation.isPending.value" @click="saveDescription" class="px-3 py-1.5 text-xs bg-white/20 text-white rounded-lg hover:bg-white/30 disabled:opacity-40">{{ canEdit ? '保存' : '提交建议' }}</button>
                   </div>
                 </div>
                 <div
                   v-else
-                  @click="(canEdit || canSuggest) && startEditDescription()"
+                  @dblclick="(canEdit || canSuggest) && startEditDescription()"
                   class="text-sm leading-relaxed text-white/80 min-h-[1.5em]"
                   :class="(canEdit || canSuggest) ? 'cursor-text hover:text-white transition-colors' : ''"
                 >
@@ -780,10 +771,11 @@ onUnmounted(() => {
                     <div
                       v-for="tag in draftNormalTags"
                       :key="tag.id"
-                      class="group inline-flex items-center px-2.5 py-1 rounded-md text-xs bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-200 transition-all"
-                      :class="isAddedNormalTag(tag) ? 'bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/20' : ''"
+                      class="group inline-flex items-center px-2.5 py-1 rounded-md text-xs transition-all"
+                      :title="tag.is_subject ? '主体标签' : undefined"
+                      :class="tag.is_subject ? 'bg-violet-400/15 text-violet-200 ring-1 ring-inset ring-violet-300/20 hover:bg-violet-400/20' : isAddedNormalTag(tag) ? 'bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/20' : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-200'"
                     >
-                      <Hash class="w-3 h-3 mr-1 opacity-30 group-hover:opacity-50" />
+                      <UserRound v-if="tag.is_subject" class="w-3 h-3 mr-1 opacity-80" /><Hash v-else class="w-3 h-3 mr-1 opacity-30 group-hover:opacity-50" />
                       <span v-if="isAddedNormalTag(tag)" class="mr-0.5 text-emerald-200/90 font-mono">+</span>
                       {{ tag.name }}
                       <button
@@ -870,81 +862,7 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <!-- 主体 -->
-              <div class="space-y-3">
-                <div class="flex items-center justify-between text-xs text-white/40 uppercase tracking-wider font-medium">
-                  <span>主体</span>
-                  <span
-                    v-if="currentPrimarySubject"
-                    class="text-[10px] bg-white/10 px-1.5 py-0.5 rounded text-white/70 normal-case"
-                  >
-                    当前：{{ currentPrimarySubject.subject_name }}
-                  </span>
-                </div>
-
-                <select
-                  v-model="selectedSubjectId"
-                  class="w-full px-3 py-2 text-sm bg-white/5 text-white rounded-xl focus:outline-none hover:bg-white/10 transition-colors"
-                  :disabled="!(canSetSubjectDirectly || canSuggestSubjectChange)"
-                >
-                  <option :value="null" class="bg-zinc-900">请选择主体</option>
-                  <option
-                    v-for="subject in (subjectOptions || [])"
-                    :key="subject.id"
-                    :value="subject.id"
-                    class="bg-zinc-900"
-                  >
-                    {{ subject.name }}
-                  </option>
-                </select>
-
-                <textarea
-                  v-model="subjectComment"
-                  maxlength="300"
-                  class="w-full px-3 py-2 text-xs bg-white/5 text-white rounded-xl focus:outline-none focus:bg-white/10 placeholder:text-white/25 resize-none"
-                  rows="2"
-                  placeholder="主体纠正备注（可选）"
-                  :disabled="!(canSetSubjectDirectly || canSuggestSubjectChange)"
-                />
-
-                <label
-                  v-if="canSetSubjectDirectly || canSuggestSubjectChange"
-                  class="flex items-center gap-2 text-xs text-white/60"
-                >
-                  <input v-model="addSubjectSample" type="checkbox" class="accent-white/80" />
-                  写入主体样本（记录来源图片，供后续识别器使用）
-                </label>
-
-                <label
-                  v-if="canSetSubjectDirectly"
-                  class="flex items-center gap-2 text-xs text-white/60"
-                >
-                  <input v-model="reanalyzeAfterSet" type="checkbox" class="accent-white/80" />
-                  同时重新分析以修正描述（消耗一次视觉分析）
-                </label>
-
-                <div v-if="canSetSubjectDirectly || canSuggestSubjectChange" class="flex gap-2">
-                  <button
-                    v-if="canSetSubjectDirectly"
-                    class="flex-1 px-3 py-2 text-xs bg-white/10 hover:bg-white/20 rounded-xl text-white disabled:opacity-40"
-                    :disabled="!hasSubjectChange || setPrimarySubjectMutation.isPending.value"
-                    @click="applyPrimarySubject"
-                  >
-                    <Loader2 v-if="setPrimarySubjectMutation.isPending.value" class="w-3 h-3 animate-spin inline mr-1" />
-                    直接设置主体
-                  </button>
-                  <button
-                    v-else
-                    class="flex-1 px-3 py-2 text-xs bg-white/10 hover:bg-white/20 rounded-xl text-white disabled:opacity-40"
-                    :disabled="!hasSubjectChange || suggestPrimarySubjectMutation.isPending.value"
-                    @click="submitPrimarySubjectSuggestion"
-                  >
-                    <Loader2 v-if="suggestPrimarySubjectMutation.isPending.value" class="w-3 h-3 animate-spin inline mr-1" />
-                    提交主体建议
-                  </button>
-                </div>
-              </div>
-
+              <!-- 关联、资料编辑与模型生成分别操作。 -->
               <!-- 元数据 -->
               <div class="pt-6 border-t border-white/5 space-y-3">
                 <div class="text-xs text-white/40 uppercase tracking-wider font-medium">元数据</div>
@@ -974,7 +892,7 @@ onUnmounted(() => {
             </div>
 
             <!-- Footer: Save Actions -->
-            <div v-if="canEdit || canSuggest" class="shrink-0 p-4 border-t border-white/10 bg-white/5 backdrop-blur">
+            <div v-if="(canEdit || canSuggest) && !isEditingDescription" class="shrink-0 p-4 border-t border-white/10 bg-white/5 backdrop-blur">
               <div class="flex gap-3">
                 <button
                   @click="discardChanges"
@@ -1029,6 +947,13 @@ onUnmounted(() => {
       </div>
     </Transition>
   </Teleport>
+  <Dialog :open="showReanalysisConfirm" @update:open="!reanalyzing && (showReanalysisConfirm = $event)">
+    <DialogContent class="sm:max-w-md"><DialogHeader><DialogTitle>重新生成图片描述</DialogTitle><DialogDescription>使用全局与分类规则、命中的主体资料及本次补充要求生成最新结果，完成后直接替换并保留最近三份历史。</DialogDescription></DialogHeader>
+      <div v-if="analysisInstructions.trim()" class="rounded-lg bg-muted/40 p-3 text-sm whitespace-pre-wrap max-h-40 overflow-y-auto"><span class="block text-xs text-muted-foreground mb-1">本次补充要求</span>{{ analysisInstructions.trim() }}</div>
+      <DialogFooter><Button variant="ghost" :disabled="reanalyzing" @click="showReanalysisConfirm = false">取消</Button><Button :disabled="reanalyzing || analysisPending" @click="reanalyzeImage"><Loader2 v-if="reanalyzing" class="w-4 h-4 mr-1 animate-spin" />生成图片描述</Button></DialogFooter>
+    </DialogContent>
+  </Dialog>
+  <ImageAnalysisHistoryDialog v-if="image && canEdit" v-model:open="showAnalysisHistory" :image-id="image.id" @updated="emit('updated')" />
 </template>
 
 <style scoped>

@@ -202,8 +202,8 @@ async function handleBatchAnalyze() {
   if (!checkPermissionWithToast(Permission.AI_ANALYZE, 'AI 分析')) return
   batchLoading.value = true
   try {
-    await apiClient.post('/queue/add', { image_ids: Array.from(selectedIds.value) })
-    notifySuccess(`已将 ${selectedIds.value.size} 张图片加入分析队列`, { once: true })
+    const { data } = await apiClient.post('/queue/add', { image_ids: Array.from(selectedIds.value), force_analyze: true })
+    notifySuccess(`重分析：新建 ${data.added}，升级 ${data.upgraded}，复用 ${data.existing}，等待前序 ${data.waiting}，图片不存在 ${data.missing}`, { once: true })
     clearSelection()
   } catch (e: any) { notifyError(e) }
   finally { batchLoading.value = false }
@@ -548,11 +548,11 @@ async function handleImageUpdated() {
             @click="handleBatchAnalyze"
             class="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors"
             :aria-disabled="!canUseAIAnalyze"
-            :title="canUseAIAnalyze ? '批量 AI 分析' : '未开通 AI 分析权限'"
+            :title="canUseAIAnalyze ? '重新调用 AI 分析选中图片（包括已有结果的图片）' : '未开通 AI 分析权限'"
             :class="canUseAIAnalyze ? 'hover:bg-white/10 text-blue-400 hover:text-blue-300' : 'opacity-50 cursor-not-allowed'"
           >
             <Sparkles class="w-3.5 h-3.5" />
-            分析
+            重新分析
             <Lock v-if="!canUseAIAnalyze" class="w-3.5 h-3.5 opacity-80" />
           </button>
 

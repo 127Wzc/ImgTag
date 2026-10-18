@@ -68,6 +68,6 @@ export {
     useCreateSubject,
     useUpdateSubject,
     useSetPrimarySubject,
-    useSuggestPrimarySubject,
+    useSetImageSubjects,
     type SubjectsQueryParams,
 } from './subjects'

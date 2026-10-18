@@ -27,6 +27,7 @@ class ImageCreateByUrl(BaseModel):
     """通过 URL 创建图像"""
     image_url: str = Field(..., description="图像 URL")
     auto_analyze: bool = Field(default=True, description="是否自动分析图像")
+    analysis_instructions: str = Field(default="", max_length=6000, description="仅本次分析的补充要求；非空时强制调用模型")
     tags: Optional[List[str]] = Field(default=None, description="手动指定的标签")
     description: Optional[str] = Field(default=None, description="手动指定的描述")
     category_id: Optional[int] = Field(default=None, description="主分类ID (level=0)")
@@ -47,6 +48,7 @@ class TagWithSource(BaseSchema):
     """带来源的标签"""
     id: int = Field(..., description="标签 ID")
     name: str = Field(..., description="标签名称")
+    is_subject: bool = Field(default=False, description="是否为已启用主体的主名称或别名标签")
     source: str = Field(default="ai", description="标签来源: user/ai/system")
     level: int = Field(default=2, description="标签级别: 0=主分类, 1=分辨率, 2=普通标签")
 
@@ -60,6 +62,7 @@ class ImageResponse(BaseSchema):
     image_url: str = Field(..., description="图像访问 URL (动态计算)")
     tags: List[TagWithSource] = Field(default_factory=list, description="标签列表")
     subjects: List[ImageSubjectAssignment] = Field(default_factory=list, description="主体列表")
+    subject_analysis: dict | None = None
     description: Optional[str] = Field(default=None, description="图像描述")
     original_url: Optional[str] = Field(default=None, description="原始来源 URL")
     width: Optional[int] = Field(default=None, description="宽度(px)")

@@ -139,6 +139,21 @@ class InternalError(APIError):
         super().__init__("INTERNAL_ERROR", message, 500)
 
 
+class EmbeddingAPIError(ValueError):
+    """向量服务失败，与当前用户的登录状态无关。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 502,
+        upstream_status: int | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.upstream_status = upstream_status
+
+
 # ============= 503 Service Unavailable =============
 
 class TransientAPIError(APIError):

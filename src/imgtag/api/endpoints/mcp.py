@@ -328,6 +328,7 @@ async def _tool_add_image(
     description = arguments.get("description", "")
     category_id = arguments.get("category_id")  # 主分类 ID
     auto_analyze = arguments.get("auto_analyze", True)
+    analysis_instructions = arguments.get("analysis_instructions", "").strip()
     is_public = arguments.get("is_public", True)  # 是否公开
     idempotency_key = (
         arguments.get("idempotency_key")
@@ -365,7 +366,7 @@ async def _tool_add_image(
     # 权限校验需在上传/落库前完成，避免产生副作用
     has_valid_tags = bool([t for t in tags if t and str(t).strip()])
     has_valid_desc = bool(description and str(description).strip())
-    need_analysis = auto_analyze and not (has_valid_tags and has_valid_desc)
+    need_analysis = auto_analyze and (bool(analysis_instructions) or not (has_valid_tags and has_valid_desc))
     if need_analysis and not check_permission(api_user, Permission.AI_ANALYZE):
         raise MCPUserError(permission_denied_detail(Permission.AI_ANALYZE))
 
@@ -454,7 +455,7 @@ async def _tool_add_image(
         # 判断是否需要 AI 分析。与图片、存储位置共享同一事务；入队失败时
         # 不会留下半成品图片记录。
         if need_analysis:
-            await task_queue.add_tasks([new_image.id], session=session)
+            await task_queue.add_tasks([new_image.id], session=session, analysis_instructions=analysis_instructions)
             status = "已加入 AI 分析队列"
         else:
             status = "已保存（跳过 AI 分析）"
@@ -515,6 +516,7 @@ class AddImageArguments(_MCPArguments):
     description: StrictStr = Field(default="", max_length=10_000)
     category_id: StrictInt | None = Field(default=None, ge=1)
     auto_analyze: StrictBool = True
+    analysis_instructions: StrictStr = Field(default="", max_length=6000)
     is_public: StrictBool = True
     idempotency_key: StrictStr | None = Field(
         default=None, min_length=1, max_length=128
@@ -625,12 +627,13 @@ _TOOL_DEFS = [
                 "description": {
                     "type": "string",
                     "maxLength": 10000,
-                    "description": "图片描述（若同时提供 tags 和 description 则跳过 AI 分析）"
+                    "description": "图片描述（同时提供 tags 和 description 且无补充要求时跳过 AI 分析）"
                 },
                 "category_id": {
                     "type": "integer",
                     "description": "主分类 ID（level=0 的标签 ID）"
                 },
+                "analysis_instructions": {"type": "string", "maxLength": 6000, "description": "本次分析补充要求；非空时不跳过已有描述和标签的分析"},
                 "auto_analyze": {
                     "type": "boolean",
                     "default": True,

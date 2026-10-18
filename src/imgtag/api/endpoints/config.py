@@ -14,7 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
 from imgtag.core.config_cache import config_cache
+from imgtag.core.config_defaults import DEFAULT_CONFIG, DEFAULT_CATEGORY_PROMPTS
 from imgtag.core.logging_config import get_logger
+from imgtag.core.subject_extraction_limits import validate_subject_extraction_config
 from imgtag.db.database import get_async_session
 from imgtag.db.repositories import config_repository
 from imgtag.schemas.model_test import ModelTestRequest, ModelTestResponse
@@ -56,6 +58,13 @@ async def get_all_config(
         raise HTTPException(status_code=500, detail=f"获取配置失败: {str(e)}")
 
 
+@router.get("/prompt-defaults")
+async def get_prompt_defaults(admin: Dict = Depends(require_admin)):
+    """只读返回可重置的提示词，用户保存的配置不受影响。"""
+    return {"vision_prompt": DEFAULT_CONFIG["vision_prompt"],
+            "category_prompts": DEFAULT_CATEGORY_PROMPTS}
+
+
 @router.get("/{key}")
 async def get_config(
     key: str,
@@ -83,6 +92,10 @@ async def update_configs(
 ):
     """批量更新配置（需管理员权限）"""
     logger.info(f"更新配置: {list(request.configs.keys())}")
+    try:
+        validate_subject_extraction_config(request.configs)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
     
     try:
         # 过滤掉值为 "******" 的项（表示未修改的密钥）
@@ -129,6 +142,10 @@ async def update_single_config(
 ):
     """更新单个配置项（需管理员权限）"""
     logger.info(f"更新单个配置: {key}")
+    try:
+        validate_subject_extraction_config({key: value})
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
     
     try:
         is_secret = "key" in key.lower() or "secret" in key.lower()

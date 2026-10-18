@@ -14,6 +14,7 @@ from typing import List, Optional, TYPE_CHECKING
 import httpx
 
 from imgtag.core.config_cache import config_cache
+from imgtag.core.exceptions import EmbeddingAPIError
 from imgtag.core.logging_config import get_logger
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import image_repository
@@ -445,7 +446,7 @@ class EmbeddingService:
             dimensions = int(dim_str) if dim_str else 1536
 
         if not api_key:
-            raise ValueError("嵌入模型 API 密钥未配置，请在系统设置中配置")
+            raise EmbeddingAPIError("向量服务未配置 API 密钥，请在系统设置 → 向量嵌入中配置", status_code=503)
 
         payload: dict[str, str | int] = {
             "model": model,
@@ -475,29 +476,43 @@ class EmbeddingService:
                 )
 
                 if response.status_code != 200:
-                    error_text = response.text[:500] if response.text else "无响应内容"
-                    logger.error(f"API 请求失败: HTTP {response.status_code}, {error_text}")
-                    raise ValueError(f"API 请求失败: HTTP {response.status_code}")
+                    status = response.status_code
+                    if status == 401:
+                        message = "向量服务 API 密钥无效或已失效，请在系统设置 → 向量嵌入中检查 API 地址和密钥；当前网页登录仍有效"
+                    elif status == 403:
+                        message = "向量服务拒绝访问，请检查 API 密钥的权限、模型访问权限或账户状态"
+                    elif status == 404:
+                        message = "向量服务接口或模型不存在，请在系统设置 → 向量嵌入中检查 API 地址和模型名称"
+                    elif status == 429:
+                        message = "向量服务请求受限，请检查账户额度或稍后重试"
+                    elif status >= 500:
+                        message = "向量服务暂时不可用，请稍后重试"
+                    else:
+                        message = "向量服务拒绝请求，请在系统设置 → 向量嵌入中检查模型和参数配置"
+                    raise EmbeddingAPIError(f"{message}（HTTP {status}）", upstream_status=status)
 
                 data = response.json()
                 embedding = data["data"][0]["embedding"]
                 if len(embedding) != dimensions:
-                    raise ValueError(
+                    raise EmbeddingAPIError(
                         f"嵌入模型 {model} 实际输出维度为 {len(embedding)}，"
                         f"与配置维度 {dimensions} 不一致，请修改向量维度配置"
                     )
                 logger.info(f"API 向量生成成功，维度: {len(embedding)}")
                 return embedding
 
-        except httpx.ConnectError as e:
-            logger.error(f"嵌入模型 API 连接失败: {e}")
-            raise ValueError("无法连接到 API") from e
         except httpx.TimeoutException as e:
-            logger.error(f"嵌入模型 API 请求超时: {e}")
-            raise ValueError("API 请求超时") from e
-        except Exception as e:
-            logger.error(f"API 向量生成失败: {e}")
+            logger.warning("向量服务请求超时")
+            raise EmbeddingAPIError("向量服务请求超时，请稍后重试", status_code=504) from e
+        except (httpx.RequestError, httpx.InvalidURL) as e:
+            logger.warning("向量服务连接失败，请检查 API 地址和网络")
+            raise EmbeddingAPIError("无法连接向量服务，请检查 API 地址和网络") from e
+        except EmbeddingAPIError as e:
+            logger.warning("向量生成失败: %s", e)
             raise
+        except (ValueError, KeyError, IndexError, TypeError) as e:
+            logger.warning("向量服务返回的数据格式不正确")
+            raise EmbeddingAPIError("向量服务返回的数据格式不正确，请检查 API 地址和模型配置") from e
     
     async def get_embedding_combined(
         self, 
@@ -541,8 +556,15 @@ class EmbeddingService:
             embedding = await self.get_embedding_combined(description, tags)
             
             async with async_session_maker() as session:
-                image_model = await image_repository.get_by_id(session, image_id)
+                image_model = await image_repository.get_by_id_for_update(session, image_id)
+                if image_model is None:
+                    return False
                 if image_model:
+                    current_tags = await image_repository.get_image_tags_with_source(session, image_id)
+                    current_names = {t["name"] for t in current_tags if t["level"] in (0, 2)}
+                    if (image_model.description or "") != description or current_names != set(tags):
+                        logger.info("图片 %s 内容已变化，跳过旧搜索向量写入", image_id)
+                        return False
                     await image_repository.update_image(
                         session, image_model, embedding=embedding
                     )

@@ -25,6 +25,10 @@ class TagRepository(BaseRepository[Tag]):
 
     model = Tag
 
+    async def list_system_tag_names(self, session: AsyncSession) -> list[str]:
+        result = await session.execute(select(Tag.name).where(Tag.level.in_([0, 1])))
+        return list(result.scalars().all())
+
     async def get_by_name(
         self,
         session: AsyncSession,

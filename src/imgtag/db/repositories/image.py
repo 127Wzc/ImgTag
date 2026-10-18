@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import and_, asc, bindparam, desc, func, or_, select, text, update
+from sqlalchemy import and_, asc, bindparam, desc, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -16,6 +16,7 @@ from imgtag.core.config import settings
 from imgtag.core.config_cache import config_cache
 from imgtag.db.repositories.base import BaseRepository
 from imgtag.models.image import Image
+from imgtag.models.subject import Subject
 from imgtag.models.tag import ImageTag, Tag
 from imgtag.utils.ids import dedup_positive_ints_keep_order
 
@@ -84,7 +85,7 @@ class ImageRepository(BaseRepository[Image]):
         image_id: int,
     ) -> Optional[Image]:
         """读取并锁定图片行，用于串行化同一图片的主体变更。"""
-        stmt = select(Image).where(Image.id == image_id).with_for_update()
+        stmt = select(Image).where(Image.id == image_id).with_for_update().execution_options(populate_existing=True)
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -191,6 +192,14 @@ class ImageRepository(BaseRepository[Image]):
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
 
+    @staticmethod
+    def subject_tag_marker():
+        """用相关子查询标记主体名称及别名标签，不展开 JOIN 导致标签重复。"""
+        return exists(select(Subject.id).where(
+            Subject.is_active.is_(True), Tag.level == 2,
+            or_(Subject.primary_tag_id == Tag.id, Subject.alias_tag_ids.any(Tag.id)),
+        )).label("is_subject")
+
     async def get_image_tags_with_source(
         self,
         session: AsyncSession,
@@ -212,6 +221,7 @@ class ImageRepository(BaseRepository[Image]):
                 Tag.level,
                 ImageTag.source,
                 ImageTag.sort_order,
+                self.subject_tag_marker(),
             )
             .join(ImageTag, Tag.id == ImageTag.tag_id)
             .where(ImageTag.image_id == image_id)
@@ -225,6 +235,7 @@ class ImageRepository(BaseRepository[Image]):
                 "level": row.level,
                 "source": row.source,
                 "sort_order": row.sort_order,
+                "is_subject": bool(row.is_subject),
             }
             for row in result
         ]
@@ -254,6 +265,7 @@ class ImageRepository(BaseRepository[Image]):
                 Tag.level,
                 ImageTag.source,
                 ImageTag.sort_order,
+                self.subject_tag_marker(),
             )
             .join(Tag, Tag.id == ImageTag.tag_id)
             .where(ImageTag.image_id.in_(image_ids))
@@ -270,6 +282,7 @@ class ImageRepository(BaseRepository[Image]):
                 "level": row.level,
                 "source": row.source,
                 "sort_order": row.sort_order,
+                "is_subject": bool(row.is_subject),
             })
 
         return tags_map
@@ -737,6 +750,7 @@ class ImageRepository(BaseRepository[Image]):
                     Tag.level,
                     ImageTag.source,
                     ImageTag.sort_order,
+                    self.subject_tag_marker(),
                 )
                 .join(Tag, Tag.id == ImageTag.tag_id)
                 .where(ImageTag.image_id.in_(image_ids))
@@ -750,6 +764,7 @@ class ImageRepository(BaseRepository[Image]):
                     "level": tag_row.level,
                     "source": tag_row.source,
                     "sort_order": tag_row.sort_order,
+                    "is_subject": bool(tag_row.is_subject),
                 })
         
         # Batch fetch URLs using storage service (avoids N+1)

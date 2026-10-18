@@ -9,7 +9,7 @@ Manages image analysis task queue.
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_permission
@@ -30,6 +30,8 @@ class AddTasksRequest(BaseModel):
     """Add tasks request."""
 
     image_ids: list[int]
+    force_analyze: bool = True
+    analysis_instructions: str = Field(default="", max_length=6000, description="本次分析补充要求，独立追加到模型提示词；非空时强制分析")
 
 
 class ConfigWorkerRequest(BaseModel):
@@ -67,15 +69,16 @@ async def add_tasks(
     if not request.image_ids:
         raise HTTPException(status_code=400, detail="图片 ID 列表不能为空")
 
-    added = await task_queue.add_tasks(request.image_ids)
+    result = await task_queue.enqueue_tasks(request.image_ids, force_analyze=request.force_analyze,
+                                            analysis_instructions=request.analysis_instructions)
 
     # Auto-start queue
     if not task_queue._running:
         background_tasks.add_task(start_queue_async)
 
     return {
-        "message": f"已添加 {added} 个任务到队列",
-        "added": added,
+        "message": "重新分析请求已处理" if request.force_analyze else "分析请求已处理",
+        **result,
         "total_pending": (await task_queue.get_status())["pending_count"],
     }
 

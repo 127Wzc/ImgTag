@@ -8,7 +8,8 @@ import { usePermission } from '@/composables/usePermission'
 import { Permission } from '@/constants/permissions'
 import type { Tag } from '@/types'
 import { Button } from '@/components/ui/button'
-import { notifyError } from '@/utils/notify'
+import { notifyError, notifySuccess } from '@/utils/notify'
+import { usePromptDefaults } from '@/composables/usePromptDefaults'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { 
@@ -136,6 +137,14 @@ function cancelEdit() {
 const showCategoryEditDialog = ref(false)
 const editingCategory = ref<Tag | null>(null)
 const categoryEditForm = ref({ name: '', code: '', prompt: '' })
+const { data: promptDefaults, isError: defaultsError, refetch: reloadDefaults } = usePromptDefaults(computed(() => userStore.isAdmin && showCategoryEditDialog.value))
+const categoryDefaultPrompt = computed(() => promptDefaults.value?.category_prompts[editingCategory.value?.code || ''] ?? '')
+function resetCategoryPrompt() {
+  if (!promptDefaults.value || renameTagMutation.isPending.value) return
+  categoryEditForm.value.prompt = categoryDefaultPrompt.value
+  notifySuccess('已填入默认提示词，保存后生效')
+}
+
 
 function showCategoryEdit(tag: Tag) {
   editingCategory.value = tag
@@ -182,7 +191,7 @@ async function handleCategorySave() {
       id: editingCategory.value.id,
       name: categoryEditForm.value.name.trim() || undefined,
       code: categoryEditForm.value.code.trim() || null,
-      prompt: categoryEditForm.value.prompt.trim() || null,
+      prompt: categoryEditForm.value.prompt || null,
     })
     closeCategoryEdit()
   } catch {}
@@ -507,13 +516,18 @@ const isLoading = computed(() => statsLoading.value || tagsLoading.value)
                 <p class="text-xs text-muted-foreground mt-1">文件将存储在: /{code}/ab/cd/hash.jpg</p>
               </div>
               
-              <!-- 提示词 -->
+              <!-- 分类格式与全局主体融合规则共同生效 -->
               <div>
-                <label class="block text-sm font-medium mb-1.5">分析提示词 (追加到全局)</label>
+                <label class="block text-sm font-medium mb-1.5">分类分析提示词（优先决定描述结构）</label>
+                <div class="flex flex-wrap items-center gap-2 mb-2">
+                  <Button type="button" variant="outline" size="sm" :disabled="!promptDefaults || renameTagMutation.isPending.value" @click="resetCategoryPrompt">重置为默认提示词</Button>
+                  <span class="text-xs text-muted-foreground">{{ categoryDefaultPrompt ? '保存后生效' : '自定义分类默认留空，保存后生效' }}</span>
+                </div>
+                <p v-if="defaultsError" class="text-xs text-destructive mb-2">默认提示词加载失败。<button type="button" class="underline" @click="reloadDefaults()">重试</button></p>
                 <textarea
                   v-model="categoryEditForm.prompt"
-                  rows="3"
-                  placeholder="如: 请特别关注人物的表情和姿态..."
+                  rows="10"
+                  placeholder="如: description 格式：主体: xxx。文字: xxx。心情/氛围: xxx。表述含义: xxx。"
                   class="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring resize-none"
                 />
               </div>

@@ -5,19 +5,58 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from imgtag.db.repositories.base import BaseRepository
 from imgtag.models.subject import ImageSubject, Subject, SubjectSample
-from imgtag.models.tag import Tag
+from imgtag.models.tag import ImageTag, Tag
+from imgtag.models.image import Image
 
 
 class SubjectRepository(BaseRepository[Subject]):
     """主体词典仓库。"""
 
     model = Subject
+
+    async def lock_by_ids(self, session: AsyncSession, subject_ids: list[int]) -> None:
+        """写回分析结果期间稳定主体定义，网络调用期间不持锁。"""
+        if subject_ids:
+            await session.execute(
+                select(Subject.id).where(Subject.id.in_(subject_ids))
+                .order_by(Subject.id).with_for_update(read=True)
+            )
+
+    async def list_matching_tags(self, session: AsyncSession, tag_ids: list[int]) -> Sequence[Subject]:
+        """只按主名称/别名标签 ID 匹配，分类标签不表示主体身份。"""
+        if not tag_ids:
+            return []
+        result = await session.execute(
+            select(Subject).where(
+                Subject.is_active.is_(True),
+                or_(Subject.primary_tag_id.in_(tag_ids), Subject.alias_tag_ids.overlap(tag_ids)),
+            ).order_by(Subject.id).execution_options(populate_existing=True)
+        )
+        return result.scalars().all()
+
+    async def count_current_images(self, session: AsyncSession, subject_ids: list[int]) -> dict[int, int]:
+        """批量统计当前关联图片，排除历史关联，不按标签或提炼样本计数。"""
+        if not subject_ids:
+            return {}
+        rows = (await session.execute(select(ImageSubject.subject_id, func.count(ImageSubject.image_id))
+            .where(ImageSubject.subject_id.in_(subject_ids), ImageSubject.is_current.is_(True))
+            .group_by(ImageSubject.subject_id))).all()
+        return {subject_id: count for subject_id, count in rows}
+
+    async def list_image_ids(self, session: AsyncSession, subject_id: int) -> list[int]:
+        result = await session.execute(
+            select(ImageSubject.image_id).where(
+                ImageSubject.subject_id == subject_id, ImageSubject.is_current.is_(True),
+            ).order_by(ImageSubject.image_id)
+        )
+        return list(result.scalars().all())
 
     async def get_by_name(self, session: AsyncSession, name: str) -> Optional[Subject]:
         stmt = select(Subject).where(Subject.name == name)
@@ -43,6 +82,7 @@ class SubjectRepository(BaseRepository[Subject]):
             .options(
                 selectinload(Subject.category_tag),
                 selectinload(Subject.primary_tag),
+                selectinload(Subject.cover_image),
             )
             .where(Subject.id == subject_id)
         )
@@ -63,6 +103,7 @@ class SubjectRepository(BaseRepository[Subject]):
             .options(
                 selectinload(Subject.category_tag),
                 selectinload(Subject.primary_tag),
+                selectinload(Subject.cover_image),
             )
             .order_by(Subject.id.desc())
             .limit(limit)
@@ -105,6 +146,44 @@ class SubjectRepository(BaseRepository[Subject]):
 
         related = await self.get_by_id_with_relations(session, subject.id)
         return related if related else subject
+
+    async def tagged_images(self, session: AsyncSession, tag_id: int, *, page: int = 1,
+                            size: int = 24, keyword: str = "") -> tuple[list[Image], int]:
+        conditions = [ImageTag.tag_id == tag_id]
+        if keyword.strip():
+            term = keyword.strip()
+            match = Image.description.ilike(f"%{term}%")
+            if term.removeprefix("#").isdigit():
+                match = or_(match, Image.id == int(term.removeprefix("#")))
+            conditions.append(match)
+        base = select(Image).join(ImageTag, ImageTag.image_id == Image.id).where(*conditions)
+        total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+        rows = (await session.execute(base.order_by(Image.id.desc()).offset((page - 1) * size).limit(size))).scalars().all()
+        return list(rows), total
+
+    async def eligible_reference_ids(self, session: AsyncSession, tag_id: int, image_ids: list[int]) -> set[int]:
+        rows = await session.execute(select(ImageTag.image_id).where(
+            ImageTag.tag_id == tag_id, ImageTag.image_id.in_(image_ids)))
+        return set(rows.scalars().all())
+
+    async def associate_tagged_images(self, session: AsyncSession, subject: Subject, actor_id: int | None) -> int:
+        """追加标签关联，保留原有主体和主主体，不登记提炼样本。先锁图片以串行化关联写入。"""
+        ids = list((await session.execute(select(Image.id).join(ImageTag, ImageTag.image_id == Image.id)
+            .where(ImageTag.tag_id == subject.primary_tag_id).order_by(Image.id).with_for_update(of=Image))).scalars().all())
+        if not ids:
+            return 0
+        # 分批追加，避免大图库超过驱动参数上限；图片锁持有到事务提交。
+        for start in range(0, len(ids), 500):
+            batch = ids[start:start + 500]
+            primaries = set((await session.execute(select(ImageSubject.image_id).where(
+                ImageSubject.image_id.in_(batch), ImageSubject.is_primary.is_(True)))).scalars().all())
+            await session.execute(insert(ImageSubject).values([{
+                "image_id": image_id, "subject_id": subject.id, "source": "tag", "state": "confirmed",
+                "is_primary": image_id not in primaries, "is_current": True, "created_by": actor_id,
+                "synced_primary_tag_id": None,
+            } for image_id in batch]).on_conflict_do_nothing(index_elements=["image_id", "subject_id"]))
+            await session.execute(update(Image).where(Image.id.in_(batch)).values(subject_analysis=None))
+        return len(ids)
 
     async def list_referencing_tag(
         self,
@@ -185,6 +264,39 @@ class ImageSubjectRepository(BaseRepository[ImageSubject]):
 
     model = ImageSubject
 
+    async def has_explicit_selection(self, session: AsyncSession, image_id: int) -> bool:
+        result = await session.execute(select(Image.subject_selection_explicit).where(Image.id == image_id))
+        return bool(result.scalar_one_or_none())
+
+    async def get_current(self, session: AsyncSession, image_id: int) -> Sequence[ImageSubject]:
+        result = await session.execute(
+            select(ImageSubject).options(selectinload(ImageSubject.subject))
+            .where(ImageSubject.image_id == image_id, ImageSubject.is_current.is_(True))
+            .order_by(ImageSubject.is_primary.desc(), ImageSubject.subject_id).execution_options(populate_existing=True)
+        )
+        return result.scalars().all()
+
+    async def replace_current(self, session: AsyncSession, image_id: int, subject_ids: list[int],
+                              primary_id: int | None, actor_id: int | None) -> Sequence[ImageSubject]:
+        # 调用方持有图片锁；先撤销主标记再设置，满足部分唯一索引。
+        await session.execute(update(ImageSubject).where(ImageSubject.image_id == image_id)
+                              .values(is_primary=False, is_current=False))
+        result = await session.execute(select(ImageSubject).where(ImageSubject.image_id == image_id))
+        existing = {row.subject_id: row for row in result.scalars().all()}
+        for subject_id in subject_ids:
+            row = existing.get(subject_id)
+            if row is None:
+                row = ImageSubject(image_id=image_id, subject_id=subject_id, created_by=actor_id)
+                session.add(row)
+            row.is_current = True
+            row.is_primary = subject_id == primary_id
+            row.source = "manual"
+            row.state = "confirmed"
+            row.confidence = None
+            row.updated_at = datetime.now(timezone.utc)
+        await session.flush()
+        return await self.get_current(session, image_id)
+
     async def get_primary(
         self,
         session: AsyncSession,
@@ -213,7 +325,7 @@ class ImageSubjectRepository(BaseRepository[ImageSubject]):
         await session.execute(
             update(ImageSubject)
             .where(and_(ImageSubject.image_id == image_id, ImageSubject.is_primary == True))  # noqa: E712
-            .values(is_primary=False, updated_at=datetime.now(timezone.utc))
+            .values(is_primary=False, is_current=False, updated_at=datetime.now(timezone.utc))
         )
 
         stmt = select(ImageSubject).where(
@@ -224,6 +336,7 @@ class ImageSubjectRepository(BaseRepository[ImageSubject]):
 
         if existing:
             existing.is_primary = True
+            existing.is_current = True
             existing.source = source
             existing.state = state
             existing.confidence = confidence
@@ -241,6 +354,7 @@ class ImageSubjectRepository(BaseRepository[ImageSubject]):
             source=source,
             state=state,
             is_primary=True,
+            is_current=True,
             created_by=created_by,
         )
         return created
@@ -264,7 +378,7 @@ class ImageSubjectRepository(BaseRepository[ImageSubject]):
                 ImageSubject.is_primary,
             )
             .join(Subject, Subject.id == ImageSubject.subject_id)
-            .where(ImageSubject.image_id.in_(image_ids))
+            .where(ImageSubject.image_id.in_(image_ids), ImageSubject.is_current.is_(True))
             .order_by(ImageSubject.image_id, ImageSubject.is_primary.desc(), ImageSubject.id.asc())
         )
         result = await session.execute(stmt)

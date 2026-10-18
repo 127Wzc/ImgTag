@@ -34,6 +34,7 @@ export interface LoginResponse {
 // ============= 标签相关 =============
 
 export interface TagWithSource {
+    is_subject?: boolean
     id: number           // 标签 ID（必需）
     name: string
     source: 'user' | 'ai' | 'system'
@@ -61,6 +62,11 @@ export interface ImageResponse {
     image_url: string
     tags: TagWithSource[]
     subjects: ImageSubjectAssignment[]
+    subject_analysis?: {
+        checks: { subject_id: number | string; status: 'supported' | 'uncertain' | 'conflict'; evidence: string }[]
+        observations: { subject_id: number | string | null; position: string; appearance: string; multiple: boolean }[]
+        subject_names: Record<string, string>
+    } | null
     description: string | null
     original_url: string | null
     width: number | null
@@ -124,6 +130,9 @@ export interface UploadAnalyzeResponse {
 // ============= 主体相关 =============
 
 export interface SubjectResponse {
+    image_count?: number
+    cover_image_id?: number | null
+    cover_image_url?: string
     id: number
     name: string
     category_tag_id: number
@@ -133,15 +142,17 @@ export interface SubjectResponse {
     alias_tag_ids: number[]
     aliases: string[]
     description: string | null
+    definition_revision: number
     is_active: boolean
     created_by: number | null
+  recognition_notes?: string
 }
 
 export interface ImageSubjectAssignment {
     subject_id: number
     subject_name: string
     confidence: number | null
-    source: 'manual' | 'auto' | 'approval' | 'suggest'
+    source: 'manual' | 'auto' | 'approval' | 'tag' | 'suggest'
     state: 'confirmed' | 'pending' | 'rejected'
     is_primary: boolean
 }

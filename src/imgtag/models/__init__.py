@@ -6,6 +6,7 @@ This package contains all database models using SQLAlchemy 2.0 declarative synta
 from imgtag.models.base import Base, TimestampMixin
 from imgtag.models.user import User
 from imgtag.models.image import Image
+from imgtag.models.analysis_version import ImageAnalysisVersion
 from imgtag.models.tag import Tag, ImageTag
 from imgtag.models.collection import Collection, ImageCollection
 from imgtag.models.task import Task
@@ -13,13 +14,14 @@ from imgtag.models.approval import Approval, AuditLog
 from imgtag.models.config import Config, SchemaMeta
 from imgtag.models.storage_endpoint import StorageEndpoint
 from imgtag.models.image_location import ImageLocation
-from imgtag.models.subject import Subject, SubjectSample, ImageSubject
+from imgtag.models.subject import Subject, SubjectSample, ImageSubject, SubjectPromptTemplate, SubjectDefinitionVersion
 
 __all__ = [
     "Base",
     "TimestampMixin",
     "User",
     "Image",
+    "ImageAnalysisVersion",
     "Tag",
     "ImageTag",
     "Collection",
@@ -34,4 +36,6 @@ __all__ = [
     "Subject",
     "SubjectSample",
     "ImageSubject",
+    "SubjectPromptTemplate",
+    "SubjectDefinitionVersion",
 ]

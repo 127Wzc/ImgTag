@@ -27,7 +27,7 @@ logger = get_logger(__name__)
 SUGGEST_SUBJECT_ASSIGNMENT_TYPE = "suggest_subject_assignment"
 
 # 人工确认来源：自动匹配结果不得覆盖
-PROTECTED_ASSIGNMENT_SOURCES = ("manual", "approval")
+PROTECTED_ASSIGNMENT_SOURCES = ("manual", "approval", "tag")
 
 # V1 样本仅登记来源图片引用，真实向量由后续识别器接入时回填
 SAMPLE_REFERENCE_MODEL = "reference"
@@ -35,6 +35,44 @@ SAMPLE_REFERENCE_MODEL = "reference"
 
 class SubjectAssignmentService:
     """主体纠正服务（无状态）。"""
+
+    async def assign_subjects(self, session: AsyncSession, *, image_id: int,
+                              subject_ids: list[int], primary_id: int | None,
+                              actor_id: int | None) -> list[dict[str, Any]]:
+        image = await image_repository.get_by_id_for_update(session, image_id)
+        if image is None:
+            raise ValueError("图片不存在")
+        ids = list(dict.fromkeys(subject_ids))
+        if primary_id is not None and primary_id not in ids:
+            raise ValueError("主要展示主体必须在关联列表中")
+        subjects = [await subject_repository.get_by_id(session, sid) for sid in ids]
+        if any(s is None or not s.is_active for s in subjects):
+            raise ValueError("关联列表包含不存在或已停用的主体")
+        previous = {a.subject_id: a for a in await image_subject_repository.get_current(session, image_id)}
+        keep_tags = {s.primary_tag_id for s in subjects}
+        for sid, old in previous.items():
+            owned = old.synced_primary_tag_id
+            if sid not in ids and owned is not None and owned not in keep_tags:
+                await image_tag_repository.remove_tag_from_image(session, image_id, owned)
+        rows = await image_subject_repository.replace_current(
+            session, image_id, ids, primary_id or (ids[0] if ids else None), actor_id,
+        )
+        by_id = {s.id: s for s in subjects}
+        for row in rows:
+            added = await self._sync_primary_tag(
+                session, image_id=image_id, new_subject=by_id[row.subject_id],
+                previous=previous.get(row.subject_id), actor_id=actor_id, source="manual",
+            )
+            if added is not None:
+                row.synced_primary_tag_id = by_id[row.subject_id].primary_tag_id if added else None
+        image.subject_analysis = None
+        image.subject_selection_explicit = True
+        await session.flush()
+        return [self._assignment_to_dict(
+            subject_id=row.subject_id, subject_name=by_id[row.subject_id].name,
+            confidence=row.confidence, source=row.source, state=row.state,
+            is_primary=row.is_primary, changed=True,
+        ) for row in rows]
 
     async def _get_valid_image_and_subject(
         self,
@@ -145,7 +183,7 @@ class SubjectAssignmentService:
         add_sample: bool = False,
         comment: str | None = None,
     ) -> dict[str, Any]:
-        _, subject = await self._get_valid_image_and_subject(
+        image, subject = await self._get_valid_image_and_subject(
             session,
             image_id=image_id,
             subject_id=subject_id,
@@ -182,6 +220,7 @@ class SubjectAssignmentService:
             state=state,
             created_by=actor_id,
         )
+        image.subject_analysis = None
 
         tag_added_by_subject = await self._sync_primary_tag(
             session,

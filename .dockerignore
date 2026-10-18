@@ -53,3 +53,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Agent 临时产物不进入镜像构建上下文
+tmp/

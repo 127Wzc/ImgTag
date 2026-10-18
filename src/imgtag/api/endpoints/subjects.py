@@ -4,19 +4,144 @@
 """主体词典 API。"""
 
 from typing import Any
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from imgtag.api.endpoints.auth import get_current_user, require_admin
+from imgtag.api.endpoints.auth import require_admin
 from imgtag.db import get_async_session
 from imgtag.db.repositories import subject_repository, tag_repository
 from imgtag.schemas import SubjectCreate, SubjectResponse, SubjectUpdate
+from imgtag.schemas.subject import (
+    SubjectTemplateInput, SubjectTemplateResponse, SubjectExtractionRequest,
+    SubjectVersionResponse, SaveSubjectContent, RestoreSubjectRequest,
+)
+from imgtag.db.repositories.subject_definition import subject_definition_repository, subject_template_repository
+from imgtag.db.repositories import task_repository
+from imgtag.services.subject_extraction_service import subject_extraction_service
+from imgtag.services.task_queue import task_queue
+from imgtag.services.subject_gallery_service import subject_gallery_service
+from imgtag.schemas.base import PaginatedResponse
+from imgtag.schemas.subject import SubjectReferenceImage
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
-def _subject_to_response(row) -> SubjectResponse:
+@router.get("/extraction-settings")
+async def extraction_settings(admin: dict = Depends(require_admin), session: AsyncSession = Depends(get_async_session)):
+    return {"max_images": await subject_extraction_service.get_max_images(session)}
+
+
+
+@router.get("/templates", response_model=list[SubjectTemplateResponse])
+async def list_templates(admin: dict = Depends(require_admin), session: AsyncSession = Depends(get_async_session)):
+    return await subject_template_repository.list_templates(session)
+
+
+@router.post("/templates", response_model=SubjectTemplateResponse)
+async def create_template(data: SubjectTemplateInput, admin: dict = Depends(require_admin),
+                          session: AsyncSession = Depends(get_async_session)):
+    return await subject_template_repository.create(session, **data.model_dump(), is_builtin=False)
+
+
+@router.patch("/templates/{template_id}", response_model=SubjectTemplateResponse)
+async def update_template(template_id: int, data: SubjectTemplateInput, admin: dict = Depends(require_admin),
+                          session: AsyncSession = Depends(get_async_session)):
+    row = await subject_template_repository.get_by_id(session, template_id)
+    if row is None:
+        raise HTTPException(404, "模板不存在")
+    if row.is_builtin:
+        raise HTTPException(400, "内置模板请复制后修改；本次提炼可直接编辑补充文本")
+    return await subject_template_repository.update(session, row, **data.model_dump())
+
+
+@router.get("/{subject_id}/reference-images", response_model=PaginatedResponse[SubjectReferenceImage])
+async def reference_images(subject_id: int, page: int = Query(1, ge=1), size: int = Query(24, ge=1, le=60),
+                           keyword: str = Query("", max_length=200), session: AsyncSession = Depends(get_async_session)):
+    return await subject_gallery_service.reference_images(session, subject_id, page=page, size=size, keyword=keyword)
+
+
+@router.post("/{subject_id}/extract/preview")
+async def preview_extraction(subject_id: int, data: SubjectExtractionRequest,
+                             admin: dict = Depends(require_admin), session: AsyncSession = Depends(get_async_session)):
+    return await subject_extraction_service.build_input(session, subject_id, data)
+
+
+@router.post("/{subject_id}/extract", status_code=202)
+async def extract_subject(subject_id: int, data: SubjectExtractionRequest,
+                          admin: dict = Depends(require_admin), session: AsyncSession = Depends(get_async_session)):
+    task_id = await subject_extraction_service.enqueue(session, subject_id, data, admin["id"])
+    await session.commit()
+    asyncio.create_task(task_queue.start_processing())
+    return {"task_id": task_id}
+
+
+@router.get("/{subject_id}/extract/{task_id}")
+async def extraction_status(subject_id: int, task_id: str,
+                             admin: dict = Depends(require_admin), session: AsyncSession = Depends(get_async_session)):
+    task = await task_repository.get_by_id(session, task_id)
+    if task is None or task.type != "extract_subject" or (task.payload or {}).get("subject_id") != subject_id:
+        raise HTTPException(404, "提炼任务不存在")
+    return {"status": task.status, "error": task.error, "result": task.result}
+
+
+@router.get("/{subject_id}/versions", response_model=list[SubjectVersionResponse])
+async def subject_versions(subject_id: int, offset: int = Query(0, ge=0),
+                            admin: dict = Depends(require_admin), session: AsyncSession = Depends(get_async_session)):
+    return await subject_definition_repository.list_versions(session, subject_id, offset)
+
+
+@router.delete("/{subject_id}/versions/{version_id}", status_code=204)
+async def delete_definition_history(subject_id: int, version_id: int, admin: dict = Depends(require_admin),
+                                    session: AsyncSession = Depends(get_async_session)):
+    await subject_extraction_service.delete_history(session, subject_id, version_id)
+    await session.commit()
+
+
+@router.post("/{subject_id}/versions/{version_id}/restore")
+async def restore_definition(subject_id: int, version_id: int, data: RestoreSubjectRequest,
+                              admin: dict = Depends(require_admin), session: AsyncSession = Depends(get_async_session)):
+    row = await subject_extraction_service.restore(session, subject_id, version_id, data.expected_revision, admin["id"])
+    await session.commit()
+    return {"definition_revision": row.definition_revision}
+
+
+@router.put("/{subject_id}/definition/current")
+async def save_current_definition(subject_id: int, data: SaveSubjectContent,
+                                   admin: dict = Depends(require_admin), session: AsyncSession = Depends(get_async_session)):
+    row = await subject_extraction_service.save_current(session, subject_id, data, admin["id"])
+    return {"definition_revision": row.definition_revision}
+
+
+@router.get("/{subject_id}/reanalyze", response_model=dict[str, Any])
+async def preview_subject_reanalysis(
+    subject_id: int, admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """预览主动重分析的影响数量。"""
+    subject = await subject_repository.get_by_id(session, subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="主体不存在")
+    counts = await subject_repository.count_current_images(session, [subject_id])
+    return {"count": counts.get(subject_id, 0), "is_active": subject.is_active}
+
+
+@router.post("/{subject_id}/reanalyze", response_model=dict[str, Any])
+async def reanalyze_subject_images(
+    subject_id: int, expected_count: int | None = Query(None, ge=0), admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    subject = await subject_repository.get_by_id(session, subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="主体不存在")
+    ids = await subject_repository.list_image_ids(session, subject_id)
+    if expected_count is not None and len(ids) != expected_count:
+        raise HTTPException(409, f"关联图片数量已变化（原{expected_count}张，当前{len(ids)}张），请重新确认")
+    return await task_queue.enqueue_tasks(ids, force_analyze=True)
+
+
+def _subject_to_response(row, cover_urls: dict[int, str] | None = None, image_count: int = 0) -> SubjectResponse:
     alias_tag_ids = [int(i) for i in (getattr(row, "alias_tag_ids", None) or []) if int(i) > 0]
     alias_names = [str(n) for n in (getattr(row, "aliases", None) or []) if n]
     category_name = row.category_tag.name if getattr(row, "category_tag", None) else ""
@@ -31,6 +156,11 @@ def _subject_to_response(row) -> SubjectResponse:
         alias_tag_ids=alias_tag_ids,
         aliases=alias_names,
         description=row.description,
+        image_count=image_count,
+        cover_image_id=getattr(row, "cover_image_id", None),
+        cover_image_url=(cover_urls or {}).get(getattr(row, "cover_image_id", None), ""),
+        definition_revision=getattr(row, "definition_revision", 0),
+        recognition_notes=getattr(row, "recognition_notes", "") or "",
         is_active=row.is_active,
         created_by=row.created_by,
     )
@@ -97,10 +227,10 @@ async def list_subjects(
     size: int = Query(100, ge=1, le=500),
     keyword: str | None = Query(default=None, description="名称/描述关键字"),
     active_only: bool = Query(default=True, description="仅显示启用的主体"),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """主体词典列表（需登录：词典可能包含人名等敏感信息，不对匿名开放）。"""
+    """主体词典列表（仅管理员可读写，普通用户通过图片结果查看关联名称）。"""
     _ = user
     rows = await subject_repository.list_subjects(
         session,
@@ -109,10 +239,9 @@ async def list_subjects(
         keyword=keyword,
         active_only=active_only,
     )
-    return [
-        _subject_to_response(row)
-        for row in rows
-    ]
+    urls = await subject_gallery_service.cover_urls(session, rows)
+    counts = await subject_repository.count_current_images(session, [row.id for row in rows])
+    return [_subject_to_response(row, urls, counts.get(row.id, 0)) for row in rows]
 
 
 @router.post("/", response_model=SubjectResponse)
@@ -143,13 +272,17 @@ async def create_subject(
         is_active=True,
         created_by=admin.get("id"),
     )
+    image_count = await subject_gallery_service.associate_on_create(session, created, admin.get("id"))
     # 重新读取（带关系）以返回完整结构
+    if created.description:
+        created.definition_revision = 1
     created_row = await subject_repository.get_by_id_with_relations(session, created.id)
     if created_row:
-        return _subject_to_response(created_row)
+        return _subject_to_response(created_row, await subject_gallery_service.cover_urls(session, [created_row]), image_count)
 
     # 兜底（极小概率，关系加载失败）
     return SubjectResponse(
+        image_count=image_count,
         id=created.id,
         name=created.name,
         category_tag_id=created.category_tag_id,
@@ -164,6 +297,16 @@ async def create_subject(
     )
 
 
+@router.get("/{subject_id}", response_model=SubjectResponse)
+async def get_subject(subject_id: int, user: dict = Depends(require_admin),
+                       session: AsyncSession = Depends(get_async_session)):
+    row = await subject_repository.get_by_id_with_relations(session, subject_id)
+    if row is None:
+        raise HTTPException(404, "主体不存在")
+    counts = await subject_repository.count_current_images(session, [row.id])
+    return _subject_to_response(row, await subject_gallery_service.cover_urls(session, [row]), counts.get(row.id, 0))
+
+
 @router.patch("/{subject_id}", response_model=SubjectResponse)
 async def update_subject(
     subject_id: int,
@@ -172,7 +315,7 @@ async def update_subject(
     session: AsyncSession = Depends(get_async_session),
 ):
     _ = admin
-    subject = await subject_repository.get_by_id(session, subject_id)
+    subject = await subject_definition_repository.lock_subject(session, subject_id)
     if not subject:
         raise HTTPException(status_code=404, detail=f"主体 #{subject_id} 不存在")
 
@@ -206,7 +349,14 @@ async def update_subject(
     if "is_active" in data.model_fields_set and data.is_active is not None:
         update_data["is_active"] = bool(data.is_active)
 
+    changed = "description" in update_data and subject.description != update_data["description"]
+    if changed:
+        await subject_extraction_service.record_manual(session, subject, admin.get("id"))
     await subject_repository.update(session, subject, **update_data)
+    if changed:
+        subject.definition_revision += 1
 
     updated_row = await subject_repository.get_by_id_with_relations(session, subject.id)
-    return _subject_to_response(updated_row if updated_row else subject)
+    row = updated_row if updated_row else subject
+    counts = await subject_repository.count_current_images(session, [row.id])
+    return _subject_to_response(row, await subject_gallery_service.cover_urls(session, [row]), counts.get(row.id, 0))

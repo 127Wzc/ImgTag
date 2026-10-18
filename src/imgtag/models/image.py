@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Optional
 
 from pgvector.sqlalchemy import Vector
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -76,6 +77,8 @@ class Image(Base, TimestampMixin):
 
     # Content
     description: Mapped[Optional[str]] = mapped_column(Text, comment="图片描述")
+    subject_analysis: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True, comment="当次主体视觉核实与位置")
+    subject_selection_explicit: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
     embedding: Mapped[Optional[list[float]]] = mapped_column(
         Vector(None), comment="向量嵌入"
     )

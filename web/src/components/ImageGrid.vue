@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import type { ImageResponse, ImageWithSimilarity, TagWithSource } from '@/types'
-import { Copy, X, Plus, Loader2, Check } from 'lucide-vue-next'
+import { Copy, X, Plus, Loader2, Check, UserRound } from 'lucide-vue-next'
 import CopyToast from '@/components/ui/CopyToast.vue'
 import { useAddImageTag, useRemoveImageTag, useTags } from '@/api/queries'
 import { getErrorMessage } from '@/utils/api-error'
@@ -365,9 +365,11 @@ function isAnyOpPending(imageId: number): boolean {
             <span
               v-for="tag in image.tags?.slice(0, 3)"
               :key="tag.name"
-              class="px-1.5 py-0.5 bg-white/20 backdrop-blur-sm border border-white/10 text-white text-[10px] rounded-md shadow-sm"
+              class="inline-flex items-center px-1.5 py-0.5 backdrop-blur-sm border text-[10px] rounded-md shadow-sm"
+              :class="tag.is_subject ? 'bg-violet-500/30 border-violet-300/40 text-violet-100' : 'bg-white/20 border-white/10 text-white'"
+              :title="tag.is_subject ? '主体标签' : undefined"
             >
-              {{ tag.name }}
+              <UserRound v-if="tag.is_subject" class="w-2.5 h-2.5 mr-0.5" />{{ tag.name }}
             </span>
             <span v-if="(image.tags?.length || 0) > 3" class="px-1.5 py-0.5 bg-black/40 backdrop-blur text-white text-[10px] rounded-md">
                +{{ (image.tags?.length || 0) - 3 }}
@@ -394,11 +396,12 @@ function isAnyOpPending(imageId: number): boolean {
               class="group/tag inline-flex items-center px-2 py-0.5 text-[10px] border rounded-md transition-colors"
               :class="[
                 getTagClass(tag),
+                tag.is_subject ? 'bg-violet-500/10 text-violet-600 dark:text-violet-300 ring-1 ring-inset ring-violet-500/20 hover:bg-violet-500/15' : 'bg-secondary hover:bg-secondary/80 text-secondary-foreground',
                 canEditTagsForImage(image) ? 'pr-1' : '',
                 isTagPending(image.id, tag.id) ? 'opacity-50' : ''
               ]"
             >
-              {{ tag.name }}
+              <UserRound v-if="tag.is_subject" class="w-3 h-3 mr-0.5" />{{ tag.name }}
               <button
                 v-if="canEditTagsForImage(image) && !isTagPending(image.id, tag.id)"
                 @click="removeTag($event, image, tag)"

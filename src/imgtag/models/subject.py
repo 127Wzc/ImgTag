@@ -58,6 +58,8 @@ class Subject(Base, TimestampMixin):
         comment="主体别名标签ID列表(level=2)",
     )
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="描述")
+    recognition_notes: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    definition_revision: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         server_default="true",
@@ -82,6 +84,11 @@ class Subject(Base, TimestampMixin):
         nullable=True,
         comment="创建人ID",
     )
+
+    cover_image_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("images.id", ondelete="SET NULL"), nullable=True, comment="首张提炼参考图封面"
+    )
+    cover_image: Mapped[Optional["Image"]] = relationship("Image", foreign_keys=[cover_image_id])
 
     creator: Mapped[Optional["User"]] = relationship("User", foreign_keys=[created_by])
     category_tag: Mapped["Tag"] = relationship("Tag", foreign_keys=[category_tag_id])
@@ -201,7 +208,7 @@ class ImageSubject(Base, TimestampMixin):
         String(20),
         server_default="manual",
         nullable=False,
-        comment="来源: manual/auto/approval",
+        comment="来源: manual/auto/approval/tag（人工标签确认）",
     )
     state: Mapped[str] = mapped_column(
         String(20),
@@ -215,6 +222,7 @@ class ImageSubject(Base, TimestampMixin):
         nullable=False,
         comment="是否主主体",
     )
+    is_current: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
     synced_primary_tag_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey("tags.id", ondelete="SET NULL"),
@@ -231,3 +239,37 @@ class ImageSubject(Base, TimestampMixin):
     image: Mapped["Image"] = relationship("Image", back_populates="image_subjects")
     subject: Mapped["Subject"] = relationship("Subject", back_populates="image_subjects")
     creator: Mapped[Optional["User"]] = relationship("User", foreign_keys=[created_by])
+
+
+class SubjectPromptTemplate(Base, TimestampMixin):
+    """提炼补充模板；任务保存文本快照，不依赖模板后续状态。"""
+
+    __tablename__ = "subject_prompt_templates"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    is_builtin: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default="true", nullable=False)
+
+
+class SubjectDefinitionVersion(Base):
+    """主体描述被替换前的只读历史备份。"""
+
+    __tablename__ = "subject_definition_versions"
+    __table_args__ = (
+        Index("ix_subject_versions_subject", "subject_id"),
+        Index("uq_subject_published_revision", "subject_id", "published_revision", unique=True),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id", ondelete="CASCADE"))
+    state: Mapped[str] = mapped_column(String(20), nullable=False, server_default="history")
+    definition: Mapped[str] = mapped_column(Text, nullable=False)
+    recognition_notes: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    edit_revision: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    input_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    base_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    published_revision: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_by: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -29,6 +29,7 @@ from imgtag.services.subject_assignment_service import (
 )
 from imgtag.services.approval_preview_service import approval_preview_service
 from imgtag.services.rebuild_vector_service import enqueue_rebuild_vector
+from imgtag.services.task_queue import task_queue
 from imgtag.utils.approval_utils import extract_image_id_from_approval
 from imgtag.utils.pagination import PageParams
 
@@ -156,16 +157,20 @@ async def approve_request(
         new_value={"status": "approved", "comment": data.comment},
     )
 
-    # 确保修改已提交后再触发异步任务，避免读到旧数据
+    # 主体关联与任务在同一事务提交；worker 只会读到提交后的主体。
+    reanalyze_enqueued = False
+    if approval.type == SUGGEST_SUBJECT_ASSIGNMENT_TYPE:
+        image_id = _extract_image_id(approval)
+        if image_id:
+            await task_queue.add_tasks([image_id], force_analyze=True, session=session)
+            reanalyze_enqueued = True
     await session.commit()
 
-    # 建议落地后触发向量重建（不走视觉分析）：
-    # - 图片修改建议：描述/标签变化
-    # - 主体纠正建议：落地时会同步图片标签
+    # 普通图片修改建议只重建向量；主体纠正已安排强制视觉分析。
     rebuild_enqueued = None
     rebuild_added = 0
     rebuild_image_id = None
-    if approval.type in (SUGGEST_IMAGE_UPDATE_TYPE, SUGGEST_SUBJECT_ASSIGNMENT_TYPE):
+    if approval.type == SUGGEST_IMAGE_UPDATE_TYPE:
         rebuild_image_id = _extract_image_id(approval)
         if rebuild_image_id:
             rebuild_enqueued, rebuild_added, _ = await enqueue_rebuild_vector(
@@ -176,6 +181,7 @@ async def approve_request(
 
     return {
         "message": "已批准",
+        "reanalyze_enqueued": reanalyze_enqueued,
         "rebuild_image_id": rebuild_image_id,
         "rebuild_enqueued": rebuild_enqueued,
         "rebuild_added": rebuild_added,
@@ -241,8 +247,12 @@ async def batch_approve(
 
                     await approval_repository.approve(session, approval, admin["id"], data.comment)
 
-                    # 建议落地后触发向量重建
-                    if approval.type in (SUGGEST_IMAGE_UPDATE_TYPE, SUGGEST_SUBJECT_ASSIGNMENT_TYPE):
+                    if approval.type == SUGGEST_SUBJECT_ASSIGNMENT_TYPE:
+                        image_id = _extract_image_id(approval)
+                        if image_id:
+                            await task_queue.add_tasks([image_id], force_analyze=True, session=session)
+                    # 普通图片修改只重建向量。
+                    if approval.type == SUGGEST_IMAGE_UPDATE_TYPE:
                         image_id = _extract_image_id(approval)
                         if image_id:
                             rebuild_image_ids.append(image_id)
