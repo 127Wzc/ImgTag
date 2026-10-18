@@ -9,6 +9,8 @@ Pydantic 模式定义
 from typing import List, Optional
 from pydantic import BaseModel, Field, HttpUrl
 
+from imgtag.core.analysis_instructions import AnalysisInstructions
+
 from .base import BaseSchema
 from .subject import ImageSubjectAssignment
 
@@ -27,7 +29,7 @@ class ImageCreateByUrl(BaseModel):
     """通过 URL 创建图像"""
     image_url: str = Field(..., description="图像 URL")
     auto_analyze: bool = Field(default=True, description="是否自动分析图像")
-    analysis_instructions: str = Field(default="", max_length=6000, description="仅本次分析的补充要求；非空时强制调用模型")
+    analysis_instructions: AnalysisInstructions = Field(default="", max_length=6000, description="仅本次分析的补充要求；未传、null 或空白不生效")
     tags: Optional[List[str]] = Field(default=None, description="手动指定的标签")
     description: Optional[str] = Field(default=None, description="手动指定的描述")
     category_id: Optional[int] = Field(default=None, description="主分类ID (level=0)")

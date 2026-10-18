@@ -117,11 +117,12 @@ curl "http://your-domain/api/v1/external/images/random?api_key=YOUR_KEY&tags=风
 | `description` | string | 否 | `""` | 图片描述 |
 | `category_id` | int | 否 | - | 主分类 ID |
 | `auto_analyze` | bool | 否 | `true` | 是否 AI 分析 |
+| `analysis_instructions` | string / null | 否 | `""` | 仅本次分析的补充要求，最多 6000 字符；未传、null、空串或纯空白均不生效 |
 | `callback_url` | string | 否 | - | 分析完成回调 URL |
 | `is_public` | bool | 否 | `true` | 是否公开 |
 
 > [!TIP]
-> 同时提供 `tags` 和 `description` 时会跳过 AI 分析，只生成向量嵌入（更快）。
+> 同时提供有效的 `tags` 和 `description` 且未填写补充要求时会跳过 AI 分析，只生成向量嵌入。`auto_analyze=true` 且补充要求非空时仍调用模型；`auto_analyze=false` 始终不调用模型。补充要求仅用于本次分析，不修改全局提示词或主体资料。
 
 #### 示例
 
@@ -133,6 +134,7 @@ curl -X POST "http://your-domain/api/v1/external/images" \
   -d '{
     "image_url": "https://example.com/image.jpg",
     "auto_analyze": true,
+    "analysis_instructions": "重点描述表情和动作，保留图中文字",
     "callback_url": "https://your-server.com/webhook"
   }'
 
@@ -319,6 +321,11 @@ curl "http://your-domain/api/v1/external/images/search?api_key=YOUR_KEY&tags=可
               "default": true,
               "description": "是否启用 AI 分析"
             },
+            "analysis_instructions": {
+              "type": "string",
+              "maxLength": 6000,
+              "description": "仅本次分析的补充要求；启用分析且非空时强制调用模型"
+            },
             "callback_url": {
               "type": "string",
               "format": "uri",
@@ -503,6 +510,7 @@ curl -X POST "http://your-server:8000/api/v1/mcp" \
 | `add_image` | `image_url` | 必填，1-2048 字符 |
 | `add_image` | `tags` | 最多 50 项；每项 1-100 字符 |
 | `add_image` | `description` | 最长 10000 字符 |
+| `add_image` | `analysis_instructions` | 可选，最长 6000 字符；启用分析且非空时强制调用模型 |
 | `add_image` | `category_id` | 可选正整数 |
 | `add_image` | `auto_analyze` / `is_public` | 可选布尔值，默认均为 `true` |
 | `add_image` | `idempotency_key` | 可选，1-128 字符；跨请求重试时建议复用 |

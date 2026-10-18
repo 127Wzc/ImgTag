@@ -1,15 +1,16 @@
 """图片分析接口：单次补充要求、权限与任务响应契约。"""
 
+import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from fastapi import FastAPI
 from pydantic import ValidationError
 import httpx
 import pytest
 
-from imgtag.api.endpoints import images, mcp, queue, tasks as task_api
+from imgtag.api.endpoints import external, images, mcp, queue, tasks as task_api
 from imgtag.api.endpoints.auth import get_current_user
 from imgtag.core.exceptions import EmbeddingAPIError
 from imgtag.main import unhandled_exception_handler
@@ -37,12 +38,20 @@ async def test_queue_api_preserves_custom_field_and_checks_permission_before_enq
         enqueue.assert_not_awaited()
 
 
-@pytest.mark.parametrize('model', [ImageCreateByUrl, mcp.AddImageArguments])
+@pytest.mark.parametrize('model', [ImageCreateByUrl, external.ExternalImageCreate, mcp.AddImageArguments])
 async def test_url_and_mcp_upload_inputs_support_bounded_optional_instructions(model):
     assert model(image_url='https://example.com/a.png', analysis_instructions='描述图中文字').analysis_instructions == '描述图中文字'
     assert model(image_url='https://example.com/a.png').analysis_instructions == ''
     with pytest.raises(ValidationError):
         model(image_url='https://example.com/a.png', analysis_instructions='字' * 6001)
+
+
+@pytest.mark.parametrize('model', [ImageCreateByUrl, external.ExternalImageCreate])
+def test_upload_instructions_accept_null_but_reject_invalid_types(model):
+    assert model(image_url='https://example.com/a.png', analysis_instructions=None).analysis_instructions == ''
+    for invalid in [False, 123, [], {}]:
+        with pytest.raises(ValidationError):
+            model(image_url='https://example.com/a.png', analysis_instructions=invalid)
 
 
 async def test_upload_openapi_exposes_same_field_and_image_tag_marker():
@@ -61,6 +70,158 @@ class LocalSession:
 
     async def __aexit__(self, *args):
         return False
+
+
+@pytest.fixture
+def upload_dependencies(monkeypatch):
+    session = SimpleNamespace(commit=AsyncMock())
+    endpoint = SimpleNamespace(id=1, name='local', provider='local')
+    image = SimpleNamespace(id=18, description='已有描述')
+    monkeypatch.setattr(images.storage_endpoint_repository, 'resolve_upload_endpoint', AsyncMock(return_value=(endpoint, None)))
+    monkeypatch.setattr(images.storage_endpoint_repository, 'get_by_id', AsyncMock(return_value=endpoint))
+    monkeypatch.setattr(images.upload_service, 'save_remote_image', AsyncMock(return_value=('a.png', '/uploads/a.png', b'image')))
+    monkeypatch.setattr(images.upload_service, 'fetch_remote_image', AsyncMock(return_value=(b'image', 'image/png')))
+    monkeypatch.setattr(images.upload_service, 'extract_image_dimensions', Mock(return_value=(None, None)))
+    monkeypatch.setattr(images.storage_service, 'upload_to_endpoint', AsyncMock(return_value=True))
+    monkeypatch.setattr(images.storage_service, 'get_read_url', AsyncMock(return_value='/uploads/a.png'))
+    monkeypatch.setattr(images.image_repository, 'create_image', AsyncMock(return_value=image))
+    monkeypatch.setattr(images.image_repository, 'get_image_tags_with_source', AsyncMock(return_value=[]))
+    monkeypatch.setattr(images.image_location_repository, 'create', AsyncMock())
+    monkeypatch.setattr(images.image_tag_repository, 'set_image_tags', AsyncMock())
+    monkeypatch.setattr(images.tag_repository, 'get_name_levels', AsyncMock(return_value={'已有标签': 2}))
+    monkeypatch.setattr(images, 'trigger_backup_for_image', AsyncMock())
+    monkeypatch.setattr(external, 'trigger_backup_for_image', AsyncMock())
+    monkeypatch.setattr(images.embedding_service, 'save_embedding_for_image', AsyncMock())
+    monkeypatch.setattr(images.task_queue, 'add_tasks', AsyncMock())
+    monkeypatch.setattr(images.task_queue, '_running', True)
+    return session
+
+
+@pytest.mark.parametrize('auto_analyze,instructions,full,expected', [
+    (True, '重点描述文字', True, True),
+    (True, '', True, False),
+    (True, '   ', True, False),
+    (True, None, True, False),
+    (True, None, False, True),
+    (True, '', False, True),
+    (False, '重点描述文字', True, False),
+    (False, '重点描述文字', False, False),
+])
+async def test_external_upload_analysis_decision_and_instruction_forwarding(
+    monkeypatch, upload_dependencies, auto_analyze, instructions, full, expected,
+):
+    app = FastAPI()
+    app.include_router(external.router, prefix='/external')
+    app.dependency_overrides[external.require_api_key] = lambda: {'id': 1, 'role': 'admin'}
+    app.dependency_overrides[external.get_async_session] = lambda: upload_dependencies
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/external/images', json={
+            'image_url': 'https://example.com/a.png', 'auto_analyze': auto_analyze,
+            'analysis_instructions': instructions, 'callback_url': 'https://example.com/callback',
+            'tags': ['已有标签'] if full else [], 'description': '已有描述' if full else '',
+        })
+    await asyncio.sleep(0)
+    assert response.status_code == 200, response.text
+    if expected:
+        external.task_queue.add_tasks.assert_awaited_once_with(
+            [18], callback_url='https://example.com/callback', analysis_instructions=instructions or '',
+        )
+        external.embedding_service.save_embedding_for_image.assert_not_awaited()
+    else:
+        external.task_queue.add_tasks.assert_not_awaited()
+
+
+async def test_external_custom_instructions_require_ai_permission_before_upload(upload_dependencies):
+    app = FastAPI()
+    app.include_router(external.router, prefix='/external')
+    app.dependency_overrides[external.require_api_key] = lambda: {'id': 1, 'role': 'user', 'permissions': 0}
+    app.dependency_overrides[external.get_async_session] = lambda: upload_dependencies
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/external/images', json={
+            'image_url': 'https://example.com/a.png', 'tags': ['已有标签'],
+            'description': '已有描述', 'analysis_instructions': '重点描述文字',
+        })
+    assert response.status_code == 403
+    external.upload_service.save_remote_image.assert_not_awaited()
+    external.image_repository.create_image.assert_not_awaited()
+    external.task_queue.add_tasks.assert_not_awaited()
+
+
+@pytest.mark.parametrize('source', ['external', 'file', 'url'])
+@pytest.mark.parametrize('extra', [{}, {'analysis_instructions': ''}, {'analysis_instructions': ' \t\n '}, {'analysis_instructions': None}])
+async def test_upload_empty_instructions_preserve_existing_behavior(monkeypatch, upload_dependencies, source, extra):
+    app = FastAPI()
+    app.include_router(images.router, prefix='/images')
+    app.include_router(external.router, prefix='/external')
+    user = {'id': 1, 'role': 'user', 'permissions': int(images.Permission.UPLOAD_IMAGE)}
+    app.dependency_overrides[get_current_user] = lambda: user if source == 'file' else {'id': 1, 'role': 'admin'}
+    app.dependency_overrides[external.require_api_key] = lambda: user
+    app.dependency_overrides[images.get_async_session] = lambda: upload_dependencies
+    process = AsyncMock()
+    monkeypatch.setattr(images, '_post_upload_process', process)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        if source == 'file':
+            response = await client.post('/images/upload', files={'file': ('a.png', b'image', 'image/png')},
+                data={'auto_analyze': 'true', 'tags': '已有标签', 'description': '已有描述', **extra})
+        else:
+            path = '/external/images' if source == 'external' else '/images/analyze-url'
+            response = await client.post(path, json={
+                'image_url': 'https://example.com/a.png', 'auto_analyze': True,
+                'tags': ['已有标签'], 'description': '已有描述', **extra,
+            })
+    await asyncio.sleep(0)
+    assert response.status_code == (200 if source == 'external' else 201), response.text
+    images.task_queue.add_tasks.assert_not_awaited()
+    if source == 'external':
+        images.embedding_service.save_embedding_for_image.assert_awaited_once()
+    else:
+        process.assert_awaited_once()
+        assert not process.await_args.kwargs['analysis_instructions'].strip()
+
+
+@pytest.mark.parametrize('source', ['file', 'url'])
+async def test_web_upload_routes_forward_instructions(monkeypatch, upload_dependencies, source):
+    app = FastAPI()
+    app.include_router(images.router, prefix='/images')
+    app.dependency_overrides[get_current_user] = lambda: {'id': 1, 'role': 'admin'}
+    app.dependency_overrides[images.get_async_session] = lambda: upload_dependencies
+    process = AsyncMock()
+    monkeypatch.setattr(images, '_post_upload_process', process)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        if source == 'file':
+            response = await client.post('/images/upload', files={'file': ('a.png', b'image', 'image/png')},
+                data={'auto_analyze': 'true', 'analysis_instructions': '重点描述文字'})
+        else:
+            response = await client.post('/images/analyze-url', json={
+                'image_url': 'https://example.com/a.png', 'auto_analyze': True, 'analysis_instructions': '重点描述文字',
+            })
+    await asyncio.sleep(0)
+    assert response.status_code == 201, response.text
+    assert process.await_args.kwargs['analysis_instructions'] == '重点描述文字'
+    assert process.await_args.kwargs['auto_analyze'] is True
+
+
+@pytest.mark.parametrize('auto_analyze,instructions,expected', [
+    (True, '重点描述文字', True), (True, '   ', False), (False, '重点描述文字', False),
+])
+async def test_upload_background_analysis_respects_custom_instructions(
+    monkeypatch, upload_dependencies, auto_analyze, instructions, expected,
+):
+    class UploadSession(LocalSession):
+        async def commit(self):
+            pass
+
+    monkeypatch.setattr('imgtag.db.database.async_session_maker', UploadSession)
+    await images._post_upload_process(
+        image_id=18, user_id=1, tags=['已有标签'], description='已有描述',
+        category_id=None, width=None, height=None, auto_analyze=auto_analyze,
+        log=images.logger, analysis_instructions=instructions,
+    )
+    if expected:
+        images.task_queue.add_tasks.assert_awaited_once_with([18], analysis_instructions=instructions)
+    else:
+        images.task_queue.add_tasks.assert_not_awaited()
+        images.embedding_service.save_embedding_for_image.assert_awaited_once()
 
 
 def make_app(role="admin"):

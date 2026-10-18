@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.dependencies import require_api_key
+from imgtag.core.analysis_instructions import AnalysisInstructions
 from imgtag.core.logging_config import get_logger, get_perf_logger
 from imgtag.api.permission_guards import ensure_create_tags_if_missing, ensure_permission
 from imgtag.core.permissions import Permission
@@ -47,7 +48,7 @@ class ExternalImageCreate(BaseModel):
     """External API image create request.
     
     标签处理逻辑：
-    - 若同时提供 tags 和 description，跳过 AI 分析，只生成向量嵌入
+    - 若同时提供 tags 和 description 且无补充要求，跳过 AI 分析，只生成向量嵌入
     - 若只提供 tags，先保存为用户标签(source=user)，再进行 AI 分析
     - AI 分析的标签会与用户标签合并，重名标签优先保留用户标签
     - 若都不指定，正常进行 AI 分析
@@ -59,6 +60,7 @@ class ExternalImageCreate(BaseModel):
     category_id: int | None = Field(default=None, description="主分类ID")
     endpoint_id: int | None = Field(default=None, description="目标存储端点ID")
     auto_analyze: bool = Field(default=True, description="是否启用 AI 分析")
+    analysis_instructions: AnalysisInstructions = Field(default="", max_length=6000, description="仅本次分析的补充要求；未传、null 或空白不生效")
     callback_url: str | None = Field(default=None, description="分析完成后的回调URL")
     is_public: bool = Field(default=True, description="是否公开可见")
 
@@ -152,7 +154,7 @@ async def analyze_image_from_url(
         has_valid_tags = bool([t for t in request.tags if t and t.strip()])
         has_valid_description = bool(request.description and request.description.strip())
         user_provided_full = has_valid_tags and has_valid_description
-        need_analysis = request.auto_analyze and not user_provided_full
+        need_analysis = request.auto_analyze and (bool(request.analysis_instructions.strip()) or not user_provided_full)
         if need_analysis:
             ensure_permission(api_user, Permission.AI_ANALYZE)
 
@@ -267,6 +269,7 @@ async def analyze_image_from_url(
             await task_queue.add_tasks(
                 [new_image.id], 
                 callback_url=request.callback_url,
+                analysis_instructions=request.analysis_instructions,
             )
         elif user_provided_full:
             # 用户已提供完整内容，只需生成向量（后台执行）

@@ -51,6 +51,7 @@ export interface UploadOptions {
     file: File
     autoAnalyze?: boolean
     skipAnalyze?: boolean
+    analysisInstructions?: string
     categoryId?: number
     tags?: string
     description?: string
@@ -71,6 +72,10 @@ export function useUploadImage() {
             formData.append('file', options.file)
             formData.append('auto_analyze', String(options.autoAnalyze ?? true))
             formData.append('skip_analyze', String(options.skipAnalyze ?? false))
+            const analysisInstructions = options.analysisInstructions?.trim()
+            if (analysisInstructions) {
+                formData.append('analysis_instructions', analysisInstructions)
+            }
             if (options.categoryId) {
                 formData.append('category_id', String(options.categoryId))
             }
@@ -144,6 +149,7 @@ export function useUploadZip() {
 export interface UrlUploadOptions {
     imageUrl: string
     autoAnalyze?: boolean
+    analysisInstructions?: string
     categoryId?: number
     tags?: string[]
     description?: string
@@ -161,6 +167,7 @@ export function useUploadFromUrl() {
             const { data } = await apiClient.post<UploadAnalyzeResponse>('/images/analyze-url', {
                 image_url: options.imageUrl,
                 auto_analyze: options.autoAnalyze ?? true,
+                analysis_instructions: options.analysisInstructions?.trim() || undefined,
                 category_id: options.categoryId ?? null,
                 tags: options.tags ?? [],
                 description: options.description ?? '',

@@ -47,6 +47,7 @@ const uploadMode = ref<UploadMode>('file')
 
 // 上传选项
 const autoAnalyze = ref(false)
+const analysisInstructions = ref('')
 const selectedCategoryId = ref<number | null>(null)
 const isPublic = ref(true)  // 是否公开，默认公开
 
@@ -137,6 +138,7 @@ watch(() => props.open, (open) => {
     urlInput.value = ''
     urlResults.value = []
     uploadMode.value = 'file'
+    analysisInstructions.value = ''
   }
 })
 
@@ -220,6 +222,7 @@ async function uploadSingle(item: FileItem) {
         file: item.file,
         autoAnalyze: shouldAnalyze.value,
         skipAnalyze: !shouldAnalyze.value,
+        analysisInstructions: shouldAnalyze.value ? analysisInstructions.value.trim() : '',
         categoryId: selectedCategoryId.value ?? undefined,
         endpointId: selectedEndpointId.value ?? undefined,
         isPublic: isPublic.value,
@@ -258,6 +261,7 @@ async function uploadFromUrl() {
       await urlMutation.mutateAsync({
         imageUrl: urls[i],
         autoAnalyze: shouldAnalyze.value,
+        analysisInstructions: shouldAnalyze.value ? analysisInstructions.value.trim() : '',
         categoryId: selectedCategoryId.value ?? undefined,
       })
       urlResults.value[i].status = 'success'
@@ -362,6 +366,7 @@ const pendingCount = computed(() => files.value.filter(f => f.status === 'pendin
           </div>
           <!-- AI 分析开关 -->
           <div
+            v-if="uploadMode !== 'zip'"
             class="flex items-center gap-2"
             :title="canUseAIAnalyze ? 'AI 分析' : '未开通 AI 分析权限'"
           >
@@ -387,6 +392,18 @@ const pendingCount = computed(() => files.value.filter(f => f.status === 'pendin
             </button>
           </div>
         </div>
+
+        <label v-if="shouldAnalyze && uploadMode !== 'zip'" class="block text-sm font-medium">
+          补充要求 <span class="text-xs font-normal text-muted-foreground">仅本次上传，应用于每张图片</span>
+          <textarea
+            v-model="analysisInstructions"
+            maxlength="6000"
+            rows="2"
+            :disabled="hasUploading || urlUploading"
+            placeholder="例如：重点描述表情和动作，保留图中文字"
+            class="mt-2 w-full px-3 py-2 bg-muted border border-border rounded-lg text-sm font-normal focus:outline-none focus:ring-2 focus:ring-ring resize-y disabled:opacity-50"
+          />
+        </label>
 
         <!-- URL 输入模式 -->
         <template v-if="uploadMode === 'url'">
