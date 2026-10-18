@@ -111,12 +111,16 @@ class TaskQueueService:
         async def add_in_session(db_session: AsyncSession) -> None:
             # 后续锁读取会刷新实体，先保存本事务中已修改的字段。
             await db_session.flush()
-            for image_id in sorted(set(image_ids)):
-                image = await image_repository.get_by_id_for_update(db_session, image_id)
-                if image is None:
+            ordered_ids = sorted(set(image_ids))
+            locked_ids = await image_repository.lock_ids(db_session, ordered_ids)
+            active_by_image: dict[int, list[Task]] = {}
+            for task in await task_repository.list_active_for_images(db_session, sorted(locked_ids), task_type):
+                active_by_image.setdefault(task.payload["image_id"], []).append(task)
+            for image_id in ordered_ids:
+                if image_id not in locked_ids:
                     report["missing"] += 1
                     continue
-                active = await task_repository.list_active_for_image(db_session, image_id, task_type)
+                active = active_by_image.get(image_id, [])
                 matching = [t for t in active if normalize_analysis_instructions((t.payload or {}).get("analysis_instructions")) == analysis_instructions]
                 pending = next((t for t in matching if t.status == "pending"), None)
                 if pending is not None:

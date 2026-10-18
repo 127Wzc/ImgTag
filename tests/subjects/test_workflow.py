@@ -218,7 +218,7 @@ async def test_template_routes_and_extraction_require_admin(monkeypatch):
         assert response.status_code == 403
 
 
-async def test_multiple_subject_write_requires_admin_even_for_owner(monkeypatch):
+async def test_multiple_subject_write_allows_owner_but_checks_ai_permission(monkeypatch):
     from fastapi import FastAPI
     from imgtag.api.endpoints.auth import get_current_user
     from imgtag.api.endpoints.images import router
@@ -242,10 +242,10 @@ async def test_multiple_subject_write_requires_admin_even_for_owner(monkeypatch)
         assert (await client.put('/images/1/subjects', json={"subject_ids": [1, 2], "reanalyze": False})).status_code == 403
         image.uploaded_by = 3
         assert (await client.put('/images/1/subjects', json={"subject_ids": [1, 2]})).status_code == 403
-        assert (await client.put('/images/1/subjects', json={"subject_ids": [1, 2], "reanalyze": False})).status_code == 403
+        assert (await client.put('/images/1/subjects', json={"subject_ids": [1, 2], "reanalyze": False})).status_code == 200
         user['role'] = 'admin'
         assert (await client.put('/images/1/subjects', json={"subject_ids": [1, 2], "reanalyze": False})).status_code == 200
-    assert assign.await_count == 1
+    assert assign.await_count == 2
     assert enqueue.await_args.kwargs['session'] is fake_session
     assert enqueue.await_args.kwargs['task_type'] == 'rebuild_vector'
 
@@ -255,7 +255,7 @@ async def test_extraction_task_logs_are_admin_only(monkeypatch):
     listing = AsyncMock(return_value={"tasks": [], "total": 0})
     monkeypatch.setattr(tasks.task_service, "get_tasks", listing)
     await tasks.get_tasks(page=1, size=50, status=None, user={"id": 3, "role": "user"})
-    assert listing.await_args.kwargs['include_extraction'] is False
+    assert listing.await_args.kwargs['user'] == {'id': 3, 'role': 'user'}
     monkeypatch.setattr(tasks.task_service, "get_task", AsyncMock(return_value={"type": "extract_subject", "payload": {"snapshot": "private"}}))
     with pytest.raises(HTTPException) as e:
         await tasks.get_task('extract-task', user={"role": "user"})

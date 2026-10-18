@@ -12,7 +12,7 @@ from imgtag.db.repositories.analysis_version import analysis_version_repository
 from imgtag.schemas.analysis_review import (
     AnalysisVersionResponse, CurrentAnalysisSave, RestoreAnalysisRequest,
 )
-from imgtag.services.analysis_review_service import analysis_review_service
+from imgtag.services.analysis_review_service import analysis_review_service, public_snapshot
 from imgtag.services.task_queue import task_queue
 
 router = APIRouter()
@@ -31,7 +31,7 @@ async def history(image_id: int, offset: int = Query(0, ge=0), user: dict = Depe
                       session: AsyncSession = Depends(get_async_session)):
     await authorize(session, image_id, user)
     return {"current": await analysis_review_service.current(session, image_id),
-            "versions": [AnalysisVersionResponse.model_validate(row) for row in
+            "versions": [AnalysisVersionResponse.model_validate(row).model_copy(update={"base_snapshot": public_snapshot(row.base_snapshot)}) for row in
                          await analysis_version_repository.versions(session, image_id, offset)]}
 
 

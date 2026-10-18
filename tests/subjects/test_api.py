@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 import httpx
 import pytest
 
-from imgtag.api.endpoints import images, subjects, subjects as api, tasks as task_api
+from imgtag.api.endpoints import images, subjects, subjects as api, tags, tasks as task_api
 from imgtag.api.endpoints.auth import get_current_user
 from imgtag.db import get_async_session
 from imgtag.db.repositories import subject_repository
@@ -32,8 +32,6 @@ OPERATIONS = [
     ("PUT", "/subjects/1/definition/current", {"definition": "定义", "expected_revision": 0}),
     ("GET", "/subjects/1/reanalyze", None),
     ("POST", "/subjects/1/reanalyze", None),
-    ("PUT", "/images/1/subjects", {"subject_ids": [1], "primary_subject_id": 1}),
-    ("PUT", "/images/1/subjects/primary", {"subject_id": 1}),
     ("POST", "/images/1/subjects/suggest", {"subject_id": 1}),
 ]
 
@@ -187,3 +185,50 @@ async def test_failed_extraction_cannot_replay_old_references_from_task_retry(mo
     assert error.value.status_code == status
     if role == 'admin': assert '重新选择参考图' in error.value.detail
     retry.assert_not_awaited()
+
+
+@pytest.mark.parametrize('path,payload', [('/images/1/subjects',{'subject_ids':[1],'reanalyze':False}),
+    ('/images/1/subjects/primary',{'subject_id':1,'reanalyze':False})])
+async def test_subject_association_requires_login_and_image_ownership(monkeypatch, path, payload):
+    app = make_app()
+    image = SimpleNamespace(id=1, uploaded_by=1)
+    monkeypatch.setattr(images.image_repository, 'get_by_id', AsyncMock(return_value=image))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        assert (await client.put(path, json=payload)).status_code == 401
+        app.dependency_overrides[get_current_user] = lambda: {'id':2,'role':'user','permissions':15}
+        assert (await client.put(path, json=payload)).status_code == 403
+
+
+async def test_owner_cannot_register_subject_sample(monkeypatch):
+    app = make_app()
+    app.dependency_overrides[get_current_user] = lambda: {'id':1,'role':'user','permissions':15}
+    monkeypatch.setattr(images.image_repository, 'get_by_id', AsyncMock(return_value=SimpleNamespace(id=1,uploaded_by=1)))
+    assign = AsyncMock()
+    monkeypatch.setattr(images.subject_assignment_service, 'assign_primary_subject', assign)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.put('/images/1/subjects/primary', json={'subject_id':1,'add_sample':True,'reanalyze':False})
+        assert response.status_code == 403
+    assign.assert_not_awaited()
+
+
+@pytest.mark.parametrize('permissions,status', [(0, 403), (2, 200)])
+async def test_subject_tag_rename_preserves_existing_tag_permissions(monkeypatch, permissions, status):
+    app = FastAPI()
+    app.include_router(tags.router, prefix='/tags')
+    app.dependency_overrides[get_current_user] = lambda: {'id':1,'role':'user','permissions':permissions}
+    session = SimpleNamespace(flush=AsyncMock())
+    app.dependency_overrides[get_async_session] = lambda: session
+    tag = SimpleNamespace(id=7, name='主体别名', level=2)
+    monkeypatch.setattr(tags.tag_repository, 'get_by_id', AsyncMock(return_value=tag))
+    monkeypatch.setattr(tags.tag_repository, 'exists', AsyncMock(return_value=False))
+    sync = AsyncMock(return_value=1)
+    monkeypatch.setattr(subject_repository, 'sync_tag_rename', sync)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.put('/tags/id/7', json={'name':'改名'})
+        assert response.status_code == status, response.text
+    if status == 200:
+        assert tag.name == '改名'
+        sync.assert_awaited_once_with(session, tag_id=7, new_name='改名')
+    else:
+        assert tag.name == '主体别名'
+        sync.assert_not_awaited()

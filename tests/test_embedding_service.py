@@ -181,3 +181,13 @@ async def test_embedding_malformed_response_has_clear_message(embedding_api, bod
     install_handler(lambda request: httpx.Response(200, content=body))
     with pytest.raises(EmbeddingAPIError, match='返回的数据格式不正确'):
         await EmbeddingService().get_embedding('图片描述')
+
+
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), -float('inf'), 0.0, '0.1', None, True])
+async def test_embedding_rejects_invalid_values_before_search_or_persistence(embedding_api, value):
+    _, install_handler = embedding_api
+    # 非标准服务可能输出 NaN/Infinity，直接编码字节以覆盖真实 JSON 解析。
+    body = json.dumps({'data':[{'embedding':[value] * 1024}]}).encode()
+    install_handler(lambda request: httpx.Response(200, content=body))
+    with pytest.raises(EmbeddingAPIError, match='无效向量'):
+        await EmbeddingService().get_embedding('拉电线')

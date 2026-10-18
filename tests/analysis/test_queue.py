@@ -37,13 +37,13 @@ class Session:
 def queue(monkeypatch):
     monkeypatch.setattr(task_queue, "_running", True)
     monkeypatch.setattr("imgtag.services.task_queue.async_session_maker", Session)
-    monkeypatch.setattr("imgtag.services.task_queue.image_repository.get_by_id_for_update", AsyncMock(return_value=SimpleNamespace(id=1)))
+    monkeypatch.setattr("imgtag.services.task_queue.image_repository.lock_ids", AsyncMock(side_effect=lambda session, ids: set(ids)))
     return task_queue
 
 
 async def test_force_upgrades_pending_and_deduplicates(queue, monkeypatch):
     pending = SimpleNamespace(id="pending", status="pending", payload={"image_id": 1})
-    monkeypatch.setattr("imgtag.services.task_queue.task_repository.list_active_for_image", AsyncMock(return_value=[pending]))
+    monkeypatch.setattr("imgtag.services.task_queue.task_repository.list_active_for_images", AsyncMock(return_value=[pending]))
     create = AsyncMock()
     monkeypatch.setattr("imgtag.services.task_queue.task_repository.create_task", create)
     report = await queue.enqueue_tasks([1, 1], force_analyze=True)
@@ -60,7 +60,7 @@ async def test_running_task_keeps_exactly_one_followup(queue, monkeypatch):
     async def create(session, *, task_id, task_type, payload):
         active.append(SimpleNamespace(id=task_id, status="pending", payload=payload))
 
-    monkeypatch.setattr("imgtag.services.task_queue.task_repository.list_active_for_image", AsyncMock(side_effect=lambda *args: active))
+    monkeypatch.setattr("imgtag.services.task_queue.task_repository.list_active_for_images", AsyncMock(side_effect=lambda *args: active))
     monkeypatch.setattr("imgtag.services.task_queue.task_repository.create_task", create)
     first = await queue.enqueue_tasks([1], force_analyze=True)
     second = await queue.enqueue_tasks([1], force_analyze=True)
@@ -399,7 +399,7 @@ async def test_pending_tasks_merge_only_when_custom_instructions_match(queue, mo
     async def create(session, *, task_id, task_type, payload):
         active.append(SimpleNamespace(id=task_id, status='pending', payload=payload))
 
-    monkeypatch.setattr('imgtag.services.task_queue.task_repository.list_active_for_image', AsyncMock(side_effect=lambda *args: active))
+    monkeypatch.setattr('imgtag.services.task_queue.task_repository.list_active_for_images', AsyncMock(side_effect=lambda *args: active))
     monkeypatch.setattr('imgtag.services.task_queue.task_repository.create_task', create)
     first = await queue.enqueue_tasks([1], force_analyze=False, analysis_instructions=' 描述动作 ')
     second = await queue.enqueue_tasks([1], force_analyze=True, analysis_instructions='描述动作')
@@ -514,3 +514,19 @@ async def test_empty_global_and_custom_category_prompts_are_not_replaced_by_defa
     assert custom in actual
     assert '# 主体资料使用规则' not in actual
     assert '主体: xxx。文字: xxx。' not in actual
+
+
+async def test_batch_enqueue_reads_once_and_preserves_per_image_matching(queue, monkeypatch):
+    locks = AsyncMock(return_value=set(range(1, 101)))
+    active = AsyncMock(return_value=[SimpleNamespace(id=f't-{i}', status='pending', payload={'image_id': i}) for i in range(1,101)])
+    create = AsyncMock()
+    monkeypatch.setattr('imgtag.services.task_queue.image_repository.lock_ids', locks)
+    monkeypatch.setattr('imgtag.services.task_queue.task_repository.list_active_for_images', active)
+    monkeypatch.setattr('imgtag.services.task_queue.task_repository.create_task', create)
+    report = await queue.enqueue_tasks([*reversed(range(1,102)), 1], session=Session())
+    assert report['existing'] == 100 and report['missing'] == 1 and report['added'] == 0
+    assert report['task_ids'] == [f't-{i}' for i in range(1,101)]
+    assert locks.await_count == active.await_count == 1
+    assert locks.await_args.args[1] == list(range(1,102))
+    assert active.await_args.args[1] == list(range(1,101))
+    create.assert_not_awaited()

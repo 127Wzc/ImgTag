@@ -173,27 +173,42 @@ class TaskService:
         limit: int = 50,
         offset: int = 0,
         status: Optional[str] = None,
-        *, include_extraction: bool = False,
+        *, user: dict,
     ) -> Dict[str, Any]:
         """获取任务列表"""
         async with async_session_maker() as session:
             tasks, total = await task_repository.get_tasks(
-                session, status=status, limit=limit, offset=offset, include_extraction=include_extraction,
+                session, status=status, limit=limit, offset=offset,
+                include_extraction=user.get("role") == "admin",
+                owner_id=None if user.get("role") == "admin" else user["id"],
             )
             return {
-                "tasks": [TaskResponse.model_validate(task).model_dump(mode="json") for task in tasks],
+                "tasks": [self.task_response(task, user) for task in tasks],
                 "total": total,
             }
 
-    async def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+    async def get_task(self, task_id: str, *, user: dict) -> Optional[Dict[str, Any]]:
         """获取任务详情"""
         async with async_session_maker() as session:
-            task = await task_repository.get_by_id(session, task_id)
+            task = (await task_repository.get_by_id(session, task_id) if user.get("role") == "admin"
+                    else await task_repository.get_visible_by_id(session, task_id, user["id"]))
             if not task:
                 return None
             # 列表与详情共用响应 Schema，避免手写字段漏掉 updated_at。
-            return TaskResponse.model_validate(task).model_dump(mode="json")
+            return self.task_response(task, user)
     
+    @staticmethod
+    def task_response(task, user: dict) -> dict:
+        data = TaskResponse.model_validate(task).model_dump(mode="json")
+        if user.get("role") != "admin":
+            # 白名单返回进度，完整输入、原始响应、存储参数和内部错误仅管理员可读。
+            data["payload"] = {"image_id": (task.payload or {}).get("image_id")}
+            data["result"] = ({key: value for key, value in (task.result or {}).items()
+                if key in {"image_id", "vector_saved", "saved", "superseded"}}
+                if task.result is not None else None)
+            data["error"] = "任务执行失败，请联系管理员查看详情" if task.error else None
+        return data
+
     async def cleanup_old_tasks(self, days: int = 7) -> int:
         """清理旧任务"""
         async with async_session_maker() as session:

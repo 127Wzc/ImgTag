@@ -7,8 +7,15 @@ from imgtag.db.repositories.analysis_version import analysis_version_repository 
 from imgtag.services.subject_context_service import subject_context_service
 
 
+def public_snapshot(snapshot: dict) -> dict:
+    fields = {"subject_id", "name", "source", "status", "version", "definition_revision", "assignment_version"}
+    return {**snapshot, "subjects": [
+        {key: value for key, value in context.items() if key in fields}
+        for context in snapshot.get("subjects", [])]}
+
+
 def check_snapshot(current: dict, expected: dict):
-    if current != expected:
+    if public_snapshot(current) != public_snapshot(expected):
         raise HTTPException(409, "当前内容或主体已变化，请刷新后再保存")
 
 
@@ -20,7 +27,7 @@ class AnalysisReviewService:
         tags = await image_repository.get_image_tags_with_source(session, image_id)
         return {"description": image.description or "", "tags": sorted(t["name"] for t in tags if t["level"] == 2),
                 "tag_sources": sorted([{k: t[k] for k in ("id", "source", "level")} for t in tags], key=lambda t: t["id"]),
-                "subjects": await subject_context_service.resolve(session, image_id)}
+                "subjects": public_snapshot({"subjects": await subject_context_service.resolve(session, image_id)})["subjects"]}
 
     async def history(self, session: AsyncSession, image, current: dict, *, allow_empty: bool = False):
         if not allow_empty and not current.get("description") and not current.get("tags"):

@@ -22,6 +22,7 @@ class _FakeSessionCtx:
 @pytest.fixture(autouse=True)
 def repo_defaults(monkeypatch):
     monkeypatch.setattr("imgtag.services.task_queue.image_repository.get_by_id_for_update", AsyncMock(return_value=SimpleNamespace(id=1)))
+    monkeypatch.setattr("imgtag.services.task_queue.image_repository.lock_ids", AsyncMock(side_effect=lambda session, ids: set(ids)))
     monkeypatch.setattr("imgtag.services.task_queue.image_repository.get_image_tags_with_source", AsyncMock(return_value=[]))
     monkeypatch.setattr("imgtag.services.task_queue.subject_repository.list_matching_tags", AsyncMock(return_value=[]))
     monkeypatch.setattr("imgtag.services.task_queue.subject_repository.get_by_id", AsyncMock(return_value=None))
@@ -155,7 +156,7 @@ async def test_add_tasks_force_analyze_flag(monkeypatch) -> None:
     monkeypatch.setattr(
         "imgtag.services.task_queue.task_repository.create_task", fake_create_task
     )
-    monkeypatch.setattr("imgtag.services.task_queue.task_repository.list_active_for_image", fake_get_pending)
+    monkeypatch.setattr("imgtag.services.task_queue.task_repository.list_active_for_images", fake_get_pending)
 
     added = await task_queue.add_tasks([101], force_analyze=True)
     assert added == 1

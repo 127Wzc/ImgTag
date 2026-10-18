@@ -10,7 +10,7 @@ import asyncio
 import subprocess
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +23,8 @@ from imgtag.db.database import engine
 from imgtag.db.repositories import image_repository, config_repository
 from imgtag.services import embedding_service
 from imgtag.services.vector_rebuild_service import vector_rebuild_service
+from imgtag.services.vector_maintenance_service import vector_maintenance_service
+from imgtag.services.task_queue import task_queue
 
 logger = get_logger(__name__)
 perf_logger = get_perf_logger()
@@ -31,6 +33,25 @@ router = APIRouter()
 
 # 重建状态由 Service 统一维护。
 rebuild_status = vector_rebuild_service.status
+
+
+@router.get("/anomalies")
+async def scan_vector_anomalies(
+    page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100),
+    admin: dict = Depends(require_admin), session: AsyncSession = Depends(get_async_session),
+):
+    return await vector_maintenance_service.scan(session, page=page, size=size)
+
+
+@router.post("/anomalies/{image_id}/rebuild", status_code=202)
+async def rebuild_anomalous_image(
+    image_id: int, admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    result = await vector_maintenance_service.rebuild_image(session, image_id)
+    await session.commit()
+    asyncio.create_task(task_queue.start_processing())
+    return result
 
 # Install status
 install_status = {

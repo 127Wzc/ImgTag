@@ -1427,7 +1427,7 @@ async def suggest_image_update(
 @router.put("/{image_id}/subjects", response_model=dict[str, Any])
 async def set_image_subjects(
     image_id: int, data: SetImageSubjectsRequest,
-    current_user: dict = Depends(require_admin), session: AsyncSession = Depends(get_async_session),
+    current_user: dict = Depends(get_current_user), session: AsyncSession = Depends(get_async_session),
 ):
     image = await image_repository.get_by_id(session, image_id)
     if image is None:
@@ -1451,16 +1451,18 @@ async def set_image_subjects(
 async def set_primary_subject(
     image_id: int,
     data: SetPrimarySubjectRequest,
-    current_user: dict = Depends(require_admin),
+    current_user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """管理员直接设置图片主主体。"""
+    """管理员或图片所有者关联已有主体；样本维护仅限管理员。"""
     try:
         image = await image_repository.get_by_id(session, image_id)
         if not image:
             raise HTTPException(status_code=404, detail=f"未找到 ID 为 {image_id} 的图像")
 
         check_image_permission(image, current_user, "修改主体")
+        if data.add_sample and current_user.get("role") != "admin":
+            raise HTTPException(403, "主体样本仅管理员可维护")
         if data.reanalyze:
             ensure_permission(current_user, Permission.AI_ANALYZE)
 

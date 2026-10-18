@@ -4,11 +4,21 @@
 仅验证 mcp.py 内的分发矩阵、可见性参数传递与 scope/权限边界。
 """
 
+import json
+import math
+import sqlite3
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import httpx
+from fastapi import FastAPI
+from sqlalchemy.sql.elements import TextClause
 
 import pytest
 
-from imgtag.api.endpoints import mcp
+from imgtag.api.endpoints import images, mcp
+from imgtag.api.endpoints.auth import get_current_user_optional
+from imgtag.db import get_async_session
 
 ANON = None
 USER = {"id": 7, "username": "u1", "role": "user", "is_active": True, "permissions": 0}
@@ -289,3 +299,48 @@ def test_registry_listing_by_scope_and_permission() -> None:
     uploader = dict(USER, permissions=int(mcp.Permission.UPLOAD_IMAGE))
     uploader_names = [t["name"] for t in mcp.list_tools_for(mcp.SCOPE_FULL, uploader)]
     assert "add_image" in uploader_names
+
+
+@pytest.mark.parametrize('limit,expected_ids', [(1,[3]), (20,[3,1])])
+async def test_smart_search_handles_zero_vectors_before_ordering_and_limit(monkeypatch, limit, expected_ids):
+    """执行实际搜索 SQL，仅将 pgvector 运算符适配为内存库的余弦函数。"""
+    connection = sqlite3.connect(':memory:')
+    def cosine_distance(stored, query):
+        left, right = json.loads(stored), json.loads(query)
+        norm = math.hypot(*left) * math.hypot(*right)
+        return 1 - sum(a*b for a,b in zip(left,right)) / norm if norm else None
+    connection.create_function('cosine_distance', 2, cosine_distance)
+    connection.executescript("""
+        CREATE TABLE images (id INTEGER, description TEXT, original_url TEXT,
+            embedding TEXT, is_public BOOLEAN, uploaded_by INTEGER);
+        CREATE TABLE image_tags (image_id INTEGER, tag_id INTEGER);
+        CREATE TABLE tags (id INTEGER, name TEXT);
+        INSERT INTO images VALUES (1,'零向量标签命中',NULL,'[0,0]',1,1),
+            (2,'零向量无标签',NULL,'[0,0]',1,1), (3,'正常向量',NULL,'[1,0]',1,1),
+            (4,'反向向量',NULL,'[-1,0]',1,1), (5,'私有图片',NULL,'[1,0]',0,2);
+        INSERT INTO tags VALUES (7,'拉电线');
+        INSERT INTO image_tags VALUES (1,7);
+    """)
+    async def execute(statement, params=None):
+        if isinstance(statement, TextClause):
+            sql = str(statement).replace('i.embedding <=> :vector','cosine_distance(i.embedding, :vector)')
+            return connection.execute(sql, params)
+        return []  # 标签展示和上传者信息查询与本回归无关。
+    session = SimpleNamespace(execute=execute)
+    monkeypatch.setattr(images.embedding_service, 'get_embedding', AsyncMock(return_value=[1.0,0.0]))
+    monkeypatch.setattr(images.image_repository, 'get_by_ids', AsyncMock(return_value=[]))
+    monkeypatch.setattr(images.storage_service, 'get_read_urls', AsyncMock(return_value={}))
+    app = FastAPI()
+    app.include_router(images.router, prefix='/images')
+    app.dependency_overrides[get_async_session] = lambda: session
+    app.dependency_overrides[get_current_user_optional] = lambda: None
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            response = await client.post('/images/smart-search', json={'text':'拉电线','size':limit})
+        assert response.status_code == 200, response.text
+        data = response.json()['data']
+        assert [row['id'] for row in data] == expected_ids
+        assert [row['similarity'] for row in data] == pytest.approx([0.7,0.3][:limit])
+        json.dumps(response.json(), allow_nan=False)
+    finally:
+        connection.close()

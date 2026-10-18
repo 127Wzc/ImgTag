@@ -35,7 +35,7 @@ async def get_tasks(
 ):
     """获取任务列表"""
     result = await task_service.get_tasks(size, (page - 1) * size, status,
-                                          include_extraction=user.get("role") == "admin")
+                                          user=user)
     # 使用 PaginatedResponse 格式化响应（data 字段而非 tasks）
     return PaginatedResponse.create(
         items=result["tasks"],
@@ -48,7 +48,7 @@ async def get_tasks(
 @router.get("/{task_id}", response_model=Task)
 async def get_task(task_id: str, user: Dict = Depends(get_current_user)):
     """获取任务详情"""
-    task = await task_service.get_task(task_id)
+    task = await task_service.get_task(task_id, user=user)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     if task["type"] == "extract_subject" and user.get("role") != "admin":

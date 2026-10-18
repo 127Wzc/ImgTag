@@ -278,3 +278,18 @@ async def test_owner_can_delete_one_image_backup_and_commit(monkeypatch):
     assert response.status_code == 204 and response.content == b''
     delete.assert_awaited_once_with(session, 1, 2)
     session.commit.assert_awaited_once()
+
+
+def test_public_snapshot_hides_subject_details_but_still_detects_revision_changes():
+    from imgtag.services.analysis_review_service import public_snapshot, check_snapshot
+    current = {'description':'图片描述','tags':['标签'],'subjects':[{
+        'subject_id':7,'name':'主体','definition':'内部定义','recognition_notes':'内部备注',
+        'aliases':['别名'],'version':'v1','definition_revision':1,'source':'manual','status':'confirmed'}]}
+    public = public_snapshot(current)
+    assert public['subjects'] == [{'subject_id':7,'name':'主体','version':'v1',
+        'definition_revision':1,'source':'manual','status':'confirmed'}]
+    check_snapshot(current, public)
+    current['subjects'][0]['definition_revision'] = 2
+    with pytest.raises(HTTPException) as error:
+        check_snapshot(current, public)
+    assert error.value.status_code == 409

@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import math
 import os
 from pathlib import Path
 from typing import List, Optional, TYPE_CHECKING
@@ -498,6 +499,9 @@ class EmbeddingService:
                         f"嵌入模型 {model} 实际输出维度为 {len(embedding)}，"
                         f"与配置维度 {dimensions} 不一致，请修改向量维度配置"
                     )
+                if (not all(type(value) in (int, float) and math.isfinite(value) for value in embedding)
+                        or not any(embedding)):
+                    raise EmbeddingAPIError("向量服务返回无效向量（包含非有限数值、非数字或全零），请检查模型服务")
                 logger.info(f"API 向量生成成功，维度: {len(embedding)}")
                 return embedding
 

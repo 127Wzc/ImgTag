@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import and_, asc, bindparam, desc, exists, func, or_, select, text, update
+from sqlalchemy import and_, asc, bindparam, case, desc, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -42,6 +42,29 @@ class ImageRepository(BaseRepository[Image]):
         """))
         dimensions = result.scalar_one_or_none()
         return dimensions if dimensions and dimensions > 0 else 1536
+
+    async def find_embedding_anomalies(
+        self, session: AsyncSession, dimensions: int, *, limit: int, offset: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """仅扫描有向量输入的图片，在数据库中过滤、计数和分页。"""
+        has_tags = select(ImageTag.image_id).join(Tag, Tag.id == ImageTag.tag_id).where(
+            ImageTag.image_id == Image.id, Tag.level.in_([0, 2]), func.trim(Tag.name) != "",
+        ).exists()
+        has_content = or_(func.trim(func.coalesce(Image.description, "")) != "", has_tags)
+        # pgvector 不接受非有限分量；零向量的自余弦距离为 NaN，范围检查可识别。
+        reason = case(
+            (Image.embedding.is_(None), "missing"),
+            (func.vector_dims(Image.embedding) != dimensions, "dimension_mismatch"),
+            (~Image.embedding.cosine_distance(Image.embedding).between(0.0, 2.0), "invalid"),
+            else_=None,
+        )
+        conditions = [has_content, reason.is_not(None)]
+        total = (await session.execute(select(func.count()).select_from(Image).where(*conditions))).scalar_one()
+        rows = await session.execute(select(
+            Image.id, Image.description, func.vector_dims(Image.embedding).label("actual_dimensions"),
+            reason.label("reason"),
+        ).where(*conditions).order_by(Image.id).limit(limit).offset(offset))
+        return [dict(row) for row in rows.mappings().all()], total
 
     async def resize_embedding_dimensions(self, session: AsyncSession, dimensions: int) -> None:
         """在调用方事务内调整向量列和索引。"""
@@ -88,6 +111,14 @@ class ImageRepository(BaseRepository[Image]):
         stmt = select(Image).where(Image.id == image_id).with_for_update().execution_options(populate_existing=True)
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def lock_ids(self, session: AsyncSession, image_ids: list[int]) -> set[int]:
+        """按稳定顺序锁定整批图片，仅返回 ID，避免加载图片向量等大字段。"""
+        if not image_ids:
+            return set()
+        result = await session.execute(select(Image.id).where(Image.id.in_(image_ids))
+            .order_by(Image.id).with_for_update())
+        return set(result.scalars().all())
 
     async def create_image(
         self,
@@ -711,22 +742,25 @@ class ImageRepository(BaseRepository[Image]):
                 FROM image_tags it
                 JOIN tags t ON it.tag_id = t.id
                 WHERE t.name = :query_text
-            )
+            ), scored_images AS (
             SELECT 
                 i.id, 
                 i.description, 
                 i.original_url,
-                (1 - (i.embedding <=> :vector)) as vector_score,
+                -- 零向量的余弦距离为 NaN；先归零，再参与筛选、排序和 LIMIT。
+                -- 合法余弦距离范围为 [0, 2]，NaN/NULL 均不会进入有效分支。
+                (CASE WHEN (i.embedding <=> :vector) BETWEEN 0.0 AND 2.0
+                    THEN 1 - (i.embedding <=> :vector) ELSE 0.0 END) as vector_score,
                 (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) as tag_score
             FROM images i
             LEFT JOIN tag_match tm ON i.id = tm.image_id
             WHERE i.embedding IS NOT NULL
-              AND ((1 - (i.embedding <=> :vector)) > :threshold OR tm.image_id IS NOT NULL)
               {filter_sql}
-            ORDER BY (
-                (1 - (i.embedding <=> :vector)) * :vector_weight + 
-                (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) * :tag_weight
-            ) DESC
+            )
+            SELECT id, description, original_url, vector_score, tag_score
+            FROM scored_images
+            WHERE vector_score > :threshold OR tag_score > 0
+            ORDER BY (vector_score * :vector_weight + tag_score * :tag_weight) DESC, id DESC
             LIMIT :limit
         """)
         if tags:

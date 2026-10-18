@@ -4,6 +4,7 @@ import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
 import ImageDetailModal from '@/components/ImageDetailModal.vue'
 import ModelTestButton from '@/components/ModelTestButton.vue'
+import VectorAnomaliesPanel from '@/components/VectorAnomaliesPanel.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { getErrorMessage } from '@/utils/api-error'
@@ -836,6 +837,7 @@ onMounted(() => fetchConfigs())
             <div class="flex-1 overflow-y-auto p-6 space-y-5">
               <!-- 维护分类：特殊面板 -->
               <template v-if="activeCategory === 'maintenance'">
+                <VectorAnomaliesPanel />
                 <!-- 重复文件检测 -->
                 <div class="p-4 bg-muted/50 rounded-xl">
                   <div class="flex items-center justify-between mb-3">

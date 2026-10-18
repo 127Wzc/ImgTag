@@ -76,6 +76,7 @@ def repository(monkeypatch):
     detail = AsyncMock()
     listing = AsyncMock()
     monkeypatch.setattr("imgtag.services.task_service.task_repository.get_by_id", detail)
+    monkeypatch.setattr("imgtag.services.task_service.task_repository.get_visible_by_id", AsyncMock(return_value=None))
     monkeypatch.setattr("imgtag.services.task_service.task_repository.get_tasks", listing)
     return detail, listing
 
@@ -127,7 +128,7 @@ async def test_extraction_detail_stays_admin_only(repository):
         created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
     )
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_app("user")), base_url="http://test") as client:
-        assert (await client.get("/tasks/private-task")).status_code == 403
+        assert (await client.get("/tasks/private-task")).status_code == 404
 
 
 async def test_save_embedding_auth_failure_is_upstream_error_and_preserves_image(monkeypatch):
@@ -187,3 +188,54 @@ def test_category_prompt_defaults_match_seeded_categories():
     rows = next(ast.literal_eval(node.value) for node in ast.walk(seed)
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'categories' for t in node.targets))
     assert DEFAULT_CATEGORY_PROMPTS == {code: prompt for _, _, _, code, prompt in rows}
+
+
+async def test_task_visibility_and_redaction_use_database_filter_before_pagination(monkeypatch):
+    """用内存库执行真实查询，验证总数、分页、详情和旧任务默认拒绝。"""
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+    from imgtag.services.task_service import task_service
+
+    engine = create_engine('sqlite://')
+    with engine.begin() as conn:
+        conn.execute(text('CREATE TABLE images (id INTEGER PRIMARY KEY, uploaded_by INTEGER)'))
+        conn.execute(text('INSERT INTO images VALUES (1,1),(2,2)'))
+        conn.execute(text('''CREATE TABLE tasks (id TEXT PRIMARY KEY, type TEXT, status TEXT,
+            payload JSON, result JSON, error TEXT, created_at DATETIME, updated_at DATETIME, completed_at DATETIME)'''))
+    with Session(engine) as sync:
+        now = datetime.now(timezone.utc)
+        for task_id, kind, payload in [('own-a','analyze_image',{'image_id':1}),
+                ('own-b','rebuild_vector',{'image_id':1}), ('other','analyze_image',{'image_id':2}),
+                ('deleted','analyze_image',{'image_id':99}), ('legacy','analyze_image',None),
+                ('extract','extract_subject',{'image_id':1}), ('unknown','future_type',{'image_id':1})]:
+            sync.add(Task(id=task_id, type=kind, status='failed', payload=payload,
+                result={'analysis_input': {'private':'内部定义'}, 'analysis_raw_response':'内部响应', 'saved':False},
+                error='内部错误地址', created_at=now, updated_at=now))
+        sync.commit()
+
+        class MemorySession:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def execute(self, stmt): return sync.execute(stmt)
+            async def get(self, model, key): return sync.get(model, key)
+
+        monkeypatch.setattr('imgtag.services.task_service.async_session_maker', MemorySession)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_app('user')), base_url='http://test') as client:
+            response = await client.get('/tasks/?size=1')
+            assert response.status_code == 200 and response.json()['total'] == 2
+            assert len(response.json()['data']) == 1
+            second = await client.get('/tasks/?size=1&page=2')
+            assert second.json()['data'][0]['id'] != response.json()['data'][0]['id']
+            for task_id in ['own-a', 'own-b']:
+                response = await client.get('/tasks/' + task_id)
+                assert response.status_code == 200
+                assert response.json()['result'] == {'saved':False}
+                assert response.json()['payload'] == {'image_id':1}
+                assert response.json()['error'] == '任务执行失败，请联系管理员查看详情'
+                assert '内部' not in response.text
+            for task_id in ['other','deleted','legacy','extract','unknown','missing']:
+                assert (await client.get('/tasks/' + task_id)).status_code == 404
+        admin = {'id':9,'role':'admin'}
+        assert (await task_service.get_tasks(user=admin))['total'] == 7
+        assert (await task_service.get_task('other', user=admin))['result']['analysis_input'] == {'private':'内部定义'}
+    engine.dispose()

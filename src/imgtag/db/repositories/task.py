@@ -13,6 +13,7 @@ from sqlalchemy.orm import aliased
 from imgtag.core.logging_config import get_logger
 from imgtag.db.repositories.base import BaseRepository
 from imgtag.models.task import Task
+from imgtag.models.image import Image
 
 logger = get_logger(__name__)
 
@@ -39,19 +40,27 @@ class TaskRepository(BaseRepository[Task]):
         )
         return result.scalar_one_or_none()
 
-    async def list_active_for_image(
-        self, session: AsyncSession, image_id: int, task_type: str,
-    ) -> Sequence[Task]:
-        """调用方先锁图片父行，串行化同图入队；锁任务行以协调 worker 抢占。"""
-        result = await session.execute(
-            select(Task)
-            .where(Task.type == task_type, Task.status.in_(["pending", "processing"]))
-            .where(Task.payload["image_id"].as_integer() == image_id)
-            .order_by(Task.created_at, Task.id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
+    async def list_active_for_images(self, session: AsyncSession, image_ids: list[int], task_type: str) -> Sequence[Task]:
+        """调用方已按 ID 锁定图片；一次读取并锁定整批活动任务。"""
+        if not image_ids:
+            return []
+        result = await session.execute(select(Task)
+            .where(Task.type == task_type, Task.status.in_(["pending", "processing"]),
+                   Task.payload["image_id"].as_integer().in_(image_ids))
+            .order_by(Task.created_at, Task.id).with_for_update()
+            .execution_options(populate_existing=True))
         return result.scalars().all()
+
+    @staticmethod
+    def visible_to_owner(owner_id: int):
+        # 未知类型、批量任务及没有有效图片归属的旧任务默认仅管理员可读。
+        return and_(Task.type.in_(["analyze_image", "rebuild_vector", "storage_sync"]),
+            select(Image.id).where(Image.id == Task.payload["image_id"].as_integer(),
+                                   Image.uploaded_by == owner_id).exists())
+
+    async def get_visible_by_id(self, session: AsyncSession, task_id: str, owner_id: int) -> Optional[Task]:
+        result = await session.execute(select(Task).where(Task.id == task_id, self.visible_to_owner(owner_id)))
+        return result.scalar_one_or_none()
 
     async def begin_attempt(self, session: AsyncSession, task_id: str) -> int:
         task = await self.get_by_id(session, task_id)
@@ -140,6 +149,7 @@ class TaskRepository(BaseRepository[Task]):
         limit: int = 50,
         offset: int = 0,
         include_extraction: bool = True,
+        owner_id: int | None = None,
     ) -> tuple[Sequence[Task], int]:
         """Get tasks with optional status filter.
 
@@ -155,8 +165,12 @@ class TaskRepository(BaseRepository[Task]):
         from sqlalchemy import func
 
         # Build query
-        stmt = select(Task).order_by(Task.created_at.desc())
+        stmt = select(Task).order_by(Task.created_at.desc(), Task.id.desc())
         count_stmt = select(func.count()).select_from(Task)
+
+        if owner_id is not None:
+            stmt = stmt.where(self.visible_to_owner(owner_id))
+            count_stmt = count_stmt.where(self.visible_to_owner(owner_id))
 
         if not include_extraction:
             stmt = stmt.where(Task.type != "extract_subject")
