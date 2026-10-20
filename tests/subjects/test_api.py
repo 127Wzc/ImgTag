@@ -2,15 +2,23 @@
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+import json
+import math
+import sqlite3
 
 from fastapi import FastAPI, HTTPException
 import httpx
 import pytest
+from sqlalchemy import Select
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql.elements import TextClause
+from sqlalchemy.sql.selectable import TextualSelect
 
 from imgtag.api.endpoints import images, subjects, subjects as api, tags, tasks as task_api
 from imgtag.api.endpoints.auth import get_current_user
 from imgtag.db import get_async_session
-from imgtag.db.repositories import subject_repository
+from imgtag.db.repositories import image_repository, subject_repository
+from imgtag.models import Image
 from imgtag.services.subject_gallery_service import subject_gallery_service as gallery
 
 
@@ -232,3 +240,107 @@ async def test_subject_tag_rename_preserves_existing_tag_permissions(monkeypatch
     else:
         assert tag.name == '主体别名'
         sync.assert_not_awaited()
+
+
+@pytest.fixture
+def image_search_session(monkeypatch):
+    connection = sqlite3.connect(':memory:')
+
+    def cosine_distance(stored, query):
+        left, right = json.loads(stored), json.loads(query)
+        norm = math.hypot(*left) * math.hypot(*right)
+        return 1 - sum(a * b for a, b in zip(left, right)) / norm if norm else None
+
+    connection.create_function('cosine_distance', 2, cosine_distance)
+    connection.executescript("""
+        CREATE TABLE images (id INTEGER, description TEXT, original_url TEXT,
+            embedding TEXT, is_public BOOLEAN, uploaded_by INTEGER);
+        CREATE TABLE tags (id INTEGER, name TEXT);
+        CREATE TABLE image_tags (image_id INTEGER, tag_id INTEGER);
+        CREATE TABLE subjects (id INTEGER, primary_tag_id INTEGER,
+            alias_tag_ids TEXT, is_active BOOLEAN);
+        INSERT INTO tags VALUES (10,'茜特菈莉'),(11,'奶奶'),(12,'Citlali'),
+            (20,'停用主体'),(21,'停用别名'),(30,'开心'),(40,'分类');
+        INSERT INTO subjects VALUES (1,10,'[11,12]',1),(2,20,'[21]',0);
+        INSERT INTO images VALUES
+            (1,'主名标签',NULL,'[-1,0]',1,1),
+            (2,'别名标签',NULL,'[-1,0]',1,1),
+            (3,'私有',NULL,'[-1,0]',0,2),
+            (4,'停用主体',NULL,'[-1,0]',1,1),
+            (5,'描述含奶奶',NULL,'[-1,0]',1,1);
+        INSERT INTO image_tags VALUES
+            (1,10),(1,12),(1,30),(1,40),(2,11),(3,10),(4,20);
+    """)
+
+    async def execute(statement, params=None):
+        if isinstance(statement, (TextClause, TextualSelect)):
+            compiled = statement.params(**params).compile(
+                dialect=postgresql.dialect(paramstyle='named'),
+                compile_kwargs={'render_postcompile': True},
+            )
+            sql = str(compiled)
+            sql = sql.replace('i.embedding <=> :vector', 'cosine_distance(i.embedding, :vector)')
+            cursor = connection.execute(adapt_sql(sql), compiled.params)
+            return cursor
+        if isinstance(statement, Select):
+            entity = statement.column_descriptions[0].get('entity')
+            if entity is Image and statement.column_descriptions[0]['expr'] is Image:
+                statement = statement.with_only_columns(Image.id)
+                sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={'literal_binds': True}))
+                ids = [row[0] for row in connection.execute(adapt_sql(sql))]
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: ids))
+            if 'count(' in str(statement):
+                sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={'literal_binds': True}))
+                value = connection.execute(adapt_sql(sql)).fetchone()[0]
+                return SimpleNamespace(scalar=lambda: value)
+        return []
+
+    def adapt_sql(sql):
+        return (sql.replace('tags.id = ANY (subjects.alias_tag_ids)',
+                            'tags.id IN (SELECT value FROM json_each(subjects.alias_tag_ids))')
+                .replace('image_tags.tag_id = ANY (subjects.alias_tag_ids)',
+                         'image_tags.tag_id IN (SELECT value FROM json_each(subjects.alias_tag_ids))')
+                .replace('ILIKE', 'LIKE').replace('%%', '%'))
+
+    monkeypatch.setattr(image_repository, 'get_by_ids', AsyncMock(return_value=[]))
+    monkeypatch.setattr(images.storage_service, 'get_read_urls', AsyncMock(return_value={}))
+    try:
+        yield SimpleNamespace(execute=execute)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize('filters,expected', [
+    ({'keyword': '奶奶'}, [5, 2, 1]),
+    ({'keyword': '奶'}, [5, 2, 1]),
+    ({'keyword': 'cItLaLi'}, [2, 1]),
+    ({'tags': ['奶奶']}, [2, 1]),
+    ({'tags': ['茜特菈莉']}, [2, 1]),
+    ({'tags': ['奶奶', '开心']}, [1]),
+    ({'keyword': '奶奶', 'category_id': 40}, [1]),
+    ({'keyword': '奶奶', 'visible_to_user_id': 2}, [5, 3, 2, 1]),
+    ({'keyword': '奶奶', 'limit': 1, 'offset': 1}, [2]),
+    ({'keyword': '停用别名'}, []),
+    ({'keyword': '停用主体'}, [4]),
+])
+async def test_image_search_expands_subject_identity_without_changing_filters(image_search_session, filters, expected):
+    result = await image_repository.search_images(image_search_session, **filters)
+    assert result['images'] == expected
+    assert result['total'] == (3 if 'offset' in filters else len(expected))
+
+
+@pytest.mark.parametrize('text,filters,expected', [
+    ('奶奶', {}, [2, 1]),
+    ('Citlali', {}, [2, 1]),
+    ('奶奶', {'tags': ['奶奶', '开心']}, [1]),
+    ('奶奶', {'category_id': 40}, [1]),
+    ('奶奶', {'visible_to_user_id': 2}, [3, 2, 1]),
+    ('奶奶', {'limit': 1}, [2]),
+    ('停用别名', {}, []),
+])
+async def test_hybrid_search_scores_subject_alias_matches(image_search_session, text, filters, expected):
+    result = await image_repository.hybrid_search(
+        image_search_session, query_vector=[0.0, 1.0], query_text=text, **filters,
+    )
+    assert [row['id'] for row in result] == expected
+    assert all(row['similarity'] == pytest.approx(0.3) for row in result)

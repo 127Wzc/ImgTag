@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import httpx
 from fastapi import FastAPI
 from sqlalchemy.sql.elements import TextClause
+from sqlalchemy.sql.selectable import TextualSelect
 
 import pytest
 
@@ -315,6 +316,8 @@ async def test_smart_search_handles_zero_vectors_before_ordering_and_limit(monke
             embedding TEXT, is_public BOOLEAN, uploaded_by INTEGER);
         CREATE TABLE image_tags (image_id INTEGER, tag_id INTEGER);
         CREATE TABLE tags (id INTEGER, name TEXT);
+        CREATE TABLE subjects (id INTEGER, primary_tag_id INTEGER,
+            alias_tag_ids TEXT, is_active BOOLEAN);
         INSERT INTO images VALUES (1,'零向量标签命中',NULL,'[0,0]',1,1),
             (2,'零向量无标签',NULL,'[0,0]',1,1), (3,'正常向量',NULL,'[1,0]',1,1),
             (4,'反向向量',NULL,'[-1,0]',1,1), (5,'私有图片',NULL,'[1,0]',0,2);
@@ -322,8 +325,12 @@ async def test_smart_search_handles_zero_vectors_before_ordering_and_limit(monke
         INSERT INTO image_tags VALUES (1,7);
     """)
     async def execute(statement, params=None):
-        if isinstance(statement, TextClause):
-            sql = str(statement).replace('i.embedding <=> :vector','cosine_distance(i.embedding, :vector)')
+        if isinstance(statement, (TextClause, TextualSelect)):
+            sql = (str(statement).replace('i.embedding <=> :vector','cosine_distance(i.embedding, :vector)')
+                   .replace('tags.id = ANY (subjects.alias_tag_ids)',
+                            'tags.id IN (SELECT value FROM json_each(subjects.alias_tag_ids))')
+                   .replace('image_tags.tag_id = ANY (subjects.alias_tag_ids)',
+                            'image_tags.tag_id IN (SELECT value FROM json_each(subjects.alias_tag_ids))'))
             return connection.execute(sql, params)
         return []  # 标签展示和上传者信息查询与本回归无关。
     session = SimpleNamespace(execute=execute)
