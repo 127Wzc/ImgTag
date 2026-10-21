@@ -11,6 +11,7 @@ import {
   ArrowRight, Github, Database
 } from 'lucide-vue-next'
 import { ref, computed } from 'vue'
+import { version as appVersion } from '../../package.json'
 
 const userStore = useUserStore()
 
@@ -145,7 +146,7 @@ const galleryRow2 = computed(() => images.value.slice(Math.ceil(images.value.len
               <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
               <span class="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
             </span>
-            v0.1.4 现已发布
+            v{{ appVersion }} 现已发布
           </div>
 
           <!-- 标题 -->
