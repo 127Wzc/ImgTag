@@ -1,6 +1,7 @@
 """图片分析接口：单次补充要求、权限与任务响应契约。"""
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -325,12 +326,17 @@ def repository(monkeypatch):
 
 
 @pytest.mark.parametrize('role', ['admin', 'user'])
-async def test_task_responses_never_expose_callback_credentials(repository, role):
+@pytest.mark.parametrize('credentials', [
+    {'callback_headers_encrypted': 'encrypted-test-credentials'},
+    {'callback_headers': {'Authorization': 'Bearer plaintext-test-credentials'}},
+    {'callback_headers': json.dumps({'Authorization': 'Bearer plaintext-test-credentials'})},
+])
+async def test_task_responses_never_expose_callback_credentials(repository, role, credentials):
     detail, listing = repository
     now = datetime.now(timezone.utc)
     task = Task(
         id='callback-task', type='analyze_image', status='pending',
-        payload={'image_id': 18, 'callback_headers_encrypted': 'encrypted-test-credentials'},
+        payload={'image_id': 18, **credentials},
         created_at=now, updated_at=now,
     )
     detail.return_value = task
@@ -338,7 +344,7 @@ async def test_task_responses_never_expose_callback_credentials(repository, role
     user = {'id': 1, 'role': role}
     response = task_service.task_response(task, user)
     assert response['payload'] == {'image_id': 18}
-    assert task.payload['callback_headers_encrypted'] == 'encrypted-test-credentials'
+    assert task.payload == {'image_id': 18, **credentials}
     if role == 'admin':
         assert (await task_service.get_task(task.id, user=user))['payload'] == {'image_id': 18}
         assert (await task_service.get_tasks(user=user))['tasks'][0]['payload'] == {'image_id': 18}

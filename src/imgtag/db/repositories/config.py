@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.core.config_defaults import DEFAULT_CONFIG
+from imgtag.core.internal_config import INTERNAL_CONFIG_KEYS, validate_public_config_keys
 from imgtag.core.logging_config import get_logger
 from imgtag.db.repositories.base import BaseRepository
 from imgtag.models.config import Config
@@ -43,6 +44,8 @@ class ConfigRepository(BaseRepository[Config]):
         Returns:
             Configuration value or default.
         """
+        if key in INTERNAL_CONFIG_KEYS:
+            return None
         config = await self.get_by_id(session, key)
         if config:
             return config.value
@@ -90,6 +93,7 @@ class ConfigRepository(BaseRepository[Config]):
         Returns:
             True if successful.
         """
+        validate_public_config_keys([key])
         try:
             # Auto-detect secret based on key name
             if is_secret is None:
@@ -125,7 +129,7 @@ class ConfigRepository(BaseRepository[Config]):
         Returns:
             Dictionary of all configurations.
         """
-        stmt = select(Config).order_by(Config.key)
+        stmt = select(Config).where(Config.key.not_in(INTERNAL_CONFIG_KEYS)).order_by(Config.key)
         result = await session.execute(stmt)
         configs = result.scalars().all()
 
@@ -152,6 +156,7 @@ class ConfigRepository(BaseRepository[Config]):
         Returns:
             True if all updates successful.
         """
+        validate_public_config_keys(configs)
         try:
             for key, value in configs.items():
                 await self.set_value(session, key, value)

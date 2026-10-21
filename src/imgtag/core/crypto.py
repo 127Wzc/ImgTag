@@ -1,11 +1,6 @@
-"""Cryptographic utilities for sensitive data encryption.
-
-Provides AES encryption for S3 credentials and other sensitive configuration.
-Uses Fernet (AES-128-CBC) with key derived from environment variable.
-"""
+"""敏感数据加密；运行时密钥在启动自检提交后安装。"""
 
 import base64
-import os
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
@@ -13,18 +8,11 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 
 _fernet: Fernet | None = None
+LEGACY_DEFAULT_SECRET = "imgtag-default-secret-change-me"
 
 
-def get_encryption_key() -> bytes:
-    """Derive encryption key from environment variable.
-    
-    Uses PBKDF2 to derive a secure key from the secret.
-    Falls back to a default if IMGTAG_SECRET_KEY is not set.
-    
-    Returns:
-        bytes: URL-safe base64 encoded 32-byte key for Fernet.
-    """
-    secret = os.environ.get("IMGTAG_SECRET_KEY", "imgtag-default-secret-change-me")
+def derive_encryption_key(secret: str) -> bytes:
+    """保持旧版派生算法，确保旧环境变量和旧默认密文可迁移。"""
     salt = b"imgtag-credential-salt"
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
@@ -35,15 +23,16 @@ def get_encryption_key() -> bytes:
     return base64.urlsafe_b64encode(kdf.derive(secret.encode()))
 
 
-def get_fernet() -> Fernet:
-    """Get or create Fernet cipher instance (singleton pattern).
-    
-    Returns:
-        Fernet: Cipher instance for encrypt/decrypt operations.
-    """
+def configure_encryption_key(key: bytes) -> None:
+    """仅在数据库初始化或轮换事务提交后切换进程内密钥。"""
     global _fernet
+    _fernet = Fernet(key)
+
+
+def get_fernet() -> Fernet:
+    """启动自检未完成时禁止提前使用环境变量密钥读写旧数据。"""
     if _fernet is None:
-        _fernet = Fernet(get_encryption_key())
+        raise RuntimeError("加密密钥尚未完成启动初始化")
     return _fernet
 
 

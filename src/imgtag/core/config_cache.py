@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import select
 
 from imgtag.core.config_defaults import DEFAULT_CONFIG
+from imgtag.core.internal_config import INTERNAL_CONFIG_KEYS
 from imgtag.core.logging_config import get_logger
 from imgtag.db.database import async_session_maker
 from imgtag.models.config import Config
@@ -49,6 +50,8 @@ class ConfigCache:
         Returns:
             Configuration value or default.
         """
+        if key in INTERNAL_CONFIG_KEYS:
+            return default
         now = time.time()
         
         # Check cache first
@@ -115,6 +118,8 @@ class ConfigCache:
         
         Does NOT block to query database. Use preload() at startup.
         """
+        if key in INTERNAL_CONFIG_KEYS:
+            return default
         if key in cls._cache:
             return cls._cache.get(key, default)
         
@@ -134,7 +139,7 @@ class ConfigCache:
         """
         try:
             async with async_session_maker() as session:
-                stmt = select(Config.key, Config.value)
+                stmt = select(Config.key, Config.value).where(Config.key.not_in(INTERNAL_CONFIG_KEYS))
                 result = await session.execute(stmt)
                 rows = result.fetchall()
                 for key, value in rows:

@@ -20,7 +20,7 @@ from imgtag.services.task_queue import task_queue
 from imgtag.services.subject_context_service import subject_context_service
 from imgtag.services.vision_service import ImageAnalysisResult, VisionService
 from imgtag.core.gif_analysis import parse_gif_frame_count
-from imgtag.core.crypto import encrypt
+from imgtag.core import crypto
 
 
 def make_gif(frame_count):
@@ -140,14 +140,15 @@ async def test_callback_headers_survive_queue_and_are_sent_only_to_callback(
     queue, monkeypatch, caplog, headers, success, status_code,
 ):
     caplog.set_level('INFO', logger='imgtag.services.task_queue')
+    # 新任务及回调发送均不再依赖运行时加密密钥。
+    monkeypatch.setattr(crypto, '_fernet', None)
     create = AsyncMock()
     monkeypatch.setattr('imgtag.services.task_queue.task_repository.list_active_for_images', AsyncMock(return_value=[]))
     monkeypatch.setattr('imgtag.services.task_queue.task_repository.create_task', create)
     await queue.add_tasks([1], callback_url='https://callback.example/hook', callback_headers=headers)
     payload = create.await_args.kwargs['payload']
-    for value in headers.values():
-        if value.strip(' '):
-            assert value not in json.dumps(payload)
+    assert (json.loads(payload['callback_headers']) if 'callback_headers' in payload else {}) == headers
+    assert 'callback_headers_encrypted' not in payload
     expected_headers = headers
     assert queue._get_callback_headers(payload) == expected_headers
 
@@ -168,7 +169,7 @@ async def test_callback_headers_survive_queue_and_are_sent_only_to_callback(
     await queue._send_callback(
         payload['callback_url'], 1, 'callback-task', success,
         tags=['测试标签'] if success else None, error=None if success else '分析失败',
-        callback_headers_encrypted=payload.get('callback_headers_encrypted'),
+        callback_headers=payload.get('callback_headers'),
     )
     assert len(requests) == 1
     request = requests[0]
@@ -224,7 +225,7 @@ async def test_callback_header_mask_preserves_edges_without_changing_sent_values
     monkeypatch.setattr('imgtag.services.task_queue.httpx.AsyncClient',
                         lambda **kwargs: real_client(transport=httpx.MockTransport(handle), **kwargs))
     await queue._send_callback('https://callback.example/hook', 1, 'masked-callback', True,
-                              callback_headers_encrypted=encrypt(json.dumps(headers)))
+                              callback_headers=headers)
     assert len(requests) == (0 if outcome == 'before_request' else 1)
     if requests:
         for name, value in headers.items():
@@ -245,7 +246,7 @@ async def test_callback_credentials_are_ignored_without_url_and_not_merged_acros
     monkeypatch.setattr('imgtag.services.task_queue.task_repository.list_active_for_images', AsyncMock(side_effect=lambda *args: active))
     monkeypatch.setattr('imgtag.services.task_queue.task_repository.create_task', create)
     await queue.enqueue_tasks([1], callback_headers={'x-api-key': 'ignored-key'})
-    assert 'callback_headers_encrypted' not in active[0].payload
+    assert 'callback_headers' not in active[0].payload
     first = await queue.enqueue_tasks([1], callback_url='https://callback.example/one', callback_headers={'x-api-key': 'one-key'})
     same = await queue.enqueue_tasks([1], callback_url='https://callback.example/one', callback_headers={'x-api-key': 'one-key'})
     other_key = await queue.enqueue_tasks([1], callback_url='https://callback.example/one', callback_headers={'x-api-key': 'other-key'})
@@ -259,7 +260,7 @@ async def test_callback_credentials_match_by_original_values(queue, monkeypatch)
     headers = {'x-api-key': ' callback-test-key ', 'Authorization': ' Bearer callback-test-token ', 'X-Optional': '   '}
     active = [SimpleNamespace(id='pending', status='pending', payload={
         'image_id': 1, 'callback_url': 'https://callback.example/hook',
-        'callback_headers_encrypted': encrypt(json.dumps(headers)),
+        'callback_headers': headers,
     })]
     monkeypatch.setattr('imgtag.services.task_queue.task_repository.list_active_for_images', AsyncMock(return_value=active))
     create = AsyncMock()
@@ -292,7 +293,9 @@ async def test_internal_callback_headers_preserve_original_values(queue, monkeyp
     await queue.enqueue_tasks([1], callback_url='https://callback.example/hook', callback_headers=headers)
     payload = create.await_args.kwargs['payload']
     assert queue._get_callback_headers(payload) == headers
-    assert 'callback_headers' not in payload
+    assert 'callback_headers_encrypted' not in payload
+    assert isinstance(payload['callback_headers'], str)
+    assert '\x00' not in payload['callback_headers']
 
 
 @pytest.mark.parametrize('value', [
@@ -321,7 +324,7 @@ async def test_callback_protocol_errors_do_not_normalize_values_or_leak_credenti
     monkeypatch.setattr('imgtag.services.task_queue.httpx.AsyncClient',
                         lambda **kwargs: real_client(transport=httpx.MockTransport(handle), **kwargs))
     await queue._send_callback('https://callback.example/hook?token=callback-test-token', 1, 'legacy-callback', True,
-        callback_headers_encrypted=encrypt(json.dumps({'Authorization': value, 'X-Optional': ''})))
+        callback_headers={'Authorization': value, 'X-Optional': ''})
     assert len(requests) == 1
     assert requests[0] == {'Authorization': value, 'X-Optional': ''}
     assert '失败' in caplog.text
@@ -344,7 +347,7 @@ async def test_callback_errors_never_log_credential_values(queue, monkeypatch, c
     monkeypatch.setattr('imgtag.services.task_queue.httpx.AsyncClient',
                         lambda **kwargs: real_client(transport=httpx.MockTransport(handle), **kwargs))
     await queue._send_callback(f'https://callback.example/hook?token={secret}', 1, 'sensitive-callback', True,
-        callback_headers_encrypted=encrypt(json.dumps({'x-api-key': secret})))
+        callback_headers={'x-api-key': secret})
     assert secret not in caplog.text
     assert 'sensitive-callback' in caplog.text
     assert ('HTTP 401' if error_type is httpx.HTTPStatusError else error_type.__name__) in caplog.text
@@ -355,17 +358,18 @@ async def test_callback_errors_never_log_credential_values(queue, monkeypatch, c
                for value in header_log.args[-1].values())
 
 
-@pytest.mark.parametrize('kind', ['invalid_token', 'invalid_json', 'invalid_header', 'wrong_type'])
-def test_legacy_callback_decode_errors_do_not_expose_credentials(queue, kind):
+@pytest.mark.parametrize('kind', ['invalid_header', 'wrong_type', 'null', 'invalid_json', 'json_invalid_header'])
+def test_callback_header_errors_do_not_expose_credentials(queue, kind):
     secret = 'callback-test-secret'
-    encrypted = {
-        'invalid_token': secret,
-        'invalid_json': encrypt(secret),
-        'invalid_header': encrypt(json.dumps({'Authorization': [secret]})),
+    headers = {
+        'invalid_header': {'Authorization': [secret]},
         'wrong_type': 123,
+        'null': None,
+        'invalid_json': secret,
+        'json_invalid_header': json.dumps({'Authorization': [secret]}),
     }[kind]
-    with pytest.raises(ValueError, match='回调认证信息无效或无法解密') as error:
-        queue._get_callback_headers({'callback_headers_encrypted': encrypted})
+    with pytest.raises(ValueError, match='回调认证头无效') as error:
+        queue._get_callback_headers({'callback_headers': headers})
     assert secret not in ''.join(traceback.format_exception(error.type, error.value, error.tb))
 
 
@@ -496,17 +500,17 @@ async def test_vision_failure_preserves_existing_data(queue, processing, monkeyp
 
 
 @pytest.mark.parametrize('success', [True, False])
-async def test_worker_forwards_encrypted_headers_on_success_and_failure(queue, processing, monkeypatch, success):
+async def test_worker_forwards_headers_on_success_and_failure(queue, processing, monkeypatch, success):
     vision, _, _, _, _ = processing
     if not success:
         vision.side_effect = ValueError('模型失败')
     monkeypatch.setattr(queue, '_mark_task_failed', AsyncMock())
     callback = AsyncMock()
     monkeypatch.setattr(queue, '_send_callback', callback)
-    encrypted = encrypt(json.dumps({'Authorization': 'Bearer callback-test-token'}))
+    headers = {'Authorization': 'Bearer callback-test-token'}
     task = SimpleNamespace(id='callback-task', type='analyze_image', payload={
         'image_id': 1, 'force_analyze': True, 'callback_url': 'https://callback.example/hook',
-        'callback_headers_encrypted': encrypted,
+        'callback_headers': headers,
     })
     if success:
         await queue._process_task(task, 0)
@@ -516,7 +520,7 @@ async def test_worker_forwards_encrypted_headers_on_success_and_failure(queue, p
     await asyncio.sleep(0)
     callback.assert_awaited_once()
     assert callback.await_args.args[:4] == ('https://callback.example/hook', 1, task.id, success)
-    assert callback.await_args.kwargs['callback_headers_encrypted'] == encrypted
+    assert callback.await_args.kwargs['callback_headers'] == headers
 
 
 async def test_superseded_analysis_preserves_callback_authentication(queue, processing, monkeypatch):
@@ -526,7 +530,7 @@ async def test_superseded_analysis_preserves_callback_authentication(queue, proc
     headers = {'x-api-key': 'callback-test-key'}
     await queue._process_task(SimpleNamespace(id='task', type='analyze_image', payload={
         'image_id': 1, 'force_analyze': True, 'callback_url': 'https://callback.example/hook',
-        'callback_headers_encrypted': encrypt(json.dumps(headers)),
+        'callback_headers': headers,
     }), 0)
     assert enqueue.await_args.kwargs['callback_headers'] == headers
     assert enqueue.await_args.kwargs['callback_url'] == 'https://callback.example/hook'
@@ -541,7 +545,7 @@ async def test_superseded_analysis_invalid_callback_credentials_do_not_leak(queu
     secret = 'callback-test-secret'
     task = SimpleNamespace(id='invalid-legacy-callback', type='analyze_image', payload={
         'image_id': 1, 'force_analyze': True, 'callback_url': 'https://callback.example/hook',
-        'callback_headers_encrypted': encrypt(json.dumps({'Authorization': [secret]})),
+        'callback_headers': {'Authorization': [secret]},
     })
     with pytest.raises(ValueError) as error:
         await queue._process_task(task, 0)

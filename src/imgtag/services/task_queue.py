@@ -14,12 +14,10 @@ from collections.abc import Mapping
 from typing import Any
 
 import httpx
-from cryptography.fernet import InvalidToken
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.core.logging_config import get_logger
-from imgtag.core.crypto import decrypt, encrypt
 from imgtag.core.storage_constants import StorageTaskStatus, get_mime_type
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import (
@@ -114,15 +112,13 @@ class TaskQueueService:
 
     @staticmethod
     def _get_callback_headers(payload: dict[str, Any]) -> CallbackHeaders:
-        encrypted = payload.get("callback_headers_encrypted")
-        if not encrypted:
-            return {}
+        headers = payload.get("callback_headers", {})
         try:
-            if not isinstance(encrypted, str):
-                raise ValueError("回调认证信息格式无效")
-            return TaskQueueService._parse_callback_headers(json.loads(decrypt(encrypted)))
-        except (InvalidToken, ValueError, TypeError):
-            raise ValueError("回调认证信息无效或无法解密") from None
+            if isinstance(headers, str):
+                headers = json.loads(headers)
+            return TaskQueueService._parse_callback_headers(headers)
+        except (ValueError, TypeError):
+            raise ValueError("回调认证头无效") from None
 
     async def enqueue_tasks(
         self,
@@ -177,7 +173,9 @@ class TaskQueueService:
                     continue
                 payload: dict[str, Any] = {"image_id": image_id, "callback_url": callback_url}
                 if callback_headers:
-                    payload["callback_headers_encrypted"] = encrypt(json.dumps(callback_headers))
+                    # 保存明文 JSON 文本，避免原始控制字符被 PostgreSQL JSONB 拒绝。
+                    # 发送时还原，保留调用方传入的每个名称和值，不做规范化。
+                    payload["callback_headers"] = json.dumps(callback_headers)
                 if analysis_instructions:
                     payload["analysis_instructions"] = analysis_instructions
                 if force_analyze:
@@ -663,7 +661,7 @@ class TaskQueueService:
                 asyncio.create_task(self._send_callback(
                     callback_url, image_id, task.id, True, 
                     final_tags, analysis.description,
-                    callback_headers_encrypted=payload.get("callback_headers_encrypted"),
+                    callback_headers=payload.get("callback_headers"),
                 ))
             
         except Exception as e:
@@ -674,7 +672,7 @@ class TaskQueueService:
                 asyncio.create_task(self._send_callback(
                     callback_url, image_id, task.id, False, 
                     error=str(e),
-                    callback_headers_encrypted=payload.get("callback_headers_encrypted"),
+                    callback_headers=payload.get("callback_headers"),
                 ))
             raise
     
@@ -697,14 +695,14 @@ class TaskQueueService:
         tags: list[str] | None = None,
         description: str | None = None,
         error: str | None = None,
-        callback_headers_encrypted: str | None = None,
+        callback_headers: CallbackHeaders | str | None = None,
     ):
         """发送回调"""
         redacted_headers: dict[str, str] = {}
         try:
             headers: dict[str, str] = {
                 name: value for name, value in self._get_callback_headers(
-                    {"callback_headers_encrypted": callback_headers_encrypted}
+                    {"callback_headers": callback_headers if callback_headers is not None else {}}
                 ).items()
             }
             redacted_headers = self._redact_callback_headers(headers)

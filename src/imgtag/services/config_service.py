@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 from imgtag.core.config_cache import config_cache
 from imgtag.core.config_defaults import DEFAULT_CONFIG
+from imgtag.core.internal_config import INTERNAL_CONFIG_KEYS, validate_public_config_keys
 from imgtag.core.logging_config import get_logger
 from imgtag.db.database import async_session_maker
 from imgtag.models.config import Config
@@ -47,6 +48,7 @@ class ConfigService:
         Returns:
             True if successful.
         """
+        validate_public_config_keys([key])
         try:
             # Auto-detect secret based on key name
             if is_secret is None:
@@ -78,6 +80,7 @@ class ConfigService:
     @classmethod
     async def set_multiple(cls, configs: dict[str, str]) -> bool:
         """Batch update multiple configurations."""
+        validate_public_config_keys(configs)
         try:
             for key, value in configs.items():
                 await cls.set(key, value)
@@ -99,7 +102,7 @@ class ConfigService:
         """Get all configuration as dictionary."""
         try:
             async with async_session_maker() as session:
-                stmt = select(Config).order_by(Config.key)
+                stmt = select(Config).where(Config.key.not_in(INTERNAL_CONFIG_KEYS)).order_by(Config.key)
                 result = await session.execute(stmt)
                 configs = result.scalars().all()
                 

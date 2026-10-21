@@ -71,6 +71,7 @@ _async_url = get_async_database_url(settings.PG_CONNECTION_STRING)
 # 连接池优化配置
 engine = create_async_engine(
     _async_url,
+    hide_parameters=True,
     # 连接池大小（根据并发量调整）
     pool_size=settings.DB_POOL_SIZE,  # 常驻连接数
     max_overflow=settings.DB_MAX_OVERFLOW,  # 超出 pool_size 时可额外创建的连接数

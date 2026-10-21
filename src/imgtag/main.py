@@ -29,6 +29,7 @@ from imgtag.db.repositories import task_repository, config_repository, storage_e
 from imgtag.services.task_queue import task_queue, QUEUE_TASK_TYPES
 from imgtag.services.auth_service import init_default_admin
 from imgtag.services.backup_service import schedule_daily_backup
+from imgtag.services.encryption_service import encryption_service
 from imgtag.services.storage_sync_service import storage_sync_service
 from imgtag.services.upload_service import upload_service
 
@@ -95,6 +96,10 @@ async def lifespan(app: FastAPI):
         logger.error(f"数据库迁移执行失败: {e}")
     
     
+    # 密钥自检必须成功后才能恢复队列、访问存储或对外提供服务。
+    secret = settings.IMGTAG_SECRET_KEY
+    await encryption_service.initialize(secret.get_secret_value() if secret else None)
+
     # 确保上传目录存在
     upload_path = settings.get_upload_path()
     logger.info(f"上传目录: {upload_path}")

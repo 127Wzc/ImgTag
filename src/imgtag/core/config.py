@@ -12,7 +12,7 @@ from typing import Optional
 from importlib.metadata import version, PackageNotFoundError
 
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, SecretStr
 
 # 从 pyproject.toml 读取版本号
 try:
@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "ImgTag API"
     PROJECT_DESCRIPTION: str = "图像标签与向量搜索系统 - 支持OpenAI标准视觉模型"
     PROJECT_VERSION: str = _version
+
+    # 未配置时沿用数据库已登记的加密密钥；新库会生成独立密钥。
+    IMGTAG_SECRET_KEY: SecretStr | None = Field(default=None, description="敏感数据加密密钥；变更后启动时自动轮换")
     
     # 数据库配置
     PG_CONNECTION_STRING: str = Field(

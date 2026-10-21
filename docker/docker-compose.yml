@@ -15,6 +15,8 @@ services:
     environment:
       # 必填：PostgreSQL 连接字符串
       - PG_CONNECTION_STRING=postgresql://user:password@host:5432/imgtag
+      # 可选：变更后重新创建容器，启动时自动轮换密钥
+      - IMGTAG_SECRET_KEY=${IMGTAG_SECRET_KEY:-}
       # 修改后需重新创建容器生效；可在 Compose 的 .env 中覆盖默认值
       - DB_POOL_SIZE=${DB_POOL_SIZE:-5}
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-0}
