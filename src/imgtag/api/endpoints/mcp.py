@@ -37,6 +37,7 @@ from pydantic import (
     StrictInt,
     StrictStr,
     ValidationError,
+    model_validator,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,6 +64,7 @@ from imgtag.db.repositories import (
     tag_repository,
 )
 from imgtag.services import embedding_service
+from imgtag.services.search_guard_service import SearchRejected, search_client_host, search_guard
 from imgtag.services.storage_service import storage_service
 from imgtag.services.task_queue import task_queue
 from imgtag.services.upload_service import upload_service
@@ -95,7 +97,6 @@ MCP_SESSION_TTL_SECONDS = 3600
 # 时仍应在网关配置全局限流，但服务端本身不能因缺少网关而完全裸奔。
 MCP_RATE_LIMIT_WINDOW_SECONDS = 60.0
 MCP_RATE_LIMIT_ANONYMOUS = 60
-MCP_RATE_LIMIT_AUTHENTICATED = 300
 MCP_MAX_REQUEST_BYTES = 1_048_576
 
 # search_images 参数枚举
@@ -174,7 +175,23 @@ async def _browse_images(
     }
 
 
-async def _tool_search_images(
+async def _tool_search_images(arguments: dict, session: AsyncSession, api_user: dict | None) -> dict:
+    keyword = arguments.get("keyword")
+    match = str(arguments.get("match") or "auto").lower()
+    has_keyword = bool(keyword.strip()) if isinstance(keyword, str) else bool(keyword)
+    if api_user is not None or not has_keyword or match not in ("auto", "semantic"):
+        return await _search_images_unchecked(arguments, session, api_user)
+    caller = f"ip:{search_client_host.get()}"
+    try:
+        await search_guard.check(
+            caller, texts=(arguments.get("keyword"),), tags=arguments.get("tags"),
+        )
+    except SearchRejected as exc:
+        raise MCPUserError(str(exc)) from exc
+    return await _search_images_unchecked(arguments, session, api_user)
+
+
+async def _search_images_unchecked(
     arguments: dict,
     session: AsyncSession,
     api_user: dict | None,
@@ -498,12 +515,20 @@ class _MCPArguments(BaseModel):
 
 
 class SearchImagesArguments(_MCPArguments):
-    keyword: StrictStr | None = Field(default=None, max_length=500)
-    tags: list[_TagArgument] = Field(default_factory=list, max_length=50)
+    keyword: StrictStr | None = None
+    tags: list[Annotated[StrictStr, Field(min_length=1)]] = Field(default_factory=list)
     match: Literal["auto", "semantic", "fuzzy"] = "auto"
     sort: Literal["auto", "random", "latest", "relevance"] = "auto"
     count: StrictInt = Field(default=10, ge=1, le=50)
     page: StrictInt = Field(default=1, ge=1, le=10_000)
+
+    @model_validator(mode="after")
+    def validate_non_vector_limits(self) -> "SearchImagesArguments":
+        # 向量路径按系统配置校验；普通检索保留既有参数边界。
+        if not self.keyword or not self.keyword.strip() or self.match == "fuzzy":
+            if (self.keyword and len(self.keyword) > 500) or len(self.tags) > 50 or any(len(tag) > 100 for tag in self.tags):
+                raise ValueError("普通搜索关键词最多 500 字符，标签最多 50 项且每项最多 100 字符")
+        return self
 
 
 class GetImageDetailArguments(_MCPArguments):
@@ -548,14 +573,12 @@ _TOOL_DEFS = [
             "properties": {
                 "keyword": {
                     "type": "string",
-                    "maxLength": 500,
-                    "description": "搜索关键词。不传时进入随机抽取模式"
+                    "description": "搜索关键词。不传时随机抽取；语义搜索长度受系统维护中的智能搜索配置限制"
                 },
                 "tags": {
                     "type": "array",
-                    "items": {"type": "string", "minLength": 1, "maxLength": 100},
-                    "maxItems": 50,
-                    "description": "标签名筛选列表（AND 关系，精确匹配标签名，所有模式下均为硬过滤）"
+                    "items": {"type": "string", "minLength": 1},
+                    "description": "标签名筛选列表（AND 硬过滤）；语义搜索长度和数量受智能搜索配置限制"
                 },
                 "match": {
                     "type": "string",
@@ -925,13 +948,15 @@ def _rate_limit_key(request: Request, api_user: dict | None) -> str:
 
 def _check_rate_limit(request: Request, api_user: dict | None) -> None:
     """进程级滑动窗口限流，避免公共 MCP 被单一调用方打穿。"""
+    if api_user is not None:
+        return
     now = monotonic()
     key = _rate_limit_key(request, api_user)
     window = _mcp_rate_windows.setdefault(key, deque())
     cutoff = now - MCP_RATE_LIMIT_WINDOW_SECONDS
     while window and window[0] <= cutoff:
         window.popleft()
-    limit = MCP_RATE_LIMIT_AUTHENTICATED if api_user else MCP_RATE_LIMIT_ANONYMOUS
+    limit = MCP_RATE_LIMIT_ANONYMOUS
     if len(window) >= limit:
         raise HTTPException(
             status_code=429,
@@ -1002,6 +1027,7 @@ async def process_jsonrpc(
     scope: str,
     api_user: dict | None,
     session: AsyncSession,
+    client_host: str = "unknown",
 ) -> JsonRpcResponse | None:
     """处理 JSON-RPC 消息（与传输方式无关，SSE 与 Streamable HTTP 共用）
 
@@ -1081,9 +1107,13 @@ async def process_jsonrpc(
                         str(request.id).encode("utf-8")
                     ).hexdigest()[:32]
                     arguments["_mcp_request_id"] = f"{request_token}:{fingerprint}"
-                result = await execute_tool(
-                    tool_name, arguments, session, api_user, scope,
-                )
+                token = search_client_host.set(client_host)
+                try:
+                    result = await execute_tool(
+                        tool_name, arguments, session, api_user, scope,
+                    )
+                finally:
+                    search_client_host.reset(token)
                 return JsonRpcResponse(
                     id=request.id,
                     result=_tool_success_result(result),
@@ -1127,7 +1157,8 @@ async def process_jsonrpc(
 async def handle_message(
     request: JsonRpcRequest,
     connection: MCPConnection,
-    session: AsyncSession
+    session: AsyncSession,
+    client_host: str = "unknown",
 ) -> JsonRpcResponse | None:
     """处理旧版 SSE 传输的 JSON-RPC 消息（基于连接状态的薄封装）"""
     response = await process_jsonrpc(
@@ -1135,6 +1166,7 @@ async def handle_message(
         scope=connection.scope,
         api_user=connection.api_user,
         session=session,
+        client_host=client_host,
     )
     if request.method == "initialize":
         connection.initialized = True
@@ -1203,7 +1235,8 @@ async def _handle_streamable_post(
     logger.debug(f"[MCP] Streamable 消息: method={rpc_request.method}, scope={scope}")
 
     response = await process_jsonrpc(
-        rpc_request, scope=scope, api_user=api_user, session=session
+        rpc_request, scope=scope, api_user=api_user, session=session,
+        client_host=getattr(getattr(request, "client", None), "host", None) or "unknown",
     )
 
     if response is None:
@@ -1362,7 +1395,10 @@ async def _dispatch_message(
 
     logger.debug(f"[MCP] 收到消息: method={rpc_request.method}, session={session_id}")
 
-    response = await handle_message(rpc_request, connection, session)
+    response = await handle_message(
+        rpc_request, connection, session,
+        client_host=getattr(getattr(request, "client", None), "host", None) or "unknown",
+    )
 
     if response:
         # 通过 SSE 发送响应

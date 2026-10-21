@@ -98,6 +98,8 @@ const configDefinitions: Record<string, ConfigDef[]> = {
     { key: 'embedding_dimensions', label: '向量维度', type: 'number' },
   ],
   maintenance: [
+    { key: 'search_max_text_length', label: '匿名智能搜索文本上限（字符）', type: 'number', min: 1, max: 10000, step: 1, description: '仅未认证请求：文本及单个标签的最大长度，默认 200' },
+    { key: 'search_rate_limit', label: '匿名智能搜索频率', type: 'number', min: 1, max: 1000, step: 1, description: '按 IP 计数，认证用户豁免' },
     { key: 'max_upload_size', label: '最大上传 (MB)', type: 'number', description: '单张图片上传大小限制' },
     { key: 'allow_register', label: '允许注册', type: 'boolean', description: '关闭后禁止新用户注册' },
   ],
@@ -964,13 +966,59 @@ onMounted(() => fetchConfigs())
                   <label class="block text-sm font-medium text-foreground">{{ def.label }}</label>
                   <p v-if="def.description" class="text-xs text-muted-foreground mb-1">{{ def.description }}</p>
                   
+                  <div v-if="def.key === 'search_rate_limit'" class="flex items-center gap-2 text-sm">
+                    <span>每</span>
+                    <input
+                      v-model="configs.search_rate_interval"
+                      type="number"
+                      min="1"
+                      max="60"
+                      step="1"
+                      aria-label="限流时间范围"
+                      class="w-14 min-w-0 px-2 py-2 bg-muted/50 border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                    <select
+                      v-model="configs.search_rate_unit"
+                      aria-label="限流时间单位"
+                      class="w-20 px-2 py-2 bg-muted/50 border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-ring"
+                    >
+                      <option value="second">秒</option>
+                      <option value="minute">分钟</option>
+                      <option value="hour">小时</option>
+                    </select>
+                    <span class="shrink-0">最多</span>
+                    <input
+                      v-model="configs.search_rate_limit"
+                      type="number"
+                      :min="def.min"
+                      :max="def.max"
+                      :step="def.step"
+                      aria-label="限流次数"
+                      class="w-16 min-w-0 px-2 py-2 bg-muted/50 border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                    <span>次</span>
+                  </div>
+
                   <!-- Number -->
                   <input
-                    v-if="def.type === 'number'"
+                    v-else-if="def.type === 'number'"
                     v-model="configs[def.key]"
                     type="number"
+                    :min="def.min"
+                    :max="def.max"
+                    :step="def.step"
                     class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                   />
+
+                  <select
+                    v-else-if="def.type === 'select'"
+                    v-model="configs[def.key]"
+                    class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  >
+                    <option v-for="opt in def.options" :key="opt.value" :value="opt.value">
+                      {{ opt.label }}
+                    </option>
+                  </select>
                   
                   <!-- Boolean -->
                   <div v-else-if="def.type === 'boolean'" class="flex items-center gap-2">

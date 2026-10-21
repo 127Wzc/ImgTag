@@ -520,8 +520,8 @@ curl -X POST "http://your-server:8000/api/v1/mcp" \
 **`search_images` 参数：**
 | 参数 | 类型 / 默认 | 说明 |
 |------|------------|------|
-| `keyword` | string，最长 500 字符 | 搜索词。不传时进入随机抽取模式 |
-| `tags` | string[]，最多 50 项；每项最长 100 字符 | 标签名列表（AND 关系，所有模式下硬过滤） |
+| `keyword` | string | 搜索词。不传时随机抽取；匿名语义搜索默认最多 200 字符，可在系统维护中调整；认证语义搜索不受该限制；模糊搜索仍最多 500 字符 |
+| `tags` | string[] | 标签名列表（AND 硬过滤）；匿名语义搜索每项默认最多 200 字符，可配置，数量不限；认证语义搜索豁免；其他模式仍最多 50 项、每项 100 字符 |
 | `match` | `auto` / `semantic` / `fuzzy`，默认 `auto` | keyword 匹配方式：semantic=语义向量；fuzzy=描述/标签名子串；auto=优先语义、失败降级模糊 |
 | `sort` | `auto` / `random` / `latest` / `relevance`，默认 `auto` | auto=有 keyword 按相关度、无 keyword 随机；latest=最新排序（唯一支持分页）；random 仅无 keyword 时有效 |
 | `count` | int 1-50，默认 10 | 返回数量（latest 模式下为每页数量） |
@@ -544,8 +544,9 @@ curl -X POST "http://your-server:8000/api/v1/mcp" \
 
 #### MCP 传输保护
 
+- 匿名智能搜索另受“系统设置 → 系统维护”的输入和频率限制：默认 200 字符、每 IP 每分钟 20 次；`auto` / `semantic` 在生成查询向量前检查，`fuzzy` 和随机浏览不受该新限制。频率的时间单位支持秒、分、小时。有效请求头认证后豁免这些限制，public 端点同样适用。
 - 单个 JSON 请求体最大 1 MiB。
-- 匿名请求默认每个进程每分钟最多 60 次，认证请求最多 300 次；超过后返回 `429`。
+- 匿名请求按 IP 默认每个进程每分钟最多 60 次，超过后返回 `429`；有效请求头认证后不受此频率限制。
 - 旧 SSE 会话空闲超过 1 小时会过期；认证 SSE 的每个 `/message` 请求都必须重新携带与建连时一致的 API Key，`session_id` 不能单独作为认证凭据。
 - 工具业务错误通过 `result.isError: true` 返回；JSON-RPC 协议错误通过顶层 `error` 返回。
 

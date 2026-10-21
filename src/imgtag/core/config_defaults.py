@@ -1,10 +1,13 @@
 """Default configuration values.
 
 This module contains all default configuration keys and values.
-It's a standalone module with NO dependencies to avoid circular imports.
+It depends only on standalone configuration definitions, never on caches or services.
 
 Both ConfigService and ConfigRepository import from here.
 """
+
+from imgtag.core.search_limits import SEARCH_DEFAULTS
+
 
 SUBJECT_ANALYSIS_RULES = """# 描述结构与主体资料融合
 分类提示词负责 description 的具体结构、顺序、标点和信息粒度；分类未规定结构时才使用全局的通用描述。主体资料和核实结果不得改写分类要求的描述格式。
@@ -21,6 +24,7 @@ definition 和 aliases 仅辅助身份理解；外观、服装、动作和场景
 
 
 DEFAULT_CONFIG: dict[str, str] = {
+    **SEARCH_DEFAULTS,
     # 视觉模型配置
     "vision_api_base_url": "https://api.openai.com/v1",
     "vision_api_key": "",

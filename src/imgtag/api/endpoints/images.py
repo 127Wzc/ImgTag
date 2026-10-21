@@ -34,6 +34,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import get_current_user, get_current_user_optional, require_admin, require_permission
+from imgtag.api.search_guards import get_search_user, guard_smart_search
 from imgtag.api.permission_guards import ensure_create_tags_if_missing, ensure_permission
 from imgtag.core.permissions import Permission
 from imgtag.core.category_cache import get_category_code_cached
@@ -996,11 +997,11 @@ async def search_images(
         raise HTTPException(status_code=500, detail=f"搜索失败: {e}")
 
 
-@router.post("/smart-search", response_model=SimilarSearchResponse)
+@router.post("/smart-search", response_model=SimilarSearchResponse, dependencies=[Depends(guard_smart_search)])
 async def smart_search(
     request: SimilarSearchRequest,
     session: AsyncSession = Depends(get_async_session),
-    current_user: dict | None = Depends(get_current_user_optional),
+    current_user: dict | None = Depends(get_search_user),
 ):
     """Smart vector search with similarity scores.
 

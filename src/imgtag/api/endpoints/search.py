@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from imgtag.api.search_guards import guard_smart_search
 from imgtag.core.logging_config import get_logger, get_perf_logger
 from imgtag.db import get_async_session
 from imgtag.db.repositories import image_repository
@@ -28,7 +29,7 @@ perf_logger = get_perf_logger()
 router = APIRouter()
 
 
-@router.post("/similar", response_model=SimilarSearchResponse)
+@router.post("/similar", response_model=SimilarSearchResponse, dependencies=[Depends(guard_smart_search)])
 async def search_similar(
     request: SimilarSearchRequest,
     session: AsyncSession = Depends(get_async_session),
