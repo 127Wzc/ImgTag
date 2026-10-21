@@ -10,10 +10,12 @@
 import asyncio
 import json
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
-from pydantic import TypeAdapter
+from cryptography.fernet import InvalidToken
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.core.logging_config import get_logger
@@ -95,9 +97,32 @@ class TaskQueueService:
                 return 1.0
     
     @staticmethod
+    def _parse_callback_headers(headers: Any) -> CallbackHeaders:
+        try:
+            return TypeAdapter(CallbackHeaders).validate_python(headers)
+        except ValidationError:
+            # 校验异常会包含明文输入，禁止它进入任务错误、日志或失败回调。
+            raise ValueError("回调认证头无效") from None
+
+    @staticmethod
+    def _redact_callback_headers(headers: Mapping[str, str]) -> dict[str, str]:
+        # 保留首尾各两个字符便于辨认；短值全部隐藏，避免泄露完整值。
+        return {
+            name: f"{value[:2]}***{value[-2:]}" if len(value) > 4 else "***"
+            for name, value in headers.items()
+        }
+
+    @staticmethod
     def _get_callback_headers(payload: dict[str, Any]) -> CallbackHeaders:
         encrypted = payload.get("callback_headers_encrypted")
-        return TypeAdapter(CallbackHeaders).validate_json(decrypt(encrypted)) if encrypted else {}
+        if not encrypted:
+            return {}
+        try:
+            if not isinstance(encrypted, str):
+                raise ValueError("回调认证信息格式无效")
+            return TaskQueueService._parse_callback_headers(json.loads(decrypt(encrypted)))
+        except (InvalidToken, ValueError, TypeError):
+            raise ValueError("回调认证信息无效或无法解密") from None
 
     async def enqueue_tasks(
         self,
@@ -112,7 +137,7 @@ class TaskQueueService:
         """串行化同图入队，返回新建、升级、等待和复用情况。"""
         analysis_instructions = normalize_analysis_instructions(analysis_instructions)
         force_analyze = force_analyze or bool(analysis_instructions)
-        callback_headers = callback_headers if callback_url and callback_headers else {}
+        callback_headers = self._parse_callback_headers(callback_headers) if callback_url and callback_headers else {}
         report: dict[str, Any] = {
             "added": 0, "upgraded": 0, "waiting": 0, "existing": 0,
             "missing": 0, "task_ids": [],
@@ -675,12 +700,14 @@ class TaskQueueService:
         callback_headers_encrypted: str | None = None,
     ):
         """发送回调"""
+        redacted_headers: dict[str, str] = {}
         try:
             headers: dict[str, str] = {
                 name: value for name, value in self._get_callback_headers(
                     {"callback_headers_encrypted": callback_headers_encrypted}
                 ).items()
             }
+            redacted_headers = self._redact_callback_headers(headers)
             async with async_session_maker() as session:
                 image = await image_repository.get_with_tags(session, image_id)
                 if not image:
@@ -700,11 +727,17 @@ class TaskQueueService:
             }
             
             async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(url, json=callback_data, headers=headers)
+                request = client.build_request("POST", url, json=callback_data, headers=headers)
+                # 对实际请求的全部头统一脱敏，包括 HTTP 客户端补充的默认头。
+                redacted_headers = self._redact_callback_headers(request.headers)
+                resp = await client.send(request)
                 resp.raise_for_status()
-                logger.info(f"回调 {url} 完成: {resp.status_code}")
-        except Exception as e:
-            logger.warning(f"回调 {url} 失败: {e}")
+                logger.info("任务 %s 的回调完成: HTTP %s, headers=%s", task_id, resp.status_code, redacted_headers)
+        except httpx.HTTPStatusError as exc:
+            logger.warning("任务 %s 的回调失败: HTTP %s, headers=%s", task_id, exc.response.status_code, redacted_headers)
+        except Exception as exc:
+            # HTTP/校验异常文本及回调 URL 都可能包含凭据，只保留安全的定位信息。
+            logger.warning("任务 %s 的回调失败: %s, headers=%s", task_id, type(exc).__name__, redacted_headers)
 
 
 # 全局实例

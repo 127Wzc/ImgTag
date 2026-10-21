@@ -119,7 +119,7 @@ curl "http://your-domain/api/v1/external/images/random?api_key=YOUR_KEY&tags=风
 | `auto_analyze` | bool | 否 | `true` | 是否 AI 分析 |
 | `analysis_instructions` | string / null | 否 | `""` | 仅本次分析的补充要求，最多 6000 字符；未传、null、空串或纯空白均不生效 |
 | `callback_url` | string | 否 | - | 分析完成回调 URL |
-| `callback_headers` | object | 否 | `{}` | 回调认证头，仅支持可独立选填的 `x-api-key` 和 `Authorization`；值须为非空、可打印 ASCII 字符串，不允许换行。未指定 `callback_url` 时忽略 |
+| `callback_headers` | object | 否 | `{}` | 可选的自定义回调请求头，名称和值按传入内容原样用于回调；日志中的值脱敏展示。未指定 `callback_url` 时忽略 |
 | `is_public` | bool | 否 | `true` | 是否公开 |
 
 > [!TIP]
@@ -174,15 +174,16 @@ curl -X POST "http://your-domain/api/v1/external/images" \
 
 #### 回调通知
 
-当指定 `callback_url` 且实际进入 AI 分析时，分析成功或失败后会 POST 到该地址；跳过 AI 分析时不发送回调。`callback_headers` 中提供的认证头按原值加入回调请求，两个字段可以只传一个、同时传入或全部省略。例如，上述请求对应的回调请求头为：
+当指定 `callback_url` 且实际进入 AI 分析时，分析成功或失败后会 POST 到该地址；跳过 AI 分析时不发送回调。`callback_headers` 可省略，名称和值按传入内容原样用于回调，例如：
 
-```http
-Content-Type: application/json
-x-api-key: YOUR_CALLBACK_API_KEY
-Authorization: Bearer YOUR_CALLBACK_TOKEN
+```json
+{
+  "Authorization": "Bearer YOUR_CALLBACK_TOKEN",
+  "x-api-key": "YOUR_CALLBACK_API_KEY"
+}
 ```
 
-这些值用于**回调目标服务**认证，与调用 ImgTag 时的 `X-API-Key` 或 `Authorization` 无关；ImgTag 不会自动转发添加图片请求自身的认证头。`Authorization` 如需 Bearer 认证，应传入完整的 `Bearer ...`。建议回调地址使用 HTTPS。认证头随任务加密保存，任务查询接口不返回凭据；服务重启后须保持原有 `IMGTAG_SECRET_KEY` 不变，以便解密待执行任务。
+这些请求头用于**回调目标服务**，与调用 ImgTag 时的认证信息无关；ImgTag 不会自动转发添加图片请求自身的认证头。自定义请求头随任务加密保存，任务查询接口不返回它们；回调日志展示实际请求头名称，所有值仅保留首尾各 2 个字符，中间显示为 `***`（如 `AABBCCII` 显示为 `AA***II`）；长度不超过 4 个字符的值全部显示为 `***`。服务重启后须保持原有 `IMGTAG_SECRET_KEY` 不变，以便解密待执行任务。
 
 回调 JSON：
 
@@ -350,20 +351,10 @@ curl "http://your-domain/api/v1/external/images/search?api_key=YOUR_KEY&tags=可
             },
             "callback_headers": {
               "type": "object",
-              "properties": {
-                "x-api-key": {
-                  "type": "string",
-                  "pattern": "^[\\x20-\\x7E]+$",
-                  "description": "回调目标的 API Key；可选"
-                },
-                "Authorization": {
-                  "type": "string",
-                  "pattern": "^[\\x20-\\x7E]+$",
-                  "description": "回调目标的完整认证值，例如 Bearer TOKEN；可选"
-                }
+              "additionalProperties": {
+                "type": "string"
               },
-              "additionalProperties": false,
-              "description": "仅在指定 callback_url 时使用；不自动转发调用 ImgTag 的认证头"
+              "description": "可选的自定义回调请求头，名称和值按传入内容原样用于回调；日志中的值脱敏展示"
             }
           },
           "required": ["image_url"]

@@ -65,7 +65,7 @@ class ExternalImageCreate(BaseModel):
     callback_url: str | None = Field(default=None, description="分析完成后的回调URL")
     callback_headers: CallbackHeaders = Field(
         default_factory=dict, repr=False,
-        description="回调认证头，仅支持 x-api-key 和 Authorization；仅 callback_url 有效时使用",
+        description="可选的自定义回调请求头，名称和值按传入内容原样用于回调；日志中的值脱敏展示",
     )
     is_public: bool = Field(default=True, description="是否公开可见")
 

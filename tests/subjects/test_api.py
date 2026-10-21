@@ -1,15 +1,16 @@
 """主体接口：权限、参考图库与批量重分析确认。"""
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 import json
 import math
+import re
 import sqlite3
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi import FastAPI, HTTPException
 import httpx
 import pytest
-from sqlalchemy import Select
+from sqlalchemy import Select, func, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.sql.selectable import TextualSelect
@@ -18,7 +19,7 @@ from imgtag.api.endpoints import images, subjects, subjects as api, tags, tasks 
 from imgtag.api.endpoints.auth import get_current_user
 from imgtag.db import get_async_session
 from imgtag.db.repositories import image_repository, subject_repository
-from imgtag.models import Image
+from imgtag.models import Image, Tag
 from imgtag.services.subject_gallery_service import subject_gallery_service as gallery
 
 
@@ -260,16 +261,23 @@ def image_search_session(monkeypatch):
         CREATE TABLE subjects (id INTEGER, primary_tag_id INTEGER,
             alias_tag_ids TEXT, is_active BOOLEAN);
         INSERT INTO tags VALUES (10,'茜特菈莉'),(11,'奶奶'),(12,'Citlali'),
-            (20,'停用主体'),(21,'停用别名'),(30,'开心'),(40,'分类');
-        INSERT INTO subjects VALUES (1,10,'[11,12]',1),(2,20,'[21]',0);
+            (20,'停用主体'),(21,'停用别名'),(30,'开心'),(40,'分类'),
+            (50,'Doro'),(51,'doro'),(52,'多萝');
+        INSERT INTO subjects VALUES (1,10,'[11,12]',1),(2,20,'[21]',0),(3,50,'[51,52]',1);
         INSERT INTO images VALUES
             (1,'主名标签',NULL,'[-1,0]',1,1),
             (2,'别名标签',NULL,'[-1,0]',1,1),
             (3,'私有',NULL,'[-1,0]',0,2),
             (4,'停用主体',NULL,'[-1,0]',1,1),
-            (5,'描述含奶奶',NULL,'[-1,0]',1,1);
+            (5,'描述含奶奶',NULL,'[-1,0]',1,1),
+            (6,'主名称图片',NULL,'[-1,0]',1,1),
+            (7,'小写别名图片',NULL,'[-1,0]',1,1),
+            (8,'中文别名图片',NULL,'[-1,0]',1,1),
+            (9,'私有主名称图片',NULL,'[-1,0]',0,2),
+            (10,'多个身份标签',NULL,'[-1,0]',1,1);
         INSERT INTO image_tags VALUES
-            (1,10),(1,12),(1,30),(1,40),(2,11),(3,10),(4,20);
+            (1,10),(1,12),(1,30),(1,40),(2,11),(3,10),(4,20),
+            (6,50),(6,30),(6,40),(7,51),(8,52),(9,50),(10,50),(10,51);
     """)
 
     async def execute(statement, params=None):
@@ -296,16 +304,16 @@ def image_search_session(monkeypatch):
         return []
 
     def adapt_sql(sql):
-        return (sql.replace('tags.id = ANY (subjects.alias_tag_ids)',
-                            'tags.id IN (SELECT value FROM json_each(subjects.alias_tag_ids))')
-                .replace('image_tags.tag_id = ANY (subjects.alias_tag_ids)',
-                         'image_tags.tag_id IN (SELECT value FROM json_each(subjects.alias_tag_ids))')
-                .replace('ILIKE', 'LIKE').replace('%%', '%'))
+        sql = re.sub(
+            r'(\w+\.\w+) = ANY \(subjects.alias_tag_ids\)',
+            r'\1 IN (SELECT value FROM json_each(subjects.alias_tag_ids))', sql,
+        )
+        return sql.replace('ILIKE', 'LIKE').replace('%%', '%')
 
     monkeypatch.setattr(image_repository, 'get_by_ids', AsyncMock(return_value=[]))
     monkeypatch.setattr(images.storage_service, 'get_read_urls', AsyncMock(return_value={}))
     try:
-        yield SimpleNamespace(execute=execute)
+        yield SimpleNamespace(execute=execute, connection=connection)
     finally:
         connection.close()
 
@@ -322,6 +330,19 @@ def image_search_session(monkeypatch):
     ({'keyword': '奶奶', 'limit': 1, 'offset': 1}, [2]),
     ({'keyword': '停用别名'}, []),
     ({'keyword': '停用主体'}, [4]),
+    ({'keyword': 'doro'}, [10, 8, 7, 6]),
+    ({'keyword': '多萝', 'tags': ['开心']}, [6]),
+    ({'keyword': 'doro', 'tags': ['Doro', 'doro']}, [10, 8, 7, 6]),
+    ({'tags': ['doro']}, [10, 8, 7, 6]),
+    ({'tags': ['Doro']}, [10, 8, 7, 6]),
+    ({'tags': ['doro', 'doro']}, [10, 8, 7, 6]),
+    ({'tags': ['Doro', 'doro', '开心']}, [6]),
+    ({'keyword': 'doro', 'tags': ['不存在']}, []),
+    ({'tags': ['Doro', 'doro', '不存在']}, []),
+    ({'keyword': 'doro', 'category_id': 40}, [6]),
+    ({'keyword': 'doro', 'visible_to_user_id': 2}, [10, 9, 8, 7, 6]),
+    ({'keyword': "doro' OR 1=1 --", 'tags': ['doro']}, []),
+    ({'keyword': 'doro', 'tags': ["doro' OR 1=1 --"]}, []),
 ])
 async def test_image_search_expands_subject_identity_without_changing_filters(image_search_session, filters, expected):
     result = await image_repository.search_images(image_search_session, **filters)
@@ -337,6 +358,14 @@ async def test_image_search_expands_subject_identity_without_changing_filters(im
     ('奶奶', {'visible_to_user_id': 2}, [3, 2, 1]),
     ('奶奶', {'limit': 1}, [2]),
     ('停用别名', {}, []),
+    ('doro', {}, [10, 8, 7, 6]),
+    ('Doro', {}, [10, 8, 7, 6]),
+    ('多萝', {'tags': ['Doro', 'doro', '开心']}, [6]),
+    ('doro', {'tags': ['doro', 'doro']}, [10, 8, 7, 6]),
+    ('doro', {'tags': ['Doro', 'doro', '不存在']}, []),
+    ('doro', {'visible_to_user_id': 2}, [10, 9, 8, 7, 6]),
+    ("doro' OR 1=1 --", {}, []),
+    ('doro', {'tags': ["doro' OR 1=1 --"]}, []),
 ])
 async def test_hybrid_search_scores_subject_alias_matches(image_search_session, text, filters, expected):
     result = await image_repository.hybrid_search(
@@ -344,3 +373,36 @@ async def test_hybrid_search_scores_subject_alias_matches(image_search_session, 
     )
     assert [row['id'] for row in result] == expected
     assert all(row['similarity'] == pytest.approx(0.3) for row in result)
+
+
+async def test_search_tag_groups_only_expand_requested_names_independent_of_gallery_size(image_search_session):
+    """物化集合只随本次匹配的同义标签增长，不随图片数或无关主体增长。"""
+    session = image_search_session
+    groups = image_repository._search_tag_groups(Tag.name.in_(['doro', '开心']), name='requested_groups')
+    count = select(func.count()).select_from(groups)
+    assert (await session.execute(count)).scalar() == 4
+    session.connection.executemany(
+        'INSERT INTO image_tags VALUES (?,?)',
+        [(image_id, tag_id) for image_id in range(100, 1100) for tag_id in (50, 51, 52)],
+    )
+    # 无关标签和主体不应进入本次匹配集合。
+    session.connection.executemany('INSERT INTO tags VALUES (?,?)', [(i, f'无关-{i}') for i in range(100, 200)])
+    session.connection.execute("INSERT INTO subjects VALUES (4,100,'[101,102]',1)")
+    assert (await session.execute(count)).scalar() == 4
+
+
+async def test_shared_alias_does_not_transitively_expand_other_subjects(image_search_session):
+    """共享别名只匹配直接包含它的主体，不递归把其他主体主名称混为同义词。"""
+    session = image_search_session
+    session.connection.execute("INSERT INTO tags VALUES (60,'其他主体')")
+    session.connection.execute("INSERT INTO subjects VALUES (4,60,'[51]',1)")
+    session.connection.execute("INSERT INTO images VALUES (11,'其他主体图片',NULL,'[-1,0]',1,1)")
+    session.connection.execute('INSERT INTO image_tags VALUES (11,60)')
+    direct = await image_repository.search_images(session, tags=['Doro'])
+    assert direct['images'] == [10, 8, 7, 6]
+    shared = await image_repository.search_images(session, tags=['doro'])
+    assert shared['images'] == [11, 10, 8, 7, 6]
+    both = await image_repository.hybrid_search(
+        session, query_vector=[0.0, 1.0], query_text='doro', tags=['Doro', '其他主体'],
+    )
+    assert [row['id'] for row in both] == [10, 7]

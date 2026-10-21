@@ -157,31 +157,47 @@ async def test_external_upload_analysis_decision_and_instruction_forwarding(
 
 
 @pytest.mark.parametrize('headers', [
+    pytest.param(None, id='omitted'),
     {}, {'x-api-key': 'callback-test-key'}, {'Authorization': 'Bearer callback-test-token'},
     {'x-api-key': 'callback-test-key', 'Authorization': 'Bearer callback-test-token'},
+    {'x-api-key': ' callback-test-key '}, {'Authorization': ' Bearer callback-test-token '},
+    {'x-api-key': ' callback-test-key ', 'Authorization': ' Bearer callback-test-token '},
+    {'X-Webhook-Secret': ' custom-callback-secret ', 'X-App-Id': 'my-app'},
+    {'custom_header': 'custom-value', 'Authorization': 'Bearer callback-test-token'},
+    {'Host': 'callback.example'},
+    {'authorization': 'Bearer callback-test-token', 'x-custom-auth': 'custom-auth-token'},
+    {'x-api-key': ''}, {'x-api-key': '   '}, {'Authorization': ' '},
+    {'Bad Header': 'value'}, {'Authorization': 'Bearer test\r\nInjected: value'},
+    {'Authorization': '中文'},
+    {'Authorization': '\tBearer callback-test-token\t'},
+    {'Authorization': '\r\nBearer callback-test-token\r\n'},
+    {'Authorization': '\u00a0Bearer callback-test-token\u00a0'},
+    {'x-api-key': 'callback-test-key\x7f'}, {'x-api-key': 'callback-test-key\x00'},
+    {'': 'value'}, {'Bad:Header': 'value'}, {'X-Header\r\nInjected': 'value'},
+    {'中文': 'value'}, {'X-Custom': 'value\r\nInjected: yes'},
 ])
 async def test_external_upload_forwards_callback_authentication(upload_dependencies, headers):
     app = FastAPI()
     app.include_router(external.router, prefix='/external')
     app.dependency_overrides[external.require_api_key] = lambda: {'id': 1, 'role': 'admin'}
     app.dependency_overrides[external.get_async_session] = lambda: upload_dependencies
+    payload = {'image_url': 'https://example.com/a.png', 'callback_url': 'https://example.com/callback'}
+    if headers is not None:
+        payload['callback_headers'] = headers
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
-        response = await client.post('/external/images', json={
-            'image_url': 'https://example.com/a.png',
-            'callback_url': 'https://example.com/callback', 'callback_headers': headers,
-        }, headers={'X-API-Key': 'imgtag-test-key', 'Authorization': 'Bearer imgtag-test-token'})
+        response = await client.post('/external/images', json=payload,
+            headers={'X-API-Key': 'imgtag-test-key', 'Authorization': 'Bearer imgtag-test-token'})
     await asyncio.sleep(0)
     assert response.status_code == 200, response.text
     external.task_queue.add_tasks.assert_awaited_once_with(
         [18], callback_url='https://example.com/callback',
-        callback_headers=headers, analysis_instructions='',
+        callback_headers=headers or {}, analysis_instructions='',
     )
     assert 'callback_headers' not in response.json()
 
 
 @pytest.mark.parametrize('headers', [
-    {'Host': 'example.com'}, {'Authorization': 'Bearer test\r\nInjected: value'},
-    {'x-api-key': ''}, {'x-api-key': 123}, {'Authorization': '中文'}, None,
+    {'x-api-key': 123}, None, 'callback-test-secret',
 ])
 async def test_external_callback_headers_reject_invalid_values_before_upload(upload_dependencies, headers):
     app = FastAPI()

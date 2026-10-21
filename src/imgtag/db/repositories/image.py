@@ -11,6 +11,7 @@ from typing import Any, Optional, Sequence
 from sqlalchemy import Float, and_, any_, asc, bindparam, case, column, desc, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import CTE
 
 from imgtag.core.config import settings
@@ -391,20 +392,23 @@ class ImageRepository(BaseRepository[Image]):
         return [(row.Image, row.similarity) for row in result]
 
     @staticmethod
-    def searchable_image_tags() -> CTE:
-        """搜索时展开启用主体的同义标签，不改写图片的实际标签。"""
-        direct = select(ImageTag.image_id, Tag.id, Tag.name).join(Tag, Tag.id == ImageTag.tag_id)
+    def _search_tag_groups(name_filter: ColumnElement[bool], *, name: str) -> CTE:
+        """只展开本次命中的标签；保留原搜索名称，供多标签 AND 按条件计数。"""
+        matched = select(
+            Tag.id.label("tag_id"), Tag.name.label("matched_name"),
+        ).where(name_filter).cte(f"{name}_matched")
+        direct = select(matched.c.tag_id, matched.c.matched_name)
         expanded = (
-            select(ImageTag.image_id, Tag.id, Tag.name)
-            .select_from(ImageTag)
+            select(Tag.id.label("tag_id"), matched.c.matched_name)
+            .select_from(matched)
             .join(Subject, or_(
-                Subject.primary_tag_id == ImageTag.tag_id,
-                ImageTag.tag_id == any_(Subject.alias_tag_ids),
+                Subject.primary_tag_id == matched.c.tag_id,
+                matched.c.tag_id == any_(Subject.alias_tag_ids),
             ))
             .join(Tag, or_(Subject.primary_tag_id == Tag.id, Tag.id == any_(Subject.alias_tag_ids)))
             .where(Subject.is_active.is_(True))
         )
-        return direct.union(expanded).cte("searchable_image_tags")
+        return direct.union(expanded).cte(name)
 
     async def search_images(
         self,
@@ -467,15 +471,14 @@ class ImageRepository(BaseRepository[Image]):
         if user_id is not None:
             conditions.append(Image.uploaded_by == user_id)
 
-        searchable_tags = self.searchable_image_tags()
-
         # Tag filter (AND - must have all tags)
         if tags:
+            filter_tags = self._search_tag_groups(Tag.name.in_(tags), name="filter_tag_groups")
             subquery = (
-                select(searchable_tags.c.image_id)
-                .where(searchable_tags.c.name.in_(tags))
-                .group_by(searchable_tags.c.image_id)
-                .having(func.count(func.distinct(searchable_tags.c.id)) == len(tags))
+                select(ImageTag.image_id)
+                .join(filter_tags, filter_tags.c.tag_id == ImageTag.tag_id)
+                .group_by(ImageTag.image_id)
+                .having(func.count(func.distinct(filter_tags.c.matched_name)) == len(set(tags)))
             )
             conditions.append(Image.id.in_(subquery))
 
@@ -498,9 +501,12 @@ class ImageRepository(BaseRepository[Image]):
         # Keyword search (description OR tags)
         if keyword:
             keyword_pattern = f"%{keyword}%"
+            keyword_tags = self._search_tag_groups(
+                Tag.name.ilike(keyword_pattern), name="keyword_tag_groups",
+            )
             keyword_subquery = (
-                select(searchable_tags.c.image_id)
-                .where(searchable_tags.c.name.ilike(keyword_pattern))
+                select(ImageTag.image_id)
+                .where(ImageTag.tag_id.in_(select(keyword_tags.c.tag_id)))
             )
             conditions.append(
                 or_(
@@ -713,7 +719,6 @@ class ImageRepository(BaseRepository[Image]):
         vector_str = ",".join(map(str, query_vector))
 
         # Build extra conditions
-        extra_conditions = []
         params = {
             "query_text": query_text,
             "vector": f"[{vector_str}]",
@@ -734,13 +739,13 @@ class ImageRepository(BaseRepository[Image]):
         if tags:
             filter_sql += """ AND i.id IN (
                 SELECT it_f.image_id
-                FROM searchable_image_tags it_f
-                WHERE it_f.name IN :filter_tags
+                FROM image_tags it_f
+                JOIN filter_tag_groups ft ON ft.tag_id = it_f.tag_id
                 GROUP BY it_f.image_id
-                HAVING COUNT(DISTINCT it_f.id) = :filter_tags_count
+                HAVING COUNT(DISTINCT ft.matched_name) = :filter_tags_count
             )"""
-            params["filter_tags"] = list(tags)
-            params["filter_tags_count"] = len(tags)
+            params["filter_tags"] = list(dict.fromkeys(tags))
+            params["filter_tags_count"] = len(params["filter_tags"])
         # Visibility filter:
         # - skip_visibility_filter=True: no filter (admin mode)
         # - visible_to_user_id set: show public OR owned by user
@@ -766,7 +771,8 @@ class ImageRepository(BaseRepository[Image]):
                 (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) as tag_score
             FROM images i
             LEFT JOIN (
-                SELECT DISTINCT image_id FROM searchable_image_tags WHERE name = :query_text
+                SELECT DISTINCT image_id FROM image_tags
+                WHERE tag_id IN (SELECT tag_id FROM query_tag_groups)
             ) tm ON i.id = tm.image_id
             WHERE i.embedding IS NOT NULL
               {filter_sql}
@@ -777,10 +783,11 @@ class ImageRepository(BaseRepository[Image]):
         """).columns(
             Image.id, Image.description, Image.original_url,
             column("vector_score", Float), column("tag_score", Float),
-        ).add_cte(self.searchable_image_tags())
+        ).add_cte(self._search_tag_groups(Tag.name == bindparam("query_text"), name="query_tag_groups"))
         if tags:
-            # IN 子句列表参数需要 expanding bindparam
-            query = query.bindparams(bindparam("filter_tags", expanding=True))
+            query = query.add_cte(self._search_tag_groups(
+                Tag.name.in_(bindparam("filter_tags", expanding=True)), name="filter_tag_groups",
+            ))
 
         result = await session.execute(query, params)
         rows = result.fetchall()

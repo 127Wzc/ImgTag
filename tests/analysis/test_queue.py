@@ -5,10 +5,12 @@ import base64
 import io
 import json
 import importlib
+import traceback
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import httpx
+import h11
 import pytest
 from PIL import Image
 from sqlalchemy.dialects import postgresql
@@ -126,20 +128,28 @@ async def test_running_task_keeps_exactly_one_followup(queue, monkeypatch):
 @pytest.mark.parametrize('headers', [
     {}, {'x-api-key': 'callback-test-key'}, {'Authorization': 'Bearer callback-test-token'},
     {'x-api-key': 'callback-test-key', 'Authorization': 'Bearer callback-test-token'},
+    {'X-Webhook-Secret': 'custom-callback-secret', 'X-App-Id': 'callback-consumer'},
+    {'custom_header': 'custom-value', 'Authorization': 'Bearer callback-test-token'},
+    {'authorization': 'Bearer callback-test-token', 'x-custom-auth': 'custom-auth-token'},
+    {'Host': 'virtual.callback.test', 'Content-Type': 'application/custom+json'},
+    {'X-Optional': ''},
 ])
 @pytest.mark.parametrize('success', [True, False])
 @pytest.mark.parametrize('status_code', [200, 401])
 async def test_callback_headers_survive_queue_and_are_sent_only_to_callback(
     queue, monkeypatch, caplog, headers, success, status_code,
 ):
+    caplog.set_level('INFO', logger='imgtag.services.task_queue')
     create = AsyncMock()
     monkeypatch.setattr('imgtag.services.task_queue.task_repository.list_active_for_images', AsyncMock(return_value=[]))
     monkeypatch.setattr('imgtag.services.task_queue.task_repository.create_task', create)
     await queue.add_tasks([1], callback_url='https://callback.example/hook', callback_headers=headers)
     payload = create.await_args.kwargs['payload']
     for value in headers.values():
-        assert value not in json.dumps(payload)
-    assert queue._get_callback_headers(payload) == headers
+        if value.strip(' '):
+            assert value not in json.dumps(payload)
+    expected_headers = headers
+    assert queue._get_callback_headers(payload) == expected_headers
 
     monkeypatch.setattr('imgtag.services.task_queue.image_repository.get_with_tags',
                         AsyncMock(return_value=SimpleNamespace(width=100, height=200)))
@@ -147,6 +157,8 @@ async def test_callback_headers_survive_queue_and_are_sent_only_to_callback(
     requests = []
 
     async def handle(request):
+        # MockTransport 本身不会检查 HTTP/1.1 头格式，交给真实协议解析器校验。
+        h11.Request(method=request.method, target=request.url.raw_path, headers=request.headers.raw)
         requests.append(request)
         return httpx.Response(status_code)
 
@@ -160,17 +172,68 @@ async def test_callback_headers_survive_queue_and_are_sent_only_to_callback(
     )
     assert len(requests) == 1
     request = requests[0]
-    for name in ['x-api-key', 'Authorization']:
-        assert request.headers.get(name) == headers.get(name)
+    for name, value in expected_headers.items():
+        assert request.headers[name] == value
+    expected_names = {name.lower() for name in expected_headers}
+    for name in ['x-api-key', 'authorization']:
+        if name not in expected_names:
+            assert name not in request.headers
+    header_logs = [record for record in caplog.records
+                   if record.name == 'imgtag.services.task_queue' and 'headers=' in record.msg]
+    assert len(header_logs) == 1
+    assert header_logs[0].args[-1] == {
+        name: f'{value[:2]}***{value[-2:]}' if len(value) > 4 else '***'
+        for name, value in request.headers.items()
+    }
     body = json.loads(request.content)
     assert body['success'] is success and body['image_id'] == 1
     assert body['tags'] == (['测试标签'] if success else [])
     assert body['error'] == (None if success else '分析失败')
     assert 'callback_headers' not in body
     for value in headers.values():
-        assert value not in caplog.text
+        if value.strip(' '):
+            assert value not in caplog.text
     if status_code == 401:
         assert '失败' in caplog.text and '401' in caplog.text
+
+
+@pytest.mark.parametrize('outcome', [200, 401, 'before_request'])
+async def test_callback_header_mask_preserves_edges_without_changing_sent_values(queue, monkeypatch, caplog, outcome):
+    caplog.set_level('INFO', logger='imgtag.services.task_queue')
+    headers = {
+        'X-One': 'A', 'X-Two': 'AB', 'X-Three': 'ABC', 'X-Four': 'ABCD',
+        'X-Five': 'ABCDE', 'X-Example': 'AABBCCII',
+    }
+    expected = {
+        'x-one': '***', 'x-two': '***', 'x-three': '***', 'x-four': '***',
+        'x-five': 'AB***DE', 'x-example': 'AA***II',
+    }
+    monkeypatch.setattr('imgtag.services.task_queue.image_repository.get_with_tags',
+                        AsyncMock(return_value=SimpleNamespace(width=100, height=200)))
+    read_url = AsyncMock(return_value='https://images.example/a.png')
+    if outcome == 'before_request':
+        read_url.side_effect = RuntimeError('sensitive input AABBCCII')
+    monkeypatch.setattr(storage_service, 'get_read_url', read_url)
+    requests = []
+
+    async def handle(request):
+        requests.append(request)
+        return httpx.Response(outcome)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr('imgtag.services.task_queue.httpx.AsyncClient',
+                        lambda **kwargs: real_client(transport=httpx.MockTransport(handle), **kwargs))
+    await queue._send_callback('https://callback.example/hook', 1, 'masked-callback', True,
+                              callback_headers_encrypted=encrypt(json.dumps(headers)))
+    assert len(requests) == (0 if outcome == 'before_request' else 1)
+    if requests:
+        for name, value in headers.items():
+            assert requests[0].headers[name] == value
+    header_log = next(record for record in caplog.records
+                      if record.name == 'imgtag.services.task_queue' and 'headers=' in record.msg)
+    logged_headers = {name.lower(): value for name, value in header_log.args[-1].items()}
+    assert {name: logged_headers[name] for name in expected} == expected
+    assert 'AABBCCII' not in caplog.text
 
 
 async def test_callback_credentials_are_ignored_without_url_and_not_merged_across_destinations(queue, monkeypatch):
@@ -190,6 +253,120 @@ async def test_callback_credentials_are_ignored_without_url_and_not_merged_acros
     assert first['added'] == other_key['added'] == other_url['added'] == 1
     assert same['existing'] == 1
     assert len(active) == 4
+
+
+async def test_callback_credentials_match_by_original_values(queue, monkeypatch):
+    headers = {'x-api-key': ' callback-test-key ', 'Authorization': ' Bearer callback-test-token ', 'X-Optional': '   '}
+    active = [SimpleNamespace(id='pending', status='pending', payload={
+        'image_id': 1, 'callback_url': 'https://callback.example/hook',
+        'callback_headers_encrypted': encrypt(json.dumps(headers)),
+    })]
+    monkeypatch.setattr('imgtag.services.task_queue.task_repository.list_active_for_images', AsyncMock(return_value=active))
+    create = AsyncMock()
+    monkeypatch.setattr('imgtag.services.task_queue.task_repository.create_task', create)
+    report = await queue.enqueue_tasks(
+        [1], callback_url='https://callback.example/hook', callback_headers=headers,
+    )
+    assert report['existing'] == 1
+    create.assert_not_awaited()
+    report = await queue.enqueue_tasks(
+        [1], callback_url='https://callback.example/hook',
+        callback_headers={name: value.strip(' ') for name, value in headers.items()},
+    )
+    assert report['added'] == 1
+    create.assert_awaited_once()
+
+
+@pytest.mark.parametrize('headers', [
+    {'Authorization': ' Bearer callback-test-token '}, {'X-Optional': ''},
+    {'Authorization': 'Bearer callback-test-token\r\nInjected: value'},
+    {'Authorization': '\tBearer callback-test-token\t'},
+    {'Authorization': '\u00a0Bearer callback-test-token\u00a0'},
+    {'x-api-key': 'callback-test-key\x00'}, {'Bad Header': 'callback-test-key'},
+    {'X-Custom': 'callback-test-key\r\nInjected: value'},
+])
+async def test_internal_callback_headers_preserve_original_values(queue, monkeypatch, headers):
+    create = AsyncMock()
+    monkeypatch.setattr('imgtag.services.task_queue.task_repository.list_active_for_images', AsyncMock(return_value=[]))
+    monkeypatch.setattr('imgtag.services.task_queue.task_repository.create_task', create)
+    await queue.enqueue_tasks([1], callback_url='https://callback.example/hook', callback_headers=headers)
+    payload = create.await_args.kwargs['payload']
+    assert queue._get_callback_headers(payload) == headers
+    assert 'callback_headers' not in payload
+
+
+@pytest.mark.parametrize('value', [
+    ' Bearer callback-test-token ', 'Bearer callback-test-token\r\nInjected: value',
+    'Bearer callback-test-token\x00', 'Bearer callback-test-token中文',
+])
+async def test_callback_protocol_errors_do_not_normalize_values_or_leak_credentials(queue, monkeypatch, caplog, value):
+    caplog.set_level('INFO', logger='imgtag.services.task_queue')
+    monkeypatch.setattr('imgtag.services.task_queue.image_repository.get_with_tags',
+                        AsyncMock(return_value=SimpleNamespace(width=100, height=200)))
+    monkeypatch.setattr(storage_service, 'get_read_url', AsyncMock(return_value='https://images.example/a.png'))
+    requests = []
+
+    async def handle(request):
+        h11.Request(method=request.method, target=request.url.raw_path, headers=request.headers.raw)
+        return httpx.Response(200)
+
+    real_client = httpx.AsyncClient
+    real_build = real_client.build_request
+
+    def build(client, *args, **kwargs):
+        requests.append(kwargs['headers'])
+        return real_build(client, *args, **kwargs)
+
+    monkeypatch.setattr(real_client, 'build_request', build)
+    monkeypatch.setattr('imgtag.services.task_queue.httpx.AsyncClient',
+                        lambda **kwargs: real_client(transport=httpx.MockTransport(handle), **kwargs))
+    await queue._send_callback('https://callback.example/hook?token=callback-test-token', 1, 'legacy-callback', True,
+        callback_headers_encrypted=encrypt(json.dumps({'Authorization': value, 'X-Optional': ''})))
+    assert len(requests) == 1
+    assert requests[0] == {'Authorization': value, 'X-Optional': ''}
+    assert '失败' in caplog.text
+    assert 'callback-test-token' not in caplog.text
+
+
+@pytest.mark.parametrize('error_type', [httpx.LocalProtocolError, httpx.ConnectError, ValueError, httpx.HTTPStatusError])
+async def test_callback_errors_never_log_credential_values(queue, monkeypatch, caplog, error_type):
+    monkeypatch.setattr('imgtag.services.task_queue.image_repository.get_with_tags',
+                        AsyncMock(return_value=SimpleNamespace(width=100, height=200)))
+    monkeypatch.setattr(storage_service, 'get_read_url', AsyncMock(return_value='https://images.example/a.png'))
+    secret = 'callback-test-secret'
+
+    async def handle(request):
+        if error_type is httpx.HTTPStatusError:
+            return httpx.Response(401)
+        raise error_type(f'Illegal header value {secret}')
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr('imgtag.services.task_queue.httpx.AsyncClient',
+                        lambda **kwargs: real_client(transport=httpx.MockTransport(handle), **kwargs))
+    await queue._send_callback(f'https://callback.example/hook?token={secret}', 1, 'sensitive-callback', True,
+        callback_headers_encrypted=encrypt(json.dumps({'x-api-key': secret})))
+    assert secret not in caplog.text
+    assert 'sensitive-callback' in caplog.text
+    assert ('HTTP 401' if error_type is httpx.HTTPStatusError else error_type.__name__) in caplog.text
+    header_log = next(record for record in caplog.records
+                      if record.name == 'imgtag.services.task_queue' and 'headers=' in record.msg)
+    assert header_log.args[-1]['x-api-key'] == 'ca***et'
+    assert all(value == '***' or (len(value) == 7 and value[2:-2] == '***')
+               for value in header_log.args[-1].values())
+
+
+@pytest.mark.parametrize('kind', ['invalid_token', 'invalid_json', 'invalid_header', 'wrong_type'])
+def test_legacy_callback_decode_errors_do_not_expose_credentials(queue, kind):
+    secret = 'callback-test-secret'
+    encrypted = {
+        'invalid_token': secret,
+        'invalid_json': encrypt(secret),
+        'invalid_header': encrypt(json.dumps({'Authorization': [secret]})),
+        'wrong_type': 123,
+    }[kind]
+    with pytest.raises(ValueError, match='回调认证信息无效或无法解密') as error:
+        queue._get_callback_headers({'callback_headers_encrypted': encrypted})
+    assert secret not in ''.join(traceback.format_exception(error.type, error.value, error.tb))
 
 
 @pytest.fixture
@@ -353,6 +530,28 @@ async def test_superseded_analysis_preserves_callback_authentication(queue, proc
     }), 0)
     assert enqueue.await_args.kwargs['callback_headers'] == headers
     assert enqueue.await_args.kwargs['callback_url'] == 'https://callback.example/hook'
+
+
+async def test_superseded_analysis_invalid_callback_credentials_do_not_leak(queue, processing, monkeypatch, caplog):
+    processing[-1].return_value = [{'subject_id': 2}]
+    failed = AsyncMock()
+    callback = AsyncMock()
+    monkeypatch.setattr(queue, '_mark_task_failed', failed)
+    monkeypatch.setattr(queue, '_send_callback', callback)
+    secret = 'callback-test-secret'
+    task = SimpleNamespace(id='invalid-legacy-callback', type='analyze_image', payload={
+        'image_id': 1, 'force_analyze': True, 'callback_url': 'https://callback.example/hook',
+        'callback_headers_encrypted': encrypt(json.dumps({'Authorization': [secret]})),
+    })
+    with pytest.raises(ValueError) as error:
+        await queue._process_task(task, 0)
+    await asyncio.sleep(0)
+    failed.assert_awaited_once()
+    callback.assert_awaited_once()
+    assert secret not in ''.join(traceback.format_exception(error.type, error.value, error.tb))
+    assert secret not in failed.await_args.args[1]
+    assert secret not in callback.await_args.kwargs['error']
+    assert secret not in caplog.text
 
 
 async def test_claim_query_serializes_images():

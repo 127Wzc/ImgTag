@@ -6,6 +6,7 @@
 
 import json
 import math
+import re
 import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -326,11 +327,11 @@ async def test_smart_search_handles_zero_vectors_before_ordering_and_limit(monke
     """)
     async def execute(statement, params=None):
         if isinstance(statement, (TextClause, TextualSelect)):
-            sql = (str(statement).replace('i.embedding <=> :vector','cosine_distance(i.embedding, :vector)')
-                   .replace('tags.id = ANY (subjects.alias_tag_ids)',
-                            'tags.id IN (SELECT value FROM json_each(subjects.alias_tag_ids))')
-                   .replace('image_tags.tag_id = ANY (subjects.alias_tag_ids)',
-                            'image_tags.tag_id IN (SELECT value FROM json_each(subjects.alias_tag_ids))'))
+            sql = str(statement).replace('i.embedding <=> :vector','cosine_distance(i.embedding, :vector)')
+            sql = re.sub(
+                r'(\w+\.\w+) = ANY \(subjects.alias_tag_ids\)',
+                r'\1 IN (SELECT value FROM json_each(subjects.alias_tag_ids))', sql,
+            )
             return connection.execute(sql, params)
         return []  # 标签展示和上传者信息查询与本回归无关。
     session = SimpleNamespace(execute=execute)
