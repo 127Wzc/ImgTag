@@ -2,10 +2,15 @@
 # -*- coding: utf-8 -*-
 
 from datetime import datetime
-from typing import Dict, Any, Optional
-from pydantic import BaseModel, Field
+from typing import Annotated, Dict, Any, Literal, Optional
+from pydantic import BaseModel, Field, StringConstraints
 
 from .base import BaseSchema
+
+CallbackHeaders = dict[
+    Literal["x-api-key", "Authorization"],
+    Annotated[str, StringConstraints(pattern=r"^[\x20-\x7E]+$")],
+]
 
 class TaskBase(BaseModel):
     """任务基础模型"""

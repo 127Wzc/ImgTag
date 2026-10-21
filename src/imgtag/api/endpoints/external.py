@@ -32,6 +32,7 @@ from imgtag.db.repositories import (
     tag_repository,
 )
 from imgtag.core.category_cache import get_category_code_cached
+from imgtag.schemas.task import CallbackHeaders
 from imgtag.services import embedding_service
 from imgtag.services.backup_service import trigger_backup_for_image
 from imgtag.services.storage_service import storage_service
@@ -62,6 +63,10 @@ class ExternalImageCreate(BaseModel):
     auto_analyze: bool = Field(default=True, description="是否启用 AI 分析")
     analysis_instructions: AnalysisInstructions = Field(default="", max_length=6000, description="仅本次分析的补充要求；未传、null 或空白不生效")
     callback_url: str | None = Field(default=None, description="分析完成后的回调URL")
+    callback_headers: CallbackHeaders = Field(
+        default_factory=dict, repr=False,
+        description="回调认证头，仅支持 x-api-key 和 Authorization；仅 callback_url 有效时使用",
+    )
     is_public: bool = Field(default=True, description="是否公开可见")
 
 
@@ -270,6 +275,7 @@ async def analyze_image_from_url(
                 [new_image.id], 
                 callback_url=request.callback_url,
                 analysis_instructions=request.analysis_instructions,
+                callback_headers=request.callback_headers,
             )
         elif user_provided_full:
             # 用户已提供完整内容，只需生成向量（后台执行）

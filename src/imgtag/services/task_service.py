@@ -200,6 +200,8 @@ class TaskService:
     @staticmethod
     def task_response(task, user: dict) -> dict:
         data = TaskResponse.model_validate(task).model_dump(mode="json")
+        if data["payload"]:
+            data["payload"].pop("callback_headers_encrypted", None)
         if user.get("role") != "admin":
             # 白名单返回进度，完整输入、原始响应、存储参数和内部错误仅管理员可读。
             data["payload"] = {"image_id": (task.payload or {}).get("image_id")}
@@ -227,4 +229,3 @@ class TaskService:
 
 # 全局实例
 task_service = TaskService()
-

@@ -8,13 +8,16 @@
 """
 
 import asyncio
+import json
 import uuid
 from typing import Any
 
 import httpx
+from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.core.logging_config import get_logger
+from imgtag.core.crypto import decrypt, encrypt
 from imgtag.core.storage_constants import StorageTaskStatus, get_mime_type
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import (
@@ -25,6 +28,7 @@ from imgtag.db.repositories import (
     task_repository,
 )
 from imgtag.models.task import Task
+from imgtag.schemas.task import CallbackHeaders
 from imgtag.services.embedding_service import embedding_service
 from imgtag.services.storage_service import storage_service
 from imgtag.services.subject_assignment_service import subject_assignment_service
@@ -90,6 +94,11 @@ class TaskQueueService:
             except (ValueError, TypeError):
                 return 1.0
     
+    @staticmethod
+    def _get_callback_headers(payload: dict[str, Any]) -> CallbackHeaders:
+        encrypted = payload.get("callback_headers_encrypted")
+        return TypeAdapter(CallbackHeaders).validate_json(decrypt(encrypted)) if encrypted else {}
+
     async def enqueue_tasks(
         self,
         image_ids: list[int],
@@ -98,10 +107,12 @@ class TaskQueueService:
         force_analyze: bool = False,
         session: AsyncSession | None = None,
         analysis_instructions: str = "",
+        callback_headers: CallbackHeaders | None = None,
     ) -> dict[str, Any]:
         """串行化同图入队，返回新建、升级、等待和复用情况。"""
         analysis_instructions = normalize_analysis_instructions(analysis_instructions)
         force_analyze = force_analyze or bool(analysis_instructions)
+        callback_headers = callback_headers if callback_url and callback_headers else {}
         report: dict[str, Any] = {
             "added": 0, "upgraded": 0, "waiting": 0, "existing": 0,
             "missing": 0, "task_ids": [],
@@ -120,7 +131,12 @@ class TaskQueueService:
                     report["missing"] += 1
                     continue
                 active = active_by_image.get(image_id, [])
-                matching = [t for t in active if normalize_analysis_instructions((t.payload or {}).get("analysis_instructions")) == analysis_instructions]
+                matching = [
+                    t for t in active
+                    if normalize_analysis_instructions((t.payload or {}).get("analysis_instructions")) == analysis_instructions
+                    and (t.payload or {}).get("callback_url") == callback_url
+                    and self._get_callback_headers(t.payload or {}) == callback_headers
+                ]
                 pending = next((t for t in matching if t.status == "pending"), None)
                 if pending is not None:
                     if force_analyze and not (pending.payload or {}).get("force_analyze"):
@@ -135,6 +151,8 @@ class TaskQueueService:
                     report["task_ids"].append(matching[0].id)
                     continue
                 payload: dict[str, Any] = {"image_id": image_id, "callback_url": callback_url}
+                if callback_headers:
+                    payload["callback_headers_encrypted"] = encrypt(json.dumps(callback_headers))
                 if analysis_instructions:
                     payload["analysis_instructions"] = analysis_instructions
                 if force_analyze:
@@ -166,9 +184,13 @@ class TaskQueueService:
         force_analyze: bool = False,
         session: AsyncSession | None = None,
         analysis_instructions: str = "",
+        callback_headers: CallbackHeaders | None = None,
     ) -> int:
         """兼容内部调用；强制分析返回已接受数量（包括复用的强制任务）。"""
-        report = await self.enqueue_tasks(image_ids, task_type, callback_url, force_analyze, session, analysis_instructions)
+        report = await self.enqueue_tasks(
+            image_ids, task_type, callback_url, force_analyze, session, analysis_instructions,
+            callback_headers=callback_headers,
+        )
         return report["added"] + report["upgraded"] + (report["existing"] if force_analyze or analysis_instructions.strip() else 0)
 
     # ==================== 状态查询 ====================
@@ -563,7 +585,11 @@ class TaskQueueService:
                 await subject_repository.lock_by_ids(session, [c["subject_id"] for c in subject_snapshot])
                 latest = await subject_context_service.resolve(session, image_id)
                 if latest != subject_snapshot:
-                    await self.add_tasks([image_id], force_analyze=True, session=session, analysis_instructions=analysis_instructions)
+                    await self.add_tasks(
+                        [image_id], force_analyze=True, session=session,
+                        analysis_instructions=analysis_instructions, callback_url=callback_url,
+                        callback_headers=self._get_callback_headers(payload),
+                    )
                     await session.commit()
                     await self._mark_task_completed(task.id, {
                         "image_id": image_id, "superseded": True,
@@ -611,7 +637,8 @@ class TaskQueueService:
             if callback_url:
                 asyncio.create_task(self._send_callback(
                     callback_url, image_id, task.id, True, 
-                    final_tags, analysis.description
+                    final_tags, analysis.description,
+                    callback_headers_encrypted=payload.get("callback_headers_encrypted"),
                 ))
             
         except Exception as e:
@@ -621,7 +648,8 @@ class TaskQueueService:
             if callback_url:
                 asyncio.create_task(self._send_callback(
                     callback_url, image_id, task.id, False, 
-                    error=str(e)
+                    error=str(e),
+                    callback_headers_encrypted=payload.get("callback_headers_encrypted"),
                 ))
             raise
     
@@ -644,9 +672,15 @@ class TaskQueueService:
         tags: list[str] | None = None,
         description: str | None = None,
         error: str | None = None,
+        callback_headers_encrypted: str | None = None,
     ):
         """发送回调"""
         try:
+            headers: dict[str, str] = {
+                name: value for name, value in self._get_callback_headers(
+                    {"callback_headers_encrypted": callback_headers_encrypted}
+                ).items()
+            }
             async with async_session_maker() as session:
                 image = await image_repository.get_with_tags(session, image_id)
                 if not image:
@@ -666,7 +700,8 @@ class TaskQueueService:
             }
             
             async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(url, json=callback_data)
+                resp = await client.post(url, json=callback_data, headers=headers)
+                resp.raise_for_status()
                 logger.info(f"回调 {url} 完成: {resp.status_code}")
         except Exception as e:
             logger.warning(f"回调 {url} 失败: {e}")

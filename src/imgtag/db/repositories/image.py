@@ -8,9 +8,10 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import and_, asc, bindparam, case, desc, exists, func, or_, select, text, update
+from sqlalchemy import Float, and_, any_, asc, bindparam, case, column, desc, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.sql.selectable import CTE
 
 from imgtag.core.config import settings
 from imgtag.core.config_cache import config_cache
@@ -389,6 +390,22 @@ class ImageRepository(BaseRepository[Image]):
         result = await session.execute(stmt)
         return [(row.Image, row.similarity) for row in result]
 
+    @staticmethod
+    def searchable_image_tags() -> CTE:
+        """搜索时展开启用主体的同义标签，不改写图片的实际标签。"""
+        direct = select(ImageTag.image_id, Tag.id, Tag.name).join(Tag, Tag.id == ImageTag.tag_id)
+        expanded = (
+            select(ImageTag.image_id, Tag.id, Tag.name)
+            .select_from(ImageTag)
+            .join(Subject, or_(
+                Subject.primary_tag_id == ImageTag.tag_id,
+                ImageTag.tag_id == any_(Subject.alias_tag_ids),
+            ))
+            .join(Tag, or_(Subject.primary_tag_id == Tag.id, Tag.id == any_(Subject.alias_tag_ids)))
+            .where(Subject.is_active.is_(True))
+        )
+        return direct.union(expanded).cte("searchable_image_tags")
+
     async def search_images(
         self,
         session: AsyncSession,
@@ -450,14 +467,15 @@ class ImageRepository(BaseRepository[Image]):
         if user_id is not None:
             conditions.append(Image.uploaded_by == user_id)
 
+        searchable_tags = self.searchable_image_tags()
+
         # Tag filter (AND - must have all tags)
         if tags:
             subquery = (
-                select(ImageTag.image_id)
-                .join(Tag, ImageTag.tag_id == Tag.id)
-                .where(Tag.name.in_(tags))
-                .group_by(ImageTag.image_id)
-                .having(func.count(func.distinct(Tag.id)) == len(tags))
+                select(searchable_tags.c.image_id)
+                .where(searchable_tags.c.name.in_(tags))
+                .group_by(searchable_tags.c.image_id)
+                .having(func.count(func.distinct(searchable_tags.c.id)) == len(tags))
             )
             conditions.append(Image.id.in_(subquery))
 
@@ -481,9 +499,8 @@ class ImageRepository(BaseRepository[Image]):
         if keyword:
             keyword_pattern = f"%{keyword}%"
             keyword_subquery = (
-                select(ImageTag.image_id)
-                .join(Tag, ImageTag.tag_id == Tag.id)
-                .where(Tag.name.ilike(keyword_pattern))
+                select(searchable_tags.c.image_id)
+                .where(searchable_tags.c.name.ilike(keyword_pattern))
             )
             conditions.append(
                 or_(
@@ -717,11 +734,10 @@ class ImageRepository(BaseRepository[Image]):
         if tags:
             filter_sql += """ AND i.id IN (
                 SELECT it_f.image_id
-                FROM image_tags it_f
-                JOIN tags t_f ON it_f.tag_id = t_f.id
-                WHERE t_f.name IN :filter_tags
+                FROM searchable_image_tags it_f
+                WHERE it_f.name IN :filter_tags
                 GROUP BY it_f.image_id
-                HAVING COUNT(DISTINCT t_f.id) = :filter_tags_count
+                HAVING COUNT(DISTINCT it_f.id) = :filter_tags_count
             )"""
             params["filter_tags"] = list(tags)
             params["filter_tags_count"] = len(tags)
@@ -737,12 +753,8 @@ class ImageRepository(BaseRepository[Image]):
                 filter_sql += " AND i.is_public = true"
 
         query = text(f"""
-            WITH tag_match AS (
-                SELECT DISTINCT it.image_id
-                FROM image_tags it
-                JOIN tags t ON it.tag_id = t.id
-                WHERE t.name = :query_text
-            ), scored_images AS (
+            SELECT id, description, original_url, vector_score, tag_score
+            FROM (
             SELECT 
                 i.id, 
                 i.description, 
@@ -753,16 +765,19 @@ class ImageRepository(BaseRepository[Image]):
                     THEN 1 - (i.embedding <=> :vector) ELSE 0.0 END) as vector_score,
                 (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) as tag_score
             FROM images i
-            LEFT JOIN tag_match tm ON i.id = tm.image_id
+            LEFT JOIN (
+                SELECT DISTINCT image_id FROM searchable_image_tags WHERE name = :query_text
+            ) tm ON i.id = tm.image_id
             WHERE i.embedding IS NOT NULL
               {filter_sql}
-            )
-            SELECT id, description, original_url, vector_score, tag_score
-            FROM scored_images
+            ) scored_images
             WHERE vector_score > :threshold OR tag_score > 0
             ORDER BY (vector_score * :vector_weight + tag_score * :tag_weight) DESC, id DESC
             LIMIT :limit
-        """)
+        """).columns(
+            Image.id, Image.description, Image.original_url,
+            column("vector_score", Float), column("tag_score", Float),
+        ).add_cte(self.searchable_image_tags())
         if tags:
             # IN 子句列表参数需要 expanding bindparam
             query = query.bindparams(bindparam("filter_tags", expanding=True))
