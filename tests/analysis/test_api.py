@@ -17,6 +17,7 @@ from imgtag.main import unhandled_exception_handler
 from imgtag.models.task import Task
 from imgtag.schemas.image import ImageCreateByUrl, TagWithSource
 from imgtag.schemas.task import Task as TaskResponse
+from imgtag.services.task_service import task_service
 
 
 async def test_queue_api_preserves_custom_field_and_checks_permission_before_enqueue(monkeypatch):
@@ -148,10 +149,52 @@ async def test_external_upload_analysis_decision_and_instruction_forwarding(
     if expected:
         external.task_queue.add_tasks.assert_awaited_once_with(
             [18], callback_url='https://example.com/callback', analysis_instructions=instructions or '',
+            callback_headers={},
         )
         external.embedding_service.save_embedding_for_image.assert_not_awaited()
     else:
         external.task_queue.add_tasks.assert_not_awaited()
+
+
+@pytest.mark.parametrize('headers', [
+    {}, {'x-api-key': 'callback-test-key'}, {'Authorization': 'Bearer callback-test-token'},
+    {'x-api-key': 'callback-test-key', 'Authorization': 'Bearer callback-test-token'},
+])
+async def test_external_upload_forwards_callback_authentication(upload_dependencies, headers):
+    app = FastAPI()
+    app.include_router(external.router, prefix='/external')
+    app.dependency_overrides[external.require_api_key] = lambda: {'id': 1, 'role': 'admin'}
+    app.dependency_overrides[external.get_async_session] = lambda: upload_dependencies
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/external/images', json={
+            'image_url': 'https://example.com/a.png',
+            'callback_url': 'https://example.com/callback', 'callback_headers': headers,
+        }, headers={'X-API-Key': 'imgtag-test-key', 'Authorization': 'Bearer imgtag-test-token'})
+    await asyncio.sleep(0)
+    assert response.status_code == 200, response.text
+    external.task_queue.add_tasks.assert_awaited_once_with(
+        [18], callback_url='https://example.com/callback',
+        callback_headers=headers, analysis_instructions='',
+    )
+    assert 'callback_headers' not in response.json()
+
+
+@pytest.mark.parametrize('headers', [
+    {'Host': 'example.com'}, {'Authorization': 'Bearer test\r\nInjected: value'},
+    {'x-api-key': ''}, {'x-api-key': 123}, {'Authorization': '中文'}, None,
+])
+async def test_external_callback_headers_reject_invalid_values_before_upload(upload_dependencies, headers):
+    app = FastAPI()
+    app.include_router(external.router, prefix='/external')
+    app.dependency_overrides[external.require_api_key] = lambda: {'id': 1, 'role': 'admin'}
+    app.dependency_overrides[external.get_async_session] = lambda: upload_dependencies
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/external/images', json={
+            'image_url': 'https://example.com/a.png',
+            'callback_url': 'https://example.com/callback', 'callback_headers': headers,
+        })
+    assert response.status_code == 422
+    external.upload_service.save_remote_image.assert_not_awaited()
 
 
 async def test_external_custom_instructions_require_ai_permission_before_upload(upload_dependencies):
@@ -263,6 +306,26 @@ def repository(monkeypatch):
     monkeypatch.setattr("imgtag.services.task_service.task_repository.get_visible_by_id", AsyncMock(return_value=None))
     monkeypatch.setattr("imgtag.services.task_service.task_repository.get_tasks", listing)
     return detail, listing
+
+
+@pytest.mark.parametrize('role', ['admin', 'user'])
+async def test_task_responses_never_expose_callback_credentials(repository, role):
+    detail, listing = repository
+    now = datetime.now(timezone.utc)
+    task = Task(
+        id='callback-task', type='analyze_image', status='pending',
+        payload={'image_id': 18, 'callback_headers_encrypted': 'encrypted-test-credentials'},
+        created_at=now, updated_at=now,
+    )
+    detail.return_value = task
+    listing.return_value = ([task], 1)
+    user = {'id': 1, 'role': role}
+    response = task_service.task_response(task, user)
+    assert response['payload'] == {'image_id': 18}
+    assert task.payload['callback_headers_encrypted'] == 'encrypted-test-credentials'
+    if role == 'admin':
+        assert (await task_service.get_task(task.id, user=user))['payload'] == {'image_id': 18}
+        assert (await task_service.get_tasks(user=user))['tasks'][0]['payload'] == {'image_id': 18}
 
 
 @pytest.mark.parametrize("task_type", ["analyze_image", "extract_subject", "rebuild_vector"])
