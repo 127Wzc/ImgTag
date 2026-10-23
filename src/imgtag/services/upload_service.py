@@ -18,11 +18,10 @@ import httpx
 import os
 
 from imgtag.core.config import settings
-from imgtag.core.logging_config import get_logger, get_perf_logger
+from imgtag.core.logging_config import get_logger
 from imgtag.core.storage_constants import get_extension_from_mime
 
 logger = get_logger(__name__)
-perf_logger = get_perf_logger()
 
 
 class UploadService:
@@ -207,7 +206,7 @@ class UploadService:
             Tuple[str, str, str, Optional[int], Optional[int]]: 
                 (保存的文件路径, 访问 URL, 真实文件类型, 宽度, 高度)
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
         logger.info(f"保存上传文件: {original_filename}, 大小: {len(file_content)} 字节")
         
         try:
@@ -278,8 +277,8 @@ class UploadService:
             # 生成访问 URL
             access_url = f"/uploads/{new_filename}"
             
-            process_time = time.time() - start_time
-            perf_logger.info(f"文件保存耗时: {process_time:.4f}秒")
+            process_time = time.perf_counter() - start_time
+            logger.debug("文件保存耗时: elapsed_ms=%.2f", process_time * 1000)
             logger.info(f"文件保存成功: {file_path}, 格式: {real_format}, 分辨率: {width}x{height}")
             
             return str(file_path), access_url, real_format, width, height
@@ -297,8 +296,8 @@ class UploadService:
         Returns:
             Tuple[bytes, str]: (图片内容, MIME 类型)
         """
-        start_time = time.time()
-        logger.info(f"获取远程图片: {url}")
+        start_time = time.perf_counter()
+        logger.debug("获取远程图片")
         
         try:
             async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
@@ -315,8 +314,8 @@ class UploadService:
                 if not mime_type.startswith("image/"):
                     raise ValueError(f"URL 返回的不是图片: {mime_type}")
                 
-                process_time = time.time() - start_time
-                perf_logger.info(f"远程图片获取耗时: {process_time:.4f}秒, 大小: {len(content)} 字节")
+                process_time = time.perf_counter() - start_time
+                logger.debug("远程图片获取完成: elapsed_ms=%.2f bytes=%s", process_time * 1000, len(content))
                 
                 return content, mime_type
                 
@@ -336,8 +335,8 @@ class UploadService:
         Returns:
             Tuple[str, str, bytes]: (保存的文件路径, 访问 URL, 图片内容)
         """
-        start_time = time.time()
-        logger.info(f"获取并保存远程图片: {url}")
+        start_time = time.perf_counter()
+        logger.debug("获取并保存远程图片")
         
         try:
             # 获取远程图片
@@ -361,8 +360,8 @@ class UploadService:
             # 生成访问 URL
             access_url = f"/uploads/{new_filename}"
             
-            process_time = time.time() - start_time
-            perf_logger.info(f"远程图片保存总耗时: {process_time:.4f}秒")
+            process_time = time.perf_counter() - start_time
+            logger.debug("远程图片保存总耗时: elapsed_ms=%.2f", process_time * 1000)
             logger.info(f"远程图片保存成功: {file_path}")
             
             return str(file_path), access_url, content

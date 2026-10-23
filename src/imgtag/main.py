@@ -22,7 +22,7 @@ from imgtag.core.config import settings
 from imgtag.core.config_cache import config_cache
 from imgtag.core.exception_translate import translate_exception
 from imgtag.core.exceptions import APIError
-from imgtag.core.logging_config import get_logger
+from imgtag.core.logging_config import configure_logging, get_logger
 from imgtag.core.storage_constants import get_mime_type, StorageProvider
 from imgtag.db.database import close_db, async_session_maker, engine
 from imgtag.db.repositories import task_repository, config_repository, storage_endpoint_repository
@@ -86,6 +86,7 @@ def run_migrations_sync():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    configure_logging()
     logger.info("应用启动，初始化资源")
     
     # 自动运行数据库迁移（在线程池中同步执行）

@@ -1,5 +1,7 @@
 """显式启动在线索引维护；开关不执行 DDL，状态以数据库目录为准。"""
 
+from time import perf_counter
+
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
@@ -64,13 +66,20 @@ class VectorIndexService:
             raise
 
     async def run(self, conn, table, ready: bool, force: bool) -> None:
+        started = perf_counter()
+        logger.info("开始维护 HNSW 索引: force=%s ready=%s", force, ready)
         try:
             await vector_index_repository.build(conn, table, force=force, ready=ready)
             await vector_index_repository.save_state(conn)
-            logger.info("HNSW 索引维护完成")
-        except SQLAlchemyError:
-            logger.exception("HNSW 索引维护失败")
-            await vector_index_repository.save_state(conn, error="索引维护失败，请查看服务日志后重试；已有可用索引继续复用，否则使用精确搜索")
+            logger.info("HNSW 索引维护完成: elapsed_ms=%.2f", (perf_counter() - started) * 1000)
+        except SQLAlchemyError as exc:
+            if getattr(getattr(exc, "orig", None), "sqlstate", None) == "55P03":
+                error = "索引维护等待数据库锁超过 30 秒，请在相关长事务结束后重试；已有可用索引继续复用，否则使用精确搜索"
+                logger.warning("HNSW 索引维护等待锁超时: elapsed_ms=%.2f", (perf_counter() - started) * 1000)
+            else:
+                error = "索引维护失败，请查看服务日志后重试；已有可用索引继续复用，否则使用精确搜索"
+                logger.exception("HNSW 索引维护失败: elapsed_ms=%.2f", (perf_counter() - started) * 1000)
+            await vector_index_repository.save_state(conn, error=error)
         finally:
             try:
                 await conn.exec_driver_sql("RESET lock_timeout")

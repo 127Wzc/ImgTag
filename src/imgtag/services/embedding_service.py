@@ -80,7 +80,7 @@ def _download_file(url: str, dest_path: Path, timeout: int = 300, stream: bool =
                                 # 每 10MB 打印一次进度
                                 if total_size > 0 and downloaded % (10 * 1024 * 1024) < 8192:
                                     percent = downloaded * 100 / total_size
-                                    logger.info(f"  下载进度: {percent:.1f}%")
+                                    logger.debug(f"下载进度: {percent:.1f}%")
             else:
                 # 直接下载小文件
                 response = client.get(url)
@@ -153,10 +153,10 @@ class ONNXEmbeddingModel:
         local_onnx_path_alt = local_model_dir / "model.onnx"  # 备用位置
         
         logger.info(f"检查本地模型目录: {local_model_dir}")
-        logger.info(f"  - 目录存在: {local_model_dir.exists()}")
-        logger.info(f"  - tokenizer.json 存在: {(local_model_dir / 'tokenizer.json').exists()}")
-        logger.info(f"  - onnx/model.onnx 存在: {local_onnx_path.exists()}")
-        logger.info(f"  - model.onnx 存在: {local_onnx_path_alt.exists()}")
+        logger.debug(f"目录存在: {local_model_dir.exists()}")
+        logger.debug(f"tokenizer.json 存在: {(local_model_dir / 'tokenizer.json').exists()}")
+        logger.debug(f"onnx/model.onnx 存在: {local_onnx_path.exists()}")
+        logger.debug(f"model.onnx 存在: {local_onnx_path_alt.exists()}")
         
         # 判断是否可以完全离线加载
         has_local_tokenizer = local_model_dir.exists() and (local_model_dir / "tokenizer.json").exists()
@@ -164,13 +164,13 @@ class ONNXEmbeddingModel:
         can_load_offline = has_local_tokenizer and has_local_onnx
         
         if can_load_offline:
-            logger.info("✓ 发现完整的本地模型，将完全离线加载（无需网络）")
+            logger.info("发现完整的本地模型，将完全离线加载（无需网络）")
         else:
-            logger.info("✗ 本地模型不完整，需要从网络下载")
+            logger.info("本地模型不完整，需要从网络下载")
             if not has_local_tokenizer:
-                logger.info("  - 缺少 tokenizer 文件")
+                logger.debug("缺少 tokenizer 文件")
             if not has_local_onnx:
-                logger.info("  - 缺少 ONNX 模型文件")
+                logger.debug("缺少 ONNX 模型文件")
         
         # ===== 加载 Tokenizer =====
         tokenizer_loaded = False
@@ -183,7 +183,7 @@ class ONNXEmbeddingModel:
                     trust_remote_code=False
                 )
                 tokenizer_loaded = True
-                logger.info("✓ 本地 tokenizer 加载成功")
+                logger.info("本地 tokenizer 加载成功")
             except Exception as e:
                 logger.warning(f"本地 tokenizer 加载失败: {e}")
         
@@ -197,18 +197,18 @@ class ONNXEmbeddingModel:
             for filename, required in TOKENIZER_FILES:
                 dest_path = local_model_dir / filename
                 if dest_path.exists():
-                    logger.info(f"  ✓ 已存在: {filename}")
+                    logger.debug(f"已存在: {filename}")
                     continue
                 
                 url = f"{self.hf_endpoint}/{self.onnx_repo}/resolve/main/{filename}"
-                logger.info(f"  下载: {filename}")
+                logger.debug(f"下载: {filename}")
                 
                 if _download_file(url, dest_path, timeout=60):
-                    logger.info(f"  ✓ {filename} 下载成功")
+                    logger.debug("模型文件下载完成: file=%s", filename)
                 elif required:
                     download_ok = False
                 else:
-                    logger.info(f"  - {filename} 不存在（可选文件）")
+                    logger.debug(f"{filename} 不存在（可选文件）")
             
             if not download_ok:
                 raise RuntimeError("Tokenizer 下载失败，请检查网络或手动下载")
@@ -219,7 +219,7 @@ class ONNXEmbeddingModel:
                 local_files_only=True,
                 trust_remote_code=False
             )
-            logger.info("✓ 网络 tokenizer 下载并加载成功")
+            logger.info("网络 tokenizer 下载并加载成功")
         
         # ===== 加载 ONNX 模型 =====
         onnx_path = None
@@ -248,7 +248,7 @@ class ONNXEmbeddingModel:
                 logger.info(f"尝试下载: {url}")
                 if _download_file(url, target_onnx_path, timeout=600, stream=True):
                     onnx_path = str(target_onnx_path)
-                    logger.info(f"✓ ONNX 模型下载成功: {onnx_path}")
+                    logger.info(f"ONNX 模型下载成功: {onnx_path}")
                     download_success = True
                     break
             
@@ -277,7 +277,7 @@ class ONNXEmbeddingModel:
             providers=['CPUExecutionProvider']
         )
         
-        logger.info(f"✓ ONNX 模型加载成功，维度: {self.dimensions}")
+        logger.info(f"ONNX 模型加载成功，维度: {self.dimensions}")
     
     def encode(self, text: str, normalize_embeddings: bool = True):
         """编码文本为向量"""

@@ -29,10 +29,11 @@ def search_stage(stage: str, **fields):
         fields["error_type"] = type(exc).__name__
         raise
     finally:
+        details = " ".join(f"{key}={value}" for key, value in fields.items())
         logger.debug(
-            "搜索执行 trace=%s kind=%s stage=%s status=%s elapsed_ms=%.2f %s",
+            "搜索执行 trace=%s kind=%s stage=%s status=%s elapsed_ms=%.2f%s",
             context[0], context[1], stage, status, (perf_counter() - started) * 1000,
-            " ".join(f"{key}={value}" for key, value in fields.items()),
+            f" {details}" if details else "",
         )
 
 

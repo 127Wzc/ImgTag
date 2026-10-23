@@ -288,7 +288,7 @@ async def _search_images_unchecked(
         except Exception as e:
             if match == "semantic":
                 raise MCPUserError("语义搜索暂不可用，请稍后重试") from e
-            logger.warning("[MCP] 语义搜索失败，自动降级为模糊匹配: %s", type(e).__name__)
+            logger.warning("语义搜索失败，自动降级为模糊匹配: %s", type(e).__name__)
 
     # 显式 fuzzy 或 auto 降级
     return await _browse_images(
@@ -909,7 +909,7 @@ def _purge_expired_connections() -> None:
     expired = [sid for sid, connection in _connections.items() if connection.is_expired()]
     for sid in expired:
         _connections.pop(sid, None)
-        logger.info("[MCP] 会话过期清理: session=%s", sid)
+        logger.info("会话过期清理: session=%s", sid)
 
 
 def _connection_user_key(api_user: dict | None) -> str | None:
@@ -1125,12 +1125,12 @@ async def process_jsonrpc(
                     result=_tool_success_result(result),
                 )
             except Exception as e:
-                logger.error(f"[MCP] Tool 执行失败: {tool_name}", exc_info=True)
+                logger.error(f"Tool 执行失败: {tool_name}", exc_info=True)
                 if session is not None:
                     try:
                         await session.rollback()
                     except Exception:
-                        logger.error("[MCP] 工具失败后的事务回滚失败", exc_info=True)
+                        logger.error("工具失败后的事务回滚失败", exc_info=True)
                 return JsonRpcResponse(
                     id=request.id,
                     result=_tool_error_result(e),
@@ -1150,7 +1150,7 @@ async def process_jsonrpc(
             )
 
     except Exception:
-        logger.error("[MCP] 消息处理失败", exc_info=True)
+        logger.error("消息处理失败", exc_info=True)
         return JsonRpcResponse(
             id=request.id,
             error={
@@ -1238,7 +1238,7 @@ async def _handle_streamable_post(
             },
         )
 
-    logger.debug(f"[MCP] Streamable 消息: method={rpc_request.method}, scope={scope}")
+    logger.debug(f"Streamable 消息: method={rpc_request.method}, scope={scope}")
 
     response = await process_jsonrpc(
         rpc_request, scope=scope, api_user=api_user, session=session,
@@ -1308,7 +1308,7 @@ def _create_sse_response(
                 if await request.is_disconnected():
                     break
                 if connection.is_expired():
-                    logger.info("[MCP] SSE 会话超时: session=%s", connection.session_id)
+                    logger.info("SSE 会话超时: session=%s", connection.session_id)
                     break
 
                 try:
@@ -1326,7 +1326,7 @@ def _create_sse_response(
         finally:
             # 清理连接
             _connections.pop(connection.session_id, None)
-            logger.info(f"[MCP] 连接关闭: session={connection.session_id}")
+            logger.info(f"连接关闭: session={connection.session_id}")
 
     return StreamingResponse(
         event_stream(),
@@ -1399,7 +1399,7 @@ async def _dispatch_message(
         )
         return {"status": "ok"}
 
-    logger.debug(f"[MCP] 收到消息: method={rpc_request.method}, session={session_id}")
+    logger.debug(f"收到消息: method={rpc_request.method}, session={session_id}")
 
     response = await handle_message(
         rpc_request, connection, session,
@@ -1428,7 +1428,7 @@ async def mcp_sse_endpoint(
     connection = MCPConnection(session_id, api_user, SCOPE_FULL)
     _connections[session_id] = connection
 
-    logger.info(f"[MCP] 新连接(full): session={session_id}, user={api_user.get('username')}")
+    logger.info(f"新连接(full): session={session_id}, user={api_user.get('username')}")
 
     return _create_sse_response(request, connection, "/api/v1/mcp/message")
 
@@ -1465,7 +1465,7 @@ async def mcp_public_sse_endpoint(
     _connections[session_id] = connection
 
     username = api_user.get("username") if api_user else "anonymous"
-    logger.info(f"[MCP] 新连接(public): session={session_id}, user={username}")
+    logger.info(f"新连接(public): session={session_id}, user={username}")
 
     return _create_sse_response(request, connection, "/api/v1/mcp/public/message")
 

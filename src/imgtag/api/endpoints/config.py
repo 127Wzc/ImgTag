@@ -53,7 +53,7 @@ async def get_all_config(
     session: AsyncSession = Depends(get_async_session),
 ):
     """获取所有配置（密钥会被遮挡，需管理员权限）"""
-    logger.info("获取所有配置")
+    logger.debug("获取所有配置")
     try:
         return await config_repository.get_all_configs(session, include_secrets=False)
     except Exception as e:
@@ -75,7 +75,7 @@ async def get_config(
     session: AsyncSession = Depends(get_async_session),
 ):
     """获取单个配置项（需管理员权限）"""
-    logger.info(f"获取配置: {key}")
+    logger.debug(f"获取配置: {key}")
     value = await config_repository.get_value(session, key)
     if value is None:
         raise HTTPException(status_code=404, detail=f"配置项 {key} 不存在")

@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from sqlalchemy.dialects import postgresql, sqlite
 
 import pytest
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from imgtag.api.endpoints import vectors
 from imgtag.api.endpoints.auth import get_current_user
@@ -97,6 +97,8 @@ async def test_index_ddl_is_online_schema_qualified_and_force_preserves_old_inde
     sql = [str(call.args[0]) for call in conn.execute.await_args_list]
     assert any(operation in item for item in sql)
     assert not any('public.' in item for item in sql)
+    assert "SET lock_timeout = '30s'" in sql
+    assert "SET statement_timeout = '0'" in sql
     if ready:
         assert not any('DROP INDEX' in item for item in sql)
 
@@ -113,6 +115,52 @@ async def test_index_operations_require_admin(monkeypatch, method, path):
         app.dependency_overrides[get_current_user] = lambda: {'id': 1, 'role': 'user'}
         assert (await client.request(method, path)).status_code == 403
     start.assert_not_awaited()
+
+
+async def test_index_request_releases_auth_transaction_before_background_build(monkeypatch):
+    app = FastAPI()
+    app.include_router(vectors.router, prefix='/vectors')
+    session = SimpleNamespace(close=AsyncMock())
+    app.dependency_overrides[get_async_session] = lambda: session
+    app.dependency_overrides[get_current_user] = lambda: {'id': 1, 'role': 'admin'}
+    job = (object(), {'table_oid': 123}, False, False)
+
+    async def prepare(**kwargs):
+        session.close.assert_awaited_once()
+        return job
+
+    async def run(*args):
+        session.close.assert_awaited_once()
+        assert args == job
+
+    worker = AsyncMock(side_effect=run)
+    monkeypatch.setattr(vectors.vector_index_service, 'prepare', prepare)
+    monkeypatch.setattr(vectors.vector_index_service, 'run', worker)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/vectors/index/build')
+    assert response.status_code == 202 and response.json()['started'] is True
+    worker.assert_awaited_once()
+
+
+async def test_index_lock_timeout_reports_retry_reason_and_cleans_up(monkeypatch, caplog):
+    class LockTimeout(Exception):
+        sqlstate = '55P03'
+
+    conn = SimpleNamespace(exec_driver_sql=AsyncMock(), invalidate=AsyncMock(), close=AsyncMock())
+    failure = DBAPIError('DDL', {}, LockTimeout('原始数据库错误'), False)
+    monkeypatch.setattr(vector_index_repository, 'build', AsyncMock(side_effect=failure))
+    state, release = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(vector_index_repository, 'save_state', state)
+    monkeypatch.setattr(vector_index_repository, 'release', release)
+    await VectorIndexService().run(conn, {'table_oid': 123}, False, False)
+    assert '30 秒' in state.await_args.kwargs['error']
+    assert '长事务' in state.await_args.kwargs['error']
+    assert '精确搜索' in state.await_args.kwargs['error']
+    assert '等待锁超时' in caplog.text and '原始数据库错误' not in caplog.text
+    assert any(record.levelname == 'WARNING' for record in caplog.records)
+    release.assert_awaited_once_with(conn, 123)
+    conn.invalidate.assert_awaited_once()
+    conn.close.assert_awaited_once()
 
 
 @pytest.fixture

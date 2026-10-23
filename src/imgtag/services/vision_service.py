@@ -13,7 +13,6 @@ import datetime
 import json
 import re
 import time
-import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -342,7 +341,7 @@ class VisionService:
         Raises:
             ValueError: If download fails or API is not configured.
         """
-        logger.info(f"分析远程图像: {image_url[:50]}...")
+        logger.debug("分析远程图像")
 
         try:
             # 下载远程图片
@@ -523,18 +522,14 @@ class VisionService:
                 
                 response_data = response.json()
             
-            # DEBUG: 打印响应
-            logger.debug(f"视觉模型 API 响应: {json.dumps(response_data, ensure_ascii=False, default=str)[:500]}...")
-            
             # 提取内容（支持 OpenAI 和 Gemini 格式）
             content = self._extract_content_from_response(response_data)
-            logger.debug(f"  - Extracted content length: {len(content)}")
+            logger.debug("视觉响应文本已提取: text_chars=%s", len(content))
                 
             result = self._parse_response(content)
             if not result.description.strip() or not result.tags:
                 raise ValueError("视觉模型返回的描述或标签为空，保留原分析结果")
             result.request_metadata = metadata
-            logger.info("视觉分析成功: context=%s, elapsed=%.2fs", request_context, time.monotonic() - started)
             return result
 
         except httpx.ConnectError as e:
@@ -547,10 +542,10 @@ class VisionService:
             logger.error(f"视觉模型 API 请求超时: {str(e)}")
             raise ValueError("API 请求超时")
         except Exception as e:
-            logger.error(f"视觉模型分析失败: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
+            logger.exception("视觉模型分析失败: error_type=%s", type(e).__name__)
             raise
         finally:
-            logger.info("视觉调用结束: context=%s, elapsed=%.2fs", request_context, time.monotonic() - started)
+            logger.info("视觉调用结束: context=%s elapsed_ms=%.2f", request_context, (time.monotonic() - started) * 1000)
 
     def _convert_google_to_openai(self, google_response: dict) -> dict:
         """将 Google Gemini 原生响应转换为 OpenAI 标准 Chat Completion 响应格式"""
@@ -641,9 +636,6 @@ class VisionService:
             response_dict = response
         
         if response_dict:
-            # 打印原始响应用于调试
-            logger.debug(f"原始响应字典: {json.dumps(response_dict, ensure_ascii=False, default=str)[:500]}...")
-            
             # 检查是否是 Google Gemini 格式（包含 response.candidates）
             if "response" in response_dict and isinstance(response_dict["response"], dict):
                 inner = response_dict["response"]
@@ -681,15 +673,14 @@ class VisionService:
 
     def _parse_response(self, content: str) -> ImageAnalysisResult:
         """解析模型响应"""
-        # DEBUG: 打印原始响应内容
-        logger.debug(f"视觉模型原始响应内容:\n{content}")
+        logger.debug("解析视觉响应: text_chars=%s", len(content))
         
         try:
             # 尝试提取 JSON
             json_match = re.search(r'\{[\s\S]*\}', content)
             if json_match:
                 json_str = json_match.group()
-                logger.debug(f"提取到的 JSON 字符串:\n{json_str}")
+                logger.debug("提取视觉 JSON: text_chars=%s", len(json_str))
                 data = json.loads(json_str)
                 logger.debug(f"JSON 解析成功: tags={len(data.get('tags', []))}个, description长度={len(data.get('description', ''))}")
                 return ImageAnalysisResult(
@@ -705,7 +696,7 @@ class VisionService:
             logger.debug(f"JSON 解析失败: {str(e)}")
         
         # 降级处理
-        logger.warning(f"无法解析 JSON 响应，使用降级处理。原始内容: {content[:200]}...")
+        logger.warning("无法解析视觉 JSON，使用降级处理: text_chars=%s", len(content))
         return ImageAnalysisResult(
             tags=[],
             description=content.strip(),

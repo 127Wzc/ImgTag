@@ -53,7 +53,7 @@ async def list_endpoints(
     
     Requires admin access.
     """
-    logger.info(f"[Admin:{current_user['username']}] Listing storage endpoints")
+    logger.debug("查询存储端点: user_id=%s enabled_only=%s", current_user["id"], enabled_only)
     
     if enabled_only:
         endpoints = await storage_endpoint_repository.get_enabled(session)
@@ -130,7 +130,7 @@ async def create_endpoint(
     
     Requires admin access.
     """
-    logger.warning(f"[Admin:{current_user['username']}] Creating storage endpoint: {data.name}")
+    logger.info("创建存储端点: user_id=%s name=%s", current_user["id"], data.name)
     
     # Check if name exists
     existing = await storage_endpoint_repository.get_by_name(session, data.name)
@@ -254,7 +254,7 @@ async def update_endpoint(
     
     Requires admin access.
     """
-    logger.warning(f"[Admin:{current_user['username']}] Updating storage endpoint: {endpoint_id}")
+    logger.info("更新存储端点: user_id=%s endpoint_id=%s", current_user["id"], endpoint_id)
     
     endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
     if not endpoint:
@@ -357,7 +357,7 @@ async def delete_endpoint(
     Use /endpoints/{id}/locations or /endpoints/{id}/files first to clean up data.
     Requires admin access.
     """
-    logger.warning(f"[Admin:{current_user['username']}] Deleting storage endpoint: {endpoint_id}")
+    logger.info("删除存储端点: user_id=%s endpoint_id=%s", current_user["id"], endpoint_id)
     
     # Protect default local endpoint
     if endpoint_id == 1:
@@ -487,9 +487,9 @@ async def soft_delete_endpoint_locations(
             f"该端点有进行中的任务 ({active_task.type})，请等待完成后再操作"
         )
     
-    logger.warning(
-        f"[Admin:{current_user['username']}] Starting unlink task for endpoint: "
-        f"{endpoint.name}, delete_files={data.delete_files}"
+    logger.info(
+        "启动存储解绑任务: user_id=%s endpoint_id=%s delete_files=%s",
+        current_user["id"], endpoint_id, data.delete_files,
     )
     
     # Start background task via service
@@ -620,8 +620,9 @@ async def hard_delete_endpoint_files(
     if endpoint.provider == "local":
         raise HTTPException(400, "硬删除仅支持 S3 兼容端点，本地端点请手动管理文件")
     
-    logger.warning(
-        f"[Admin:{current_user['username']}] Starting HARD DELETE task for endpoint: {endpoint.name}"
+    logger.info(
+        "启动存储硬删除任务: user_id=%s endpoint_id=%s",
+        current_user["id"], endpoint_id,
     )
     
     # Start background deletion task
@@ -731,7 +732,7 @@ async def set_default_endpoint(
     await storage_endpoint_repository.set_default_upload(session, endpoint_id)
     await session.commit()
     
-    logger.info(f"[Admin:{current_user['username']}] Set default upload endpoint: {endpoint.name}")
+    logger.info("设置默认上传端点: user_id=%s endpoint_id=%s", current_user["id"], endpoint_id)
     
     return {"message": f"Default upload endpoint set to: {endpoint.name}"}
 
@@ -750,8 +751,8 @@ async def start_sync(
     Requires admin access.
     """
     logger.info(
-        f"[Admin:{current_user['username']}] Starting sync: "
-        f"{data.source_endpoint_id} -> {data.target_endpoint_id}"
+        "启动存储同步: user_id=%s source_endpoint_id=%s target_endpoint_id=%s",
+        current_user["id"], data.source_endpoint_id, data.target_endpoint_id,
     )
     
     # Validate endpoints
@@ -820,6 +821,6 @@ async def cancel_sync(
     await task_repository.update_status(session, task_id, "cancelled")
     await session.commit()
     
-    logger.info(f"[Admin:{current_user['username']}] Cancelled sync task: {task_id}")
+    logger.info("取消存储同步任务: user_id=%s task_id=%s", current_user["id"], task_id)
     
     return {"message": "Task cancelled"}

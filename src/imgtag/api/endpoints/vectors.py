@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
 from imgtag.core.config_cache import config_cache
-from imgtag.core.logging_config import get_logger, get_perf_logger
+from imgtag.core.logging_config import get_logger
 from imgtag.db import get_async_session
 from imgtag.db.repositories import image_repository
 from imgtag.services import embedding_service
@@ -27,7 +27,6 @@ from imgtag.services.vector_index_service import vector_index_service
 from imgtag.services.task_queue import task_queue
 
 logger = get_logger(__name__)
-perf_logger = get_perf_logger()
 
 router = APIRouter()
 
@@ -45,7 +44,10 @@ async def get_index_status(
 @router.post("/index/build", status_code=202)
 async def build_vector_index(
     background_tasks: BackgroundTasks, force: bool = Query(False), admin: dict = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
 ):
+    # 后台任务先于请求依赖清理结束；不要在整个构建期间保留认证读事务和池连接。
+    await session.close()
     try:
         job = await vector_index_service.prepare(force=force)
     except ValueError as exc:

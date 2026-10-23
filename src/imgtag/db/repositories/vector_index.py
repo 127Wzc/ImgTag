@@ -109,7 +109,8 @@ class VectorIndexRepository:
         # 标识符来自系统目录并通过方言引用，不拼入用户输入。
         quoted_index = conn.dialect.identifier_preparer.quote(INDEX_NAME)
         qualified_index = conn.dialect.identifier_preparer.quote_schema(table["schema_name"]) + "." + quoted_index
-        await conn.execute(text("SET lock_timeout = '5s'"))
+        # 在线 DDL 仍需等待旧事务；短暂写入不应使维护立即失败，但等待必须有上限。
+        await conn.execute(text("SET lock_timeout = '30s'"))
         await conn.execute(text("SET statement_timeout = '0'"))
         # REINDEX CONCURRENTLY 中断可能留下无效的 _ccnew/_ccold 索引，仅清理本工具的遗留项。
         remnants = (await conn.execute(text("""

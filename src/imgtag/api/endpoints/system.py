@@ -46,7 +46,7 @@ async def get_system_status(
     Returns:
         System status.
     """
-    logger.info("获取系统状态")
+    logger.debug("获取系统状态")
 
     try:
         image_count = await image_repository.count_images(session)
@@ -98,7 +98,7 @@ async def get_dashboard_stats(
     Returns:
         Dashboard stats.
     """
-    logger.info("获取仪表盘统计数据")
+    logger.debug("获取仪表盘统计数据")
 
     try:
         # Image stats - 3 queries
@@ -373,7 +373,7 @@ async def get_resolution_status(
     Returns:
         Resolution status.
     """
-    logger.info("获取分辨率补全状态")
+    logger.debug("获取分辨率补全状态")
 
     try:
         total = await image_repository.count_images(session)

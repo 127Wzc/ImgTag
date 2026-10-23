@@ -38,7 +38,7 @@ from imgtag.api.search_guards import get_search_user, guard_smart_search
 from imgtag.api.permission_guards import ensure_create_tags_if_missing, ensure_permission
 from imgtag.core.permissions import Permission
 from imgtag.core.category_cache import get_category_code_cached
-from imgtag.core.logging_config import get_logger, get_perf_logger
+from imgtag.core.logging_config import get_logger
 from imgtag.core.search_logging import traced_search
 from imgtag.core.exceptions import EmbeddingAPIError
 from imgtag.core.exception_translate import translate_exception
@@ -87,7 +87,6 @@ from imgtag.services.rebuild_vector_service import enqueue_rebuild_vector
 from imgtag.utils.pagination import PageParams
 
 logger = get_logger(__name__)
-perf_logger = get_perf_logger()
 
 
 def get_owner_filter(user: dict) -> Optional[int]:
@@ -237,8 +236,8 @@ async def create_image_manual(
     Returns:
         Created image ID and process time.
     """
-    start_time = time.time()
-    logger.info(f"创建图像: {image.image_url}")
+    start_time = time.perf_counter()
+    logger.info("创建远程图像")
 
     try:
         await ensure_create_tags_if_missing(session, user, image.tags)
@@ -268,8 +267,8 @@ async def create_image_manual(
                 added_by=user.get("id"),
             )
 
-        total_time = time.time() - start_time
-        perf_logger.info(f"图像创建总耗时: {total_time:.4f}秒")
+        total_time = time.perf_counter() - start_time
+        logger.debug("图像创建总耗时: elapsed_ms=%.2f", total_time * 1000)
 
         return {
             "id": new_image.id,
@@ -304,10 +303,10 @@ async def analyze_and_create_from_url(
     Returns:
         Created image response.
     """
-    start_time = time.time()
+    start_time = time.perf_counter()
     logger.info(
-        f"添加远程图像: {request.image_url}, endpoint_id={request.endpoint_id}, "
-        f"category_id={request.category_id}, is_public={request.is_public}"
+        "添加远程图像: endpoint_id=%s category_id=%s is_public=%s",
+        request.endpoint_id, request.category_id, request.is_public,
     )
 
     try:
@@ -417,8 +416,8 @@ async def analyze_and_create_from_url(
         # Trigger backup to backup endpoints
         asyncio.create_task(trigger_backup_for_image(new_image.id, target_endpoint.id))
 
-        total_time = time.time() - start_time
-        perf_logger.info(f"URL 图像上传耗时: {total_time:.4f}秒")
+        total_time = time.perf_counter() - start_time
+        logger.debug("URL 图像上传耗时: elapsed_ms=%.2f", total_time * 1000)
 
         return UploadAnalyzeResponse(
             id=new_image.id,
@@ -474,32 +473,32 @@ async def _post_upload_process(
         async with async_session_maker() as session:
             # 1. 设置用户标签
             if tags:
-                t1 = time.time()
+                t1 = time.perf_counter()
                 await image_tag_repository.set_image_tags(
                     session, image_id, tags, source="user", added_by=user_id
                 )
-                perf_logger.debug(f"[Async] 设置用户标签耗时: {time.time() - t1:.4f}秒")
+                logger.debug("后台设置用户标签耗时: elapsed_ms=%.2f", (time.perf_counter() - t1) * 1000)
             
             # 2. 设置分类标签
             if category_id:
-                t2 = time.time()
+                t2 = time.perf_counter()
                 await image_tag_repository.add_tag_to_image(
                     session, image_id, category_id, source="user", sort_order=0, added_by=user_id
                 )
-                perf_logger.debug(f"[Async] 设置分类标签耗时: {time.time() - t2:.4f}秒")
+                logger.debug("后台设置分类标签耗时: elapsed_ms=%.2f", (time.perf_counter() - t2) * 1000)
             
             # 3. 设置分辨率标签
             if width and height:
                 resolution_name = upload_service.get_resolution_level(width, height)
                 if resolution_name != "unknown":
-                    t3 = time.time()
+                    t3 = time.perf_counter()
                     resolution_tag = await tag_repository.get_or_create(
                         session, resolution_name, source="system", level=1
                     )
                     await image_tag_repository.add_tag_to_image(
                         session, image_id, resolution_tag.id, source="system", sort_order=1
                     )
-                    perf_logger.debug(f"[Async] 设置分辨率标签耗时: {time.time() - t3:.4f}秒")
+                    logger.debug("后台设置分辨率标签耗时: elapsed_ms=%.2f", (time.perf_counter() - t3) * 1000)
             
             # 提交标签事务
             await session.commit()
@@ -516,22 +515,22 @@ async def _post_upload_process(
             
             if need_analysis:
                 # 加入 AI 分析任务队列
-                t4 = time.time()
+                t4 = time.perf_counter()
                 await task_queue.add_tasks([image_id], analysis_instructions=analysis_instructions)
-                perf_logger.debug(f"[Async] 添加AI分析任务耗时: {time.time() - t4:.4f}秒")
+                logger.debug("后台添加AI分析任务耗时: elapsed_ms=%.2f", (time.perf_counter() - t4) * 1000)
                 if not task_queue._running:
                     asyncio.create_task(task_queue.start_processing())
             elif user_provided_full:
                 # 用户已提供完整内容，只需生成向量
-                t4 = time.time()
+                t4 = time.perf_counter()
                 await embedding_service.save_embedding_for_image(
                     image_id, description, tags
                 )
-                perf_logger.debug(f"[Async] 生成向量耗时: {time.time() - t4:.4f}秒")
+                logger.debug("后台生成向量耗时: elapsed_ms=%.2f", (time.perf_counter() - t4) * 1000)
             
-            log.info(f"[Async] 后台处理完成: image_id={image_id}")
+            log.info(f"后台处理完成: image_id={image_id}")
     except Exception as e:
-        log.error(f"[Async] 后台处理失败: image_id={image_id}, error={e}")
+        log.error(f"后台处理失败: image_id={image_id}, error={e}")
 
 
 @router.post("/upload", response_model=UploadAnalyzeResponse, status_code=201)
@@ -569,7 +568,7 @@ async def upload_and_analyze(
     """
     # storage_service and repositories imported at top level
     
-    start_time = time.time()
+    start_time = time.perf_counter()
     logger.info(
         f"上传文件: {file.filename}, auto_analyze={auto_analyze}, "
         f"category_id={category_id}, is_public={is_public}, endpoint_id={endpoint_id}"
@@ -662,7 +661,7 @@ async def upload_and_analyze(
                 access_url = None  # 远程端点无本地访问 URL
 
         # Create image record (without legacy storage fields)
-        t1 = time.time()
+        t1 = time.perf_counter()
         new_image = await image_repository.create_image(
             session,
             file_hash=file_hash,
@@ -675,7 +674,7 @@ async def upload_and_analyze(
             uploaded_by=user.get("id"),
             is_public=is_public,
         )
-        perf_logger.debug(f"创建图片记录耗时: {time.time() - t1:.4f}秒")
+        logger.debug("创建图片记录耗时: elapsed_ms=%.2f", (time.perf_counter() - t1) * 1000)
 
         # Create image_location record for the storage
         # 注意：如果 target_endpoint 为 None（fallback 失败），使用本地端点
@@ -699,8 +698,8 @@ async def upload_and_analyze(
         # 立即提交核心数据（image + location）
         await session.commit()
         
-        total_time = time.time() - start_time
-        perf_logger.info(f"上传核心数据耗时: {total_time:.4f}秒")
+        total_time = time.perf_counter() - start_time
+        logger.debug("上传核心数据耗时: elapsed_ms=%.2f", total_time * 1000)
         
         # 后台异步处理标签、分辨率、AI分析（不阻塞响应）
         asyncio.create_task(
@@ -759,7 +758,7 @@ async def upload_zip(
     Returns:
         Upload results summary.
     """
-    start_time = time.time()
+    start_time = time.perf_counter()
     logger.info(f"上传 ZIP 文件: {file.filename}, category_id={category_id}, endpoint_id={endpoint_id}")
 
     if not file.filename.lower().endswith(".zip"):
@@ -859,10 +858,10 @@ async def upload_zip(
         # Commit all in one transaction
         await session.commit()
 
-        total_time = time.time() - start_time
-        perf_logger.info(
-            f"ZIP 上传处理耗时: {total_time:.4f}秒, "
-            f"成功: {len(uploaded_ids)}, 失败: {len(failed_files)}"
+        total_time = time.perf_counter() - start_time
+        logger.debug(
+            "ZIP 上传处理完成: elapsed_ms=%.2f uploaded=%s failed=%s",
+            total_time * 1000, len(uploaded_ids), len(failed_files),
         )
 
         return {
@@ -897,8 +896,8 @@ async def get_image(
     Returns:
         ImageResponse.
     """
-    start_time = time.time()
-    logger.info(f"获取图像: ID {image_id}")
+    start_time = time.perf_counter()
+    logger.debug("获取图像: image_id=%s", image_id)
 
     try:
         image = await image_repository.get_with_tags(session, image_id)
@@ -911,8 +910,8 @@ async def get_image(
         )
         subjects_map = await image_subject_repository.list_by_image_ids(session, [image_id])
 
-        process_time = time.time() - start_time
-        perf_logger.info(f"获取图像耗时: {process_time:.4f}秒")
+        process_time = time.perf_counter() - start_time
+        logger.debug("获取图像耗时: elapsed_ms=%.2f", process_time * 1000)
 
         return await _image_to_response(
             image,
@@ -945,7 +944,6 @@ async def search_images(
     Returns:
         ImageSearchResponse with results.
     """
-    start_time = time.time()
     logger.debug("高级图像搜索: page=%s size=%s keyword_chars=%s filter_tags=%s",
                  request.page, request.size, len(request.keyword or ""), len(request.tags or []))
 
@@ -994,9 +992,6 @@ async def search_images(
             page=request.page,
             size=request.size,
         )
-
-        process_time = time.time() - start_time
-        perf_logger.info(f"高级搜索耗时: {process_time:.4f}秒")
 
         return response
     except Exception as e:
@@ -1056,12 +1051,11 @@ async def get_my_images(
     Returns:
         ImageSearchResponse with user's images.
     """
-    start_time = time.time()
     current_user_id = user.get("id")
     is_admin = user.get("role") == "admin"
     all_users = bool(getattr(request, "all_users", False))
     
-    logger.info(
+    logger.debug(
         f"获取用户图片: user_id={current_user_id}, is_admin={is_admin}, all_users={all_users}"
     )
 
@@ -1110,9 +1104,6 @@ async def get_my_images(
             size=request.size,
         )
 
-        process_time = time.time() - start_time
-        perf_logger.info(f"获取用户图片耗时: {process_time:.4f}秒")
-
         return response
     except Exception as e:
         logger.error(f"获取用户图片失败: {e}")
@@ -1137,7 +1128,7 @@ async def update_image(
     Returns:
         Update confirmation.
     """
-    start_time = time.time()
+    start_time = time.perf_counter()
     logger.info(f"更新图像: ID {image_id}")
 
     try:
@@ -1317,8 +1308,8 @@ async def update_image(
                 added_by=current_user.get("id"),
             )
 
-        process_time = time.time() - start_time
-        perf_logger.info(f"图像更新总耗时: {process_time:.4f}秒")
+        process_time = time.perf_counter() - start_time
+        logger.debug("图像更新总耗时: elapsed_ms=%.2f", process_time * 1000)
 
         return {
             "message": "图像更新成功",
@@ -1500,7 +1491,7 @@ async def delete_image(
     Returns:
         Delete confirmation.
     """
-    start_time = time.time()
+    start_time = time.perf_counter()
     logger.info(f"删除图像: ID {image_id}")
 
     try:
@@ -1515,8 +1506,8 @@ async def delete_image(
         # Physical files on storage endpoints should be cleaned separately if needed
         await image_repository.delete(session, image)
 
-        process_time = time.time() - start_time
-        perf_logger.info(f"删除图像耗时: {process_time:.4f}秒")
+        process_time = time.perf_counter() - start_time
+        logger.debug("删除图像耗时: elapsed_ms=%.2f", process_time * 1000)
 
         return {
             "message": f"图像 ID:{image_id} 删除成功",
@@ -1721,7 +1712,7 @@ async def batch_delete_images(
     Returns:
         Deletion results.
     """
-    start_time = time.time()
+    start_time = time.perf_counter()
     image_ids = request.image_ids
     delete_files = request.delete_files
     logger.info(f"批量删除图像: {len(image_ids)} 张, delete_files={delete_files}")
@@ -1776,8 +1767,8 @@ async def batch_delete_images(
                 _delete_files_async(files_to_delete, logger)
             )
 
-        process_time = time.time() - start_time
-        perf_logger.info(f"批量删除耗时: {process_time:.4f}秒")
+        process_time = time.perf_counter() - start_time
+        logger.debug("批量删除耗时: elapsed_ms=%.2f", process_time * 1000)
 
         fail_count = len(image_ids) - deleted_count
 
@@ -1894,7 +1885,7 @@ async def batch_update_tags(
     Returns:
         Update results.
     """
-    start_time = time.time()
+    start_time = time.perf_counter()
     user_id = current_user.get("id")
     logger.info(
         f"批量更新标签: {len(request.image_ids)} 张, "
@@ -1926,7 +1917,7 @@ async def batch_update_tags(
                 "message": "无可操作图片（仅允许修改自己上传的图片）",
                 "success_count": 0,
                 "fail_count": len(request.image_ids),
-                "process_time": f"{(time.time() - start_time):.4f}秒",
+                "process_time": f"{(time.perf_counter() - start_time):.4f}秒",
             }
 
         # Bulk tag operation（此处 owner 已在 SQL 层过滤，仓库不再重复过滤）
@@ -1957,8 +1948,8 @@ async def batch_update_tags(
             log=logger,
         )
 
-        process_time = time.time() - start_time
-        perf_logger.info(f"批量更新标签耗时: {process_time:.4f}秒")
+        process_time = time.perf_counter() - start_time
+        logger.debug("批量更新标签耗时: elapsed_ms=%.2f", process_time * 1000)
 
         fail_count = max(0, len(request.image_ids) - len(effective_image_ids))
 
@@ -2004,7 +1995,7 @@ async def batch_set_category(
     Returns:
         Update results.
     """
-    start_time = time.time()
+    start_time = time.perf_counter()
     logger.info(
         f"批量设置主分类: {len(request.image_ids)} 张图片 -> "
         f"分类ID {request.category_id}"
@@ -2040,7 +2031,7 @@ async def batch_set_category(
                 "message": "无可操作图片（仅允许修改自己上传的图片）",
                 "success_count": 0,
                 "fail_count": len(request.image_ids),
-                "process_time": f"{(time.time() - start_time):.4f}秒",
+                "process_time": f"{(time.perf_counter() - start_time):.4f}秒",
             }
 
         # 批量删除旧的 level=0 分类标签（O(1) query）
@@ -2082,8 +2073,8 @@ async def batch_set_category(
             log=logger,
         )
 
-        process_time = time.time() - start_time
-        perf_logger.info(f"批量设置分类耗时: {process_time:.4f}秒")
+        process_time = time.perf_counter() - start_time
+        logger.debug("批量设置分类耗时: elapsed_ms=%.2f", process_time * 1000)
 
         return {
             "message": f"批量设置主分类完成: {len(image_ids)} 张图片",

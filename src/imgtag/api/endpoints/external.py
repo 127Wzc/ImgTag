@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.dependencies import require_api_key
 from imgtag.core.analysis_instructions import AnalysisInstructions
-from imgtag.core.logging_config import get_logger, get_perf_logger
+from imgtag.core.logging_config import get_logger
 from imgtag.core.search_logging import traced_search
 from imgtag.api.permission_guards import ensure_create_tags_if_missing, ensure_permission
 from imgtag.core.permissions import Permission
@@ -41,7 +41,6 @@ from imgtag.services.task_queue import task_queue
 from imgtag.services.upload_service import upload_service
 
 logger = get_logger(__name__)
-perf_logger = get_perf_logger()
 
 router = APIRouter()
 
@@ -94,9 +93,8 @@ async def random_images(
     Returns:
         Random images list.
     """
-    start_time = time.time()
-    username = api_user.get("username")
-    logger.info(f"[外部API] 随机图片请求: tags={tags}, count={count}, user={username}")
+    start_time = time.perf_counter()
+    logger.debug("外部随机图片请求: filter_tags=%s count=%s user_id=%s", len(tags), count, api_user.get("id"))
 
     try:
         # Single query with optional tag filter
@@ -120,12 +118,12 @@ async def random_images(
                 "tags": img["tags"],
             })
 
-        process_time = time.time() - start_time
-        perf_logger.info(f"[外部API] 随机图片查询耗时: {process_time:.4f}秒")
+        process_time = time.perf_counter() - start_time
+        logger.debug("随机图片查询耗时: elapsed_ms=%.2f", process_time * 1000)
 
         return {"images": images, "count": len(images)}
     except Exception as e:
-        logger.error(f"[外部API] 随机图片查询失败: {e}")
+        logger.error(f"随机图片查询失败: {e}")
         raise HTTPException(status_code=500, detail=f"查询失败: {e}")
 
 
@@ -148,9 +146,8 @@ async def analyze_image_from_url(
         Created image info. If wait_for_result=True, includes AI-generated tags and description.
     """
     
-    start_time = time.time()
-    username = api_user.get("username")
-    logger.info(f"[外部API] 添加图片: {request.image_url}, user={username}")
+    start_time = time.perf_counter()
+    logger.info("外部添加图片: user_id=%s", api_user.get("id"))
 
     try:
         await ensure_create_tags_if_missing(session, api_user, request.tags)
@@ -286,7 +283,7 @@ async def analyze_image_from_url(
                 )
             )
 
-        process_time = time.time() - start_time
+        process_time = time.perf_counter() - start_time
         
         display_url = await storage_service.get_read_url(new_image) or ""
         
@@ -307,7 +304,7 @@ async def analyze_image_from_url(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[外部API] 添加图片失败: {e}")
+        logger.error(f"添加图片失败: {e}")
         raise HTTPException(status_code=500, detail=f"添加失败: {e}")
 
 
@@ -337,8 +334,8 @@ async def search_images(
     Returns:
         Search results.
     """
-    username = api_user.get("username")
-    logger.info(f"[外部API] 搜索图片: keyword={keyword}, tags={tags}, user={username}")
+    logger.debug("外部图片搜索: keyword_chars=%s filter_tags=%s user_id=%s",
+                 len(keyword or ""), len(tags or []), api_user.get("id"))
 
     try:
         offset = (page - 1) * size
@@ -379,7 +376,7 @@ async def search_images(
             "has_prev": page > 1,
         }
     except Exception as e:
-        logger.error(f"[外部API] 搜索失败: {e}")
+        logger.error(f"搜索失败: {e}")
         raise HTTPException(status_code=500, detail=f"搜索失败: {e}")
 
 
@@ -399,8 +396,7 @@ async def get_image_info(
     Returns:
         Image details.
     """
-    username = api_user.get("username")
-    logger.info(f"[外部API] 获取图片: id={image_id}, user={username}")
+    logger.debug("外部图片详情: image_id=%s user_id=%s", image_id, api_user.get("id"))
 
     image = await image_repository.get_with_tags(session, image_id)
     if not image:
