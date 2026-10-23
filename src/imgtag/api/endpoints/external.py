@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from imgtag.api.dependencies import require_api_key
 from imgtag.core.analysis_instructions import AnalysisInstructions
 from imgtag.core.logging_config import get_logger, get_perf_logger
+from imgtag.core.search_logging import traced_search
 from imgtag.api.permission_guards import ensure_create_tags_if_missing, ensure_permission
 from imgtag.core.permissions import Permission
 from imgtag.core.storage_constants import StorageProvider
@@ -311,6 +312,7 @@ async def analyze_image_from_url(
 
 
 @router.get("/images/search")
+@traced_search("external")
 async def search_images(
     keyword: str = Query(None, description="关键词搜索"),
     tags: list[str] = Query([], description="标签筛选"),
@@ -346,11 +348,12 @@ async def search_images(
             keyword=keyword,
             limit=size,
             offset=offset,
+            load_uploader=False,
         )
 
         # Batch get URLs from storage service
         result_images = result["images"]
-        urls = await storage_service.get_read_urls(result_images)
+        urls = await storage_service.get_read_urls_with_session(session, result_images)
         
         # Process results - URL format determined by endpoint config
         images = []

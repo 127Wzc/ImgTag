@@ -6,7 +6,7 @@ Supports hierarchical tags with levels (system, resolution, user-defined).
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from imgtag.models.base import Base, TimestampMixin
@@ -103,7 +103,7 @@ class ImageTag(Base):
     """
 
     __tablename__ = "image_tags"
-    __table_args__ = {"comment": "图片-标签关联表"}
+    __table_args__ = (Index("ix_image_tags_tag_image", "tag_id", "image_id"), {"comment": "图片-标签关联表"})
 
     # Composite primary key
     image_id: Mapped[int] = mapped_column(

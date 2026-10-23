@@ -44,7 +44,9 @@ const galleryPageSize = ref(40) // 默认更多
 const galleryCurrentPage = ref(1)
 const gallerySearchParams = ref<ImageSearchRequest>({ size: 40, page: 1, sort_by: 'id', sort_desc: true })
 
-const { data: galleryData, isLoading: galleryLoading, refetch: refetchGallery } = useImages(gallerySearchParams)
+const { data: galleryData, isLoading: galleryLoading, refetch: refetchGallery } = useImages(
+  gallerySearchParams, computed(() => activeMode.value === 'gallery'),
+)
 const galleryImages = computed(() => galleryData.value?.data || [])
 const galleryTotal = computed(() => galleryData.value?.total || 0)
 const galleryTotalPages = computed(() => Math.ceil(galleryTotal.value / galleryPageSize.value))
@@ -93,7 +95,7 @@ const similarityThreshold = ref([0.15])
 const RATE_LIMIT_KEY = 'imgtag_smart_search_last_time'
 const RATE_LIMIT_SECONDS = 30
 
-const { data: tagsData } = useTags(200)
+const { data: tagsData } = useTags(200, computed(() => activeMode.value === 'smart'))
 const { data: categoriesData } = useCategories()
 const { data: resolutionsData } = useResolutions()
 
@@ -112,7 +114,9 @@ const selectedTags = computed<Tag[]>(() => {
 })
 
 const smartSearchParams = ref<SimilarSearchRequest | null>(null)
-const { data: smartData, isLoading: smartLoading, refetch: refetchSmart } = useSimilarSearch(smartSearchParams)
+const { data: smartData, isLoading: smartLoading, refetch: refetchSmart } = useSimilarSearch(
+  smartSearchParams, computed(() => activeMode.value === 'smart'),
+)
 const smartResults = computed<ImageWithSimilarity[]>(() => smartData.value?.data || [])
 const smartTotal = computed(() => smartData.value?.total || 0)
 const hasVectorSearch = computed(() => !!smartSearchParams.value?.text)
@@ -332,14 +336,15 @@ async function handleImageUpdated() {
                  :class="similarityThreshold[0] !== 0.15 && 'text-primary bg-primary/5 border-primary/20'"
                >
                  <SlidersHorizontal class="w-3.5 h-3.5" />
-                 <span>相似度 {{ Math.round(similarityThreshold[0] * 100) }}%</span>
+                 <span>语义阈值 {{ Math.round(similarityThreshold[0] * 100) }}%</span>
                </button>
 
                <div v-if="showSimilarityPopover" class="absolute z-50 top-full mt-2 w-64 bg-popover border border-border rounded-xl shadow-xl p-4">
                  <div class="flex items-center justify-between mb-4">
-                   <span class="text-xs font-medium text-foreground">匹配阈值</span>
+                   <span class="text-xs font-medium text-foreground">向量相似度阈值</span>
                    <span class="text-xs font-mono text-muted-foreground">{{ Math.round(similarityThreshold[0] * 100) }}%</span>
                  </div>
+                 <p class="mt-2 text-[10px] text-muted-foreground">标签命中可独立入选；图片上的分数为综合相关度。</p>
                  <div class="relative flex items-center h-4">
                    <input
                      type="range"
@@ -407,10 +412,12 @@ async function handleImageUpdated() {
                <h3 class="text-lg font-semibold flex items-center gap-2">
                  搜索结果
                  <span class="text-xs font-normal text-muted-foreground bg-muted px-2 py-0.5 rounded-full">{{ smartTotal }}</span>
+                 <span v-if="smartData?.search_mode === 'hnsw'" class="text-xs text-muted-foreground">近似检索</span>
                </h3>
                <Button variant="ghost" size="sm" class="text-muted-foreground" @click="clearSmartSearch">清除结果</Button>
              </div>
              <ImageGrid :images="smartResults" :show-similarity="hasVectorSearch" @select="openSmartImage" />
+             <p class="text-xs text-muted-foreground">智能搜索最多展示 50 张；需要翻页请使用图库搜索。</p>
           </div>
 
           <!-- 初始/空状态 -->

@@ -12,6 +12,7 @@ from imgtag.core.config import Settings
 from imgtag.services.storage_service import StorageService
 
 sync_module = import_module("imgtag.services.storage_sync_service")
+storage_module = import_module("imgtag.services.storage_service")
 
 
 def test_pool_settings_from_environment(monkeypatch):
@@ -23,6 +24,33 @@ def test_pool_settings_from_environment(monkeypatch):
     monkeypatch.setenv('DB_POOL_SIZE', '0')
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+async def test_read_urls_use_one_query_on_existing_session_without_loading_credentials(monkeypatch):
+    service = StorageService()
+    first = SimpleNamespace(id=1, provider='local', bucket_name='uploads', path_prefix='gallery',
+                            public_url_prefix='https://cdn.example', endpoint_url=None,
+                            is_enabled=True, read_priority=0, read_weight=1)
+    second = SimpleNamespace(id=2, provider='s3', bucket_name='backup', path_prefix='',
+                             public_url_prefix=None, endpoint_url='https://storage.example',
+                             is_enabled=True, read_priority=10, read_weight=1)
+    locations = [
+        (SimpleNamespace(id=1, image_id=7, endpoint_id=1, object_key='photo.jpg'), first),
+        (SimpleNamespace(id=2, image_id=7, endpoint_id=2, object_key='photo.jpg'), second),
+        (SimpleNamespace(id=3, image_id=8, endpoint_id=2, object_key='other.jpg'), second),
+    ]
+    execute = AsyncMock(return_value=SimpleNamespace(all=lambda: locations))
+    session = SimpleNamespace(execute=execute)
+    monkeypatch.setattr(storage_module, 'async_session_maker', lambda: pytest.fail('不能嵌套借连接'))
+    urls = await service.get_read_urls_by_ids(session, [7, 8, 9, 7])
+    assert urls == {7: 'https://cdn.example/data/uploads/gallery/photo.jpg',
+                    8: 'https://storage.example/backup/other.jpg', 9: ''}
+    execute.assert_awaited_once()
+    sql = str(execute.await_args.args[0])
+    assert 'JOIN storage_endpoints' in sql and 'is_healthy IS true' in sql and 'is_enabled IS true' in sql
+    assert 'secret_access_key' not in sql and 'access_key_id' not in sql and 'images.embedding' not in sql
+    assert (await service.get_read_urls_with_session(session, [])) == {}
+    execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio

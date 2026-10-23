@@ -1,14 +1,15 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
-import { computed, type Ref } from 'vue'
+import { computed, unref, type MaybeRef, type Ref } from 'vue'
 import apiClient from '../client'
 import type { ImageResponse, ImageSearchResponse, ImageSearchRequest, UploadAnalyzeResponse } from '@/types'
 
 /**
  * 获取图片列表
  */
-export function useImages(params: Ref<ImageSearchRequest>) {
+export function useImages(params: Ref<ImageSearchRequest>, enabled: MaybeRef<boolean> = true) {
     return useQuery({
         queryKey: computed(() => ['images', params.value]),
+        enabled: computed(() => unref(enabled)),
         queryFn: async () => {
             const { data } = await apiClient.post<ImageSearchResponse>('/images/search', params.value)
             return data

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 from fastapi import FastAPI
-from sqlalchemy.dialects import sqlite
+from sqlalchemy.dialects import postgresql, sqlite
 
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
@@ -19,6 +19,9 @@ from imgtag.services import vector_rebuild_service as rebuild_module
 from imgtag.services import vector_maintenance_service as maintenance_module
 from imgtag.services.vector_maintenance_service import vector_maintenance_service as maintenance
 from imgtag.services.vector_rebuild_service import VectorRebuildService
+from imgtag.services.vector_index_service import VectorIndexService
+from imgtag.services import vector_index_service as index_module
+from imgtag.db.repositories.vector_index import VectorIndexRepository, vector_index_repository
 
 
 class Session:
@@ -36,6 +39,80 @@ class Session:
 
     async def rollback(self):
         self.rollbacks += 1
+
+
+@pytest.mark.parametrize('ready,force,locked', [(True, False, True), (True, True, True), (False, False, True), (False, False, False)])
+async def test_index_prepare_reuses_existing_index_and_reserves_cross_process_lock(monkeypatch, ready, force, locked):
+    conn = SimpleNamespace(execution_options=AsyncMock(), close=AsyncMock(), invalidate=AsyncMock())
+    conn.execution_options.return_value = conn
+    monkeypatch.setattr(index_module, 'index_engine', SimpleNamespace(connect=AsyncMock(return_value=conn)))
+    table = {'table_oid': 123, 'dimensions': 2}
+    monkeypatch.setattr(vector_index_repository, 'table_info', AsyncMock(return_value=table))
+    monkeypatch.setattr(vector_index_repository, 'inspect', AsyncMock(return_value={'ready': ready}))
+    monkeypatch.setattr(vector_index_repository, 'acquire', AsyncMock(return_value=locked))
+    release = AsyncMock()
+    state = AsyncMock()
+    monkeypatch.setattr(vector_index_repository, 'release', release)
+    monkeypatch.setattr(vector_index_repository, 'save_state', state)
+    monkeypatch.setattr(index_module.embedding_service, 'get_dimensions', AsyncMock(return_value=2))
+    if not locked:
+        with pytest.raises(ValueError, match='已经在运行'):
+            await VectorIndexService().prepare(force=force)
+        conn.close.assert_awaited_once()
+        state.assert_not_awaited()
+    else:
+        job = await VectorIndexService().prepare(force=force)
+        if ready and not force:
+            assert job is None
+            conn.close.assert_awaited_once()
+            release.assert_awaited_once_with(conn, 123)
+            state.assert_not_awaited()
+        else:
+            assert job == (conn, table, ready, force)
+            conn.close.assert_not_awaited()
+            state.assert_awaited_once()
+
+
+@pytest.mark.parametrize('failure', [False, True])
+async def test_index_worker_records_failure_and_releases_its_connection(monkeypatch, failure):
+    conn = SimpleNamespace(exec_driver_sql=AsyncMock(), invalidate=AsyncMock(), close=AsyncMock())
+    build = AsyncMock(side_effect=SQLAlchemyError('failed') if failure else None)
+    state, release = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(vector_index_repository, 'build', build)
+    monkeypatch.setattr(vector_index_repository, 'save_state', state)
+    monkeypatch.setattr(vector_index_repository, 'release', release)
+    table = {'table_oid': 123}
+    await VectorIndexService().run(conn, table, True, True)
+    build.assert_awaited_once_with(conn, table, force=True, ready=True)
+    assert bool(state.await_args.kwargs.get('error')) is failure
+    release.assert_awaited_once_with(conn, 123)
+    conn.invalidate.assert_awaited_once()
+    conn.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize('ready,force,operation', [(False, False, 'CREATE INDEX CONCURRENTLY'), (True, True, 'REINDEX INDEX CONCURRENTLY')])
+async def test_index_ddl_is_online_schema_qualified_and_force_preserves_old_index(ready, force, operation):
+    conn = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))), dialect=postgresql.dialect())
+    await VectorIndexRepository().build(conn, {'table_oid': 123, 'schema_name': 'custom', 'qualified_table': 'custom.images'}, force=force, ready=ready)
+    sql = [str(call.args[0]) for call in conn.execute.await_args_list]
+    assert any(operation in item for item in sql)
+    assert not any('public.' in item for item in sql)
+    if ready:
+        assert not any('DROP INDEX' in item for item in sql)
+
+
+@pytest.mark.parametrize('method,path', [('GET', '/vectors/index/status'), ('POST', '/vectors/index/build'), ('POST', '/vectors/index/build?force=true')])
+async def test_index_operations_require_admin(monkeypatch, method, path):
+    app = FastAPI()
+    app.include_router(vectors.router, prefix='/vectors')
+    app.dependency_overrides[get_async_session] = lambda: object()
+    start = AsyncMock()
+    monkeypatch.setattr(vectors.vector_index_service, 'prepare', start)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        assert (await client.request(method, path)).status_code == 401
+        app.dependency_overrides[get_current_user] = lambda: {'id': 1, 'role': 'user'}
+        assert (await client.request(method, path)).status_code == 403
+    start.assert_not_awaited()
 
 
 @pytest.fixture

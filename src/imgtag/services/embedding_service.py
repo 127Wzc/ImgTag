@@ -13,10 +13,12 @@ from pathlib import Path
 from typing import List, Optional, TYPE_CHECKING
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.core.config_cache import config_cache
 from imgtag.core.exceptions import EmbeddingAPIError
 from imgtag.core.logging_config import get_logger
+from imgtag.core.search_logging import search_stage
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import image_repository
 
@@ -338,9 +340,9 @@ class EmbeddingService:
         """初始化嵌入模型服务"""
         logger.info("初始化嵌入模型服务")
     
-    async def _get_mode(self) -> str:
+    async def _get_mode(self, *, session: AsyncSession | None = None) -> str:
         """获取嵌入模式 (api 或 local)"""
-        return await config_cache.get("embedding_mode", "local") or "local"
+        return await config_cache.get("embedding_mode", "local", session=session) or "local"
     
     async def _get_local_model(self) -> ONNXEmbeddingModel:
         """获取本地 ONNX 模型实例"""
@@ -384,21 +386,23 @@ class EmbeddingService:
             dim_str = await config_cache.get("embedding_dimensions", "1536")
             return int(dim_str) if dim_str else 1536
     
-    async def get_embedding(self, text: str) -> List[float]:
+    async def get_embedding(self, text: str, *, session: AsyncSession | None = None) -> List[float]:
         """获取文本的向量嵌入"""
         if not text or not text.strip():
-            return [0.0] * await self.get_dimensions()
+            raise ValueError("生成向量的文本不能为空")
         
-        mode = await self._get_mode()
-        
+        with search_stage("embedding.config") as stats:
+            mode = await self._get_mode(session=session)
+            stats["mode"] = mode if mode in {"api", "local"} else "unknown"
+
         if mode == "local":
             return await self._get_embedding_local(text)
         else:
-            return await self._get_embedding_api(text)
+            return await self._get_embedding_api(text, session=session)
     
     async def _get_embedding_local(self, text: str) -> List[float]:
         """使用本地 ONNX 模型生成向量"""
-        logger.info(f"使用本地 ONNX 模型生成向量: {text[:50]}...")
+        logger.debug("使用本地 ONNX 模型生成向量: text_chars=%s", len(text))
         
         try:
             model = await self._get_local_model()
@@ -408,8 +412,10 @@ class EmbeddingService:
             embedding = await asyncio.to_thread(
                 model.encode, text.strip(), normalize_embeddings=True
             )
+            if not all(math.isfinite(float(value)) for value in embedding) or not any(embedding):
+                raise ValueError("本地模型返回无效向量")
             
-            logger.info(f"本地向量生成成功，维度: {len(embedding)}")
+            logger.debug("本地向量生成成功: dimensions=%s", len(embedding))
             return embedding.tolist()
             
         except Exception as e:
@@ -424,6 +430,7 @@ class EmbeddingService:
         api_key: str | None = None,
         model: str | None = None,
         dimensions: int | None = None,
+        session: AsyncSession | None = None,
     ) -> list[float]:
         """Generate embedding using API.
 
@@ -437,13 +444,13 @@ class EmbeddingService:
             ValueError: If API is not configured or request fails.
         """
         if api_base is None:
-            api_base = await config_cache.get("embedding_api_base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"
+            api_base = await config_cache.get("embedding_api_base_url", "https://api.openai.com/v1", session=session) or "https://api.openai.com/v1"
         if api_key is None:
-            api_key = await config_cache.get("embedding_api_key", "") or ""
+            api_key = await config_cache.get("embedding_api_key", "", session=session) or ""
         if model is None:
-            model = await config_cache.get("embedding_model", "text-embedding-3-small") or "text-embedding-3-small"
+            model = await config_cache.get("embedding_model", "text-embedding-3-small", session=session) or "text-embedding-3-small"
         if dimensions is None:
-            dim_str = await config_cache.get("embedding_dimensions", "1536")
+            dim_str = await config_cache.get("embedding_dimensions", "1536", session=session)
             dimensions = int(dim_str) if dim_str else 1536
 
         if not api_key:
@@ -463,7 +470,7 @@ class EmbeddingService:
         )):
             payload["dimensions"] = dimensions
 
-        logger.info(f"使用 API 生成向量: {text[:50]}...")
+        logger.debug("使用 API 生成向量: text_chars=%s", len(text))
 
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -502,7 +509,7 @@ class EmbeddingService:
                 if (not all(type(value) in (int, float) and math.isfinite(value) for value in embedding)
                         or not any(embedding)):
                     raise EmbeddingAPIError("向量服务返回无效向量（包含非有限数值、非数字或全零），请检查模型服务")
-                logger.info(f"API 向量生成成功，维度: {len(embedding)}")
+                logger.debug("API 向量生成成功: dimensions=%s", len(embedding))
                 return embedding
 
         except httpx.TimeoutException as e:
@@ -522,7 +529,7 @@ class EmbeddingService:
         self, 
         text: str, 
         tags: Optional[List[str]] = None
-    ) -> List[float]:
+    ) -> List[float] | None:
         """获取结合文本和标签的向量嵌入"""
         parts = []
         
@@ -535,7 +542,7 @@ class EmbeddingService:
                 parts.append("标签: " + ", ".join(valid_tags))
         
         combined_text = " | ".join(parts) if parts else ""
-        return await self.get_embedding(combined_text)
+        return await self.get_embedding(combined_text) if combined_text else None
     
     async def save_embedding_for_image(
         self,
@@ -572,6 +579,8 @@ class EmbeddingService:
                     await image_repository.update_image(
                         session, image_model, embedding=embedding
                     )
+                    if embedding is None:
+                        image_model.embedding = None
                 await session.commit()
             
             return True

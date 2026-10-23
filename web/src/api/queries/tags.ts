@@ -46,10 +46,11 @@ export function useTagsByLevel(level: MaybeRef<number>, limit = 200) {
 /**
  * 获取所有标签
  */
-export function useTags(limit = 200) {
+export function useTags(limit = 200, enabled: MaybeRef<boolean> = true) {
     const cappedLimit = Math.min(Math.max(limit, 1), MAX_TAG_PAGE_SIZE)
     return useQuery({
         queryKey: ['tags', 'all', cappedLimit],
+        enabled: computed(() => unref(enabled)),
         queryFn: async () => {
             const { data } = await apiClient.get<Tag[]>('/tags/', {
                 params: { size: cappedLimit }

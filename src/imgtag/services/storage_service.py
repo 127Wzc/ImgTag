@@ -19,6 +19,7 @@ from botocore.exceptions import ClientError
 
 from imgtag.core.config import settings
 from imgtag.core.logging_config import get_logger
+from imgtag.core.search_logging import search_stage
 from imgtag.core.storage_constants import DEFAULT_PRIORITY, StorageProvider
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import (
@@ -339,34 +340,35 @@ class StorageService:
         Returns:
             Dictionary mapping image_id to URL.
         """
-        if not images:
+        return await self.get_read_urls_by_ids(session, [img.id for img in images])
+
+    async def get_read_urls_by_ids(self, session, image_ids: list[int]) -> dict[int, str]:
+        """直接按结果 ID 构建地址，复用请求会话，不回读图片或另借连接。"""
+        image_ids = list(dict.fromkeys(image_ids))
+        if not image_ids:
             return {}
-        
-        image_ids = [img.id for img in images]
-        result = {img.id: "" for img in images}
-        
-        # Get healthy endpoints once
-        endpoints = await storage_endpoint_repository.get_healthy_for_read(session)
-        endpoint_map = {ep.id: ep for ep in endpoints}
-        
-        if not endpoint_map:
-            return result
-        
-        # Batch get all locations for all images (single query)
-        all_locations = await image_location_repository.get_by_image_ids(session, image_ids)
-        
-        # Build URLs for each image using weighted selection
-        for image_id in image_ids:
-            locations = all_locations.get(image_id, [])
-            
-            # Select location using priority + weight-based load balancing
-            selected = _select_by_weight(locations, endpoint_map)
-            if selected:
-                endpoint = endpoint_map.get(selected.endpoint_id)
-                if endpoint:
-                    url = self._build_url(endpoint, selected.object_key)
-                    if url:
-                        result[image_id] = url
+        result = dict.fromkeys(image_ids, "")
+        with search_stage("urls.locations", images=len(image_ids)) as stats:
+            rows = await image_location_repository.get_readable_by_image_ids(session, image_ids)
+            stats["locations"] = len(rows)
+        endpoint_map = {}
+        all_locations = {image_id: [] for image_id in image_ids}
+        for location, endpoint in rows:
+            endpoint_map[endpoint.id] = endpoint
+            all_locations[location.image_id].append(location)
+
+        with search_stage("urls.build", images=len(image_ids)) as stats:
+            resolved = 0
+            for image_id in image_ids:
+                selected = _select_by_weight(all_locations.get(image_id, []), endpoint_map)
+                if selected:
+                    endpoint = endpoint_map.get(selected.endpoint_id)
+                    if endpoint:
+                        url = self._build_url(endpoint, selected.object_key)
+                        if url:
+                            result[image_id] = url
+                            resolved += 1
+            stats["resolved"] = resolved
         
         return result
 

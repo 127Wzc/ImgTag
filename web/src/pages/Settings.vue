@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import ImageDetailModal from '@/components/ImageDetailModal.vue'
 import ModelTestButton from '@/components/ModelTestButton.vue'
 import VectorAnomaliesPanel from '@/components/VectorAnomaliesPanel.vue'
+import HnswSettings from '@/components/HnswSettings.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { getErrorMessage } from '@/utils/api-error'
@@ -228,7 +229,10 @@ async function fetchConfigs() {
   loading.value = true
   try {
     const { data } = await apiClient.get('/config/')
-    configs.value = { subject_extraction_max_images: '3', vision_gif_frame_count: '3', ...data }
+    configs.value = {
+      subject_extraction_max_images: '3', vision_gif_frame_count: '3',
+      search_hnsw_enabled: 'false', search_hnsw_ef_search: '40', ...data,
+    }
     originalConfigs.value = { ...configs.value }
   } catch (e) {
     console.error('Failed to load configs', e)
@@ -264,7 +268,8 @@ async function saveConfigs() {
     if (activeCategory.value !== 'embedding') {
       activeCategory.value = null
     } else {
-      notifySuccess('保存成功，请根据提示检查是否需要重建向量', { once: true })
+      const onlySearchSettings = Object.keys(changedConfigs).every(key => key.startsWith('search_'))
+      notifySuccess(onlySearchSettings ? '搜索设置已保存' : '保存成功，请根据提示检查是否需要重建向量', { once: true })
       fetchVectorStatus() // 刷新状态以更新 dimensions_match
     }
   } catch (e: any) {
@@ -1381,6 +1386,13 @@ onMounted(() => fetchConfigs())
                     :result="modelTestResults.embedding"
                     description="使用当前配置生成一条测试向量"
                     @test="testModel('embedding')"
+                  />
+
+                  <HnswSettings
+                    v-model="configs.search_hnsw_enabled"
+                    v-model:ef-search="configs.search_hnsw_ef_search"
+                    :has-changes="hasChanges"
+                    :dimensions-mismatch="dimensionsMismatch"
                   />
 
                   <!-- 向量状态卡片 -->

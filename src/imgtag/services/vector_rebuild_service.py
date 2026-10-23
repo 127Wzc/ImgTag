@@ -57,6 +57,19 @@ class VectorRebuildService:
             logger.exception("准备向量重建失败")
             raise
 
+    async def resize(self, session: AsyncSession) -> int:
+        """管理员显式调整维度，复用同一仓库实现。"""
+        if self.status["is_running"]:
+            raise ValueError("向量重建任务正在进行中")
+        expected_dim = await embedding_service.get_dimensions()
+        if expected_dim != await image_repository.get_embedding_dimensions(session):
+            await image_repository.resize_embedding_dimensions(session, expected_dim)
+            await config_repository.set_value(session, "embedding_dimensions", str(expected_dim))
+            await session.commit()
+            await config_cache.refresh()
+            await engine.dispose()
+        return expected_dim
+
     async def run(self) -> None:
         """逐张处理，成功、失败或跳过都计入已处理进度。"""
         self.status["message"] = "正在获取图片列表..."

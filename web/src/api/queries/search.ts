@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/vue-query'
-import { computed, type Ref } from 'vue'
+import { computed, unref, type MaybeRef, type Ref } from 'vue'
 import apiClient from '../client'
 import type { ImageSearchResponse, SimilarSearchResponse, SimilarSearchRequest } from '@/types'
 
@@ -50,7 +50,7 @@ export function useSearch(params: Ref<{
 /**
  * 语义向量搜索
  */
-export function useSimilarSearch(params: Ref<SimilarSearchRequest | null>) {
+export function useSimilarSearch(params: Ref<SimilarSearchRequest | null>, enabled: MaybeRef<boolean> = true) {
     return useQuery({
         queryKey: computed(() => ['similar-search', params.value]),
         queryFn: async () => {
@@ -58,6 +58,9 @@ export function useSimilarSearch(params: Ref<SimilarSearchRequest | null>) {
             const { data } = await apiClient.post<SimilarSearchResponse>('/images/smart-search', params.value)
             return data
         },
-        enabled: computed(() => params.value !== null && !!params.value.text),
+        enabled: computed(() => unref(enabled) && params.value !== null && !!(
+            params.value.text?.trim() || params.value.tags?.length ||
+            params.value.category_id || params.value.resolution_id
+        )),
     })
 }

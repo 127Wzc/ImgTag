@@ -4,7 +4,8 @@ from collections.abc import Iterable
 
 
 ENCRYPTION_STATE_KEY = "__encryption_state"
-INTERNAL_CONFIG_KEYS = frozenset({ENCRYPTION_STATE_KEY})
+HNSW_STATE_KEY = "__hnsw_index_state"
+INTERNAL_CONFIG_KEYS = frozenset({ENCRYPTION_STATE_KEY, HNSW_STATE_KEY})
 
 
 def validate_public_config_keys(keys: Iterable[str]) -> None:

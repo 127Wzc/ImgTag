@@ -6,10 +6,11 @@ Pydantic 模式定义
 图像相关的请求和响应模型
 """
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field, HttpUrl
 
 from imgtag.core.analysis_instructions import AnalysisInstructions
+from imgtag.core.search_limits import SMART_SEARCH_LIMIT
 
 from .base import BaseSchema
 from .subject import ImageSubjectAssignment
@@ -81,7 +82,9 @@ class ImageResponse(BaseSchema):
 
 class ImageWithSimilarity(ImageResponse):
     """带相似度的图像响应"""
-    similarity: float = Field(..., description="相似度分数")
+    similarity: float = Field(..., description="综合相关度，不代表匹配概率")
+    vector_score: float = Field(default=0, description="余弦语义分数；缺失或无效向量为 0")
+    tag_score: float = Field(default=0, description="查询标签的加权命中覆盖率")
 
 
 # ============= 图像更新请求 =============
@@ -144,20 +147,19 @@ class ImageSearchRequest(BaseModel):
     # Page/Size 风格分页
     page: int = Field(default=1, ge=1, description="页码 (从 1 开始)")
     size: int = Field(default=20, ge=1, le=100, description="每页数量")
-    sort_by: str = Field(default="id", description="排序字段")
+    sort_by: Literal["id", "created_at"] = Field(default="id", description="排序字段")
     sort_desc: bool = Field(default=True, description="是否降序")
 
 
 class SimilarSearchRequest(BaseModel):
-    """相似度搜索请求 (Page/Size 风格)"""
-    text: str = Field(..., description="搜索文本")
+    """单页智能搜索；保留 page=1 兼容现有调用方。"""
+    text: str = Field(default="", description="搜索文本；仅筛选时可为空")
     tags: Optional[List[str]] = Field(default=None, description="标签列表")
     category_id: Optional[int] = Field(default=None, description="主分类 tag_id (level=0)")
     resolution_id: Optional[int] = Field(default=None, description="分辨率 tag_id (level=1)")
-    # Page/Size 风格分页
-    page: int = Field(default=1, ge=1, description="页码 (从 1 开始)")
-    size: int = Field(default=20, ge=1, le=100, description="每页数量")
-    threshold: float = Field(default=0.7, ge=0, le=1, description="相似度阈值")
+    page: int = Field(default=1, ge=1, le=1, description="智能搜索只支持第一页")
+    size: int = Field(default=SMART_SEARCH_LIMIT, ge=1, le=SMART_SEARCH_LIMIT, description="返回数量，最多 50 张")
+    threshold: float = Field(default=0.15, ge=0, le=1, description="向量相似度阈值；标签命中可独立召回")
     vector_weight: float = Field(default=0.7, ge=0, le=1, description="向量相似度权重")
     tag_weight: float = Field(default=0.3, ge=0, le=1, description="标签匹配权重")
 
@@ -170,7 +172,8 @@ from .base import PaginatedResponse
 ImageSearchResponse = PaginatedResponse[ImageResponse]
 
 # 相似度搜索响应 - 直接使用通用分页基类  
-SimilarSearchResponse = PaginatedResponse[ImageWithSimilarity]
+class SimilarSearchResponse(PaginatedResponse[ImageWithSimilarity]):
+    search_mode: Literal["exact", "hnsw"] = "exact"
 
 
 # ============= 上传响应 =============

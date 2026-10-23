@@ -17,7 +17,7 @@ from imgtag.services import model_test_service
 def model_api(monkeypatch):
     reads = []
 
-    async def get_config(key, default=None):
+    async def get_config(key, default=None, **kwargs):
         reads.append(key)
         return "saved-secret" if key.endswith("_api_key") else default
 

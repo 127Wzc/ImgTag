@@ -1,4 +1,5 @@
 import json
+import logging
 
 import httpx
 import pytest
@@ -6,6 +7,22 @@ import pytest
 from imgtag.core.exception_translate import translate_exception
 from imgtag.core.exceptions import EmbeddingAPIError
 from imgtag.services.embedding_service import EmbeddingService, config_cache
+
+
+async def test_empty_content_does_not_create_a_zero_vector(monkeypatch):
+    service = EmbeddingService()
+    assert await service.get_embedding_combined('  ', []) is None
+    with pytest.raises(ValueError, match='不能为空'):
+        await service.get_embedding(' ')
+
+
+async def test_embedding_debug_logs_only_input_length_and_dimensions(embedding_api, caplog):
+    _, install_handler = embedding_api
+    install_handler(lambda request: httpx.Response(200, json={'data':[{'embedding':[123.123456789]*1024}]}))
+    with caplog.at_level(logging.DEBUG, logger='imgtag.services.embedding_service'):
+        await EmbeddingService().get_embedding('保密搜索内容')
+    assert 'text_chars=6' in caplog.text and 'dimensions=1024' in caplog.text
+    assert '保密搜索内容' not in caplog.text and '123.123456789' not in caplog.text
 
 
 @pytest.fixture
@@ -19,7 +36,7 @@ def embedding_api(monkeypatch):
         "embedding_dimensions": "1024",
     }
 
-    async def get_config(key, default=None):
+    async def get_config(key, default=None, **kwargs):
         return config.get(key, default)
 
     monkeypatch.setattr(config_cache, "get", get_config)

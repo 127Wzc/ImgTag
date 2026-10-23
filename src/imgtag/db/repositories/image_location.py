@@ -11,15 +11,39 @@ if TYPE_CHECKING:
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from imgtag.db.repositories.base import BaseRepository
 from imgtag.models.image_location import ImageLocation
+from imgtag.models.storage_endpoint import StorageEndpoint
 
 
 class ImageLocationRepository(BaseRepository[ImageLocation]):
     """Repository for ImageLocation model."""
 
     model = ImageLocation
+
+    async def get_readable_by_image_ids(
+        self, session: AsyncSession, image_ids: list[int],
+    ) -> Sequence[tuple[ImageLocation, StorageEndpoint]]:
+        """一次取得当前图片的可读位置和构建地址需要的端点字段。"""
+        if not image_ids:
+            return []
+        result = await session.execute(
+            select(ImageLocation, StorageEndpoint)
+            .join(StorageEndpoint, StorageEndpoint.id == ImageLocation.endpoint_id)
+            .where(ImageLocation.image_id.in_(image_ids),
+                   StorageEndpoint.is_enabled.is_(True), StorageEndpoint.is_healthy.is_(True))
+            .options(
+                load_only(ImageLocation.id, ImageLocation.image_id, ImageLocation.endpoint_id,
+                          ImageLocation.object_key, raiseload=True),
+                load_only(StorageEndpoint.id, StorageEndpoint.provider, StorageEndpoint.endpoint_url,
+                          StorageEndpoint.bucket_name, StorageEndpoint.path_prefix, StorageEndpoint.public_url_prefix,
+                          StorageEndpoint.is_enabled, StorageEndpoint.read_priority, StorageEndpoint.read_weight,
+                          raiseload=True),
+            )
+        )
+        return result.all()
 
     async def get_by_image_and_endpoint(
         self,

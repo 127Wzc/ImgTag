@@ -39,6 +39,8 @@ from imgtag.api.permission_guards import ensure_create_tags_if_missing, ensure_p
 from imgtag.core.permissions import Permission
 from imgtag.core.category_cache import get_category_code_cached
 from imgtag.core.logging_config import get_logger, get_perf_logger
+from imgtag.core.search_logging import traced_search
+from imgtag.core.exceptions import EmbeddingAPIError
 from imgtag.core.exception_translate import translate_exception
 from imgtag.core.storage_constants import (
     StorageProvider,
@@ -72,6 +74,7 @@ from imgtag.schemas import (
     SetPrimarySubjectRequest,
     SuggestSubjectRequest,
 )
+from imgtag.services.search_service import search_service
 from imgtag.services import embedding_service, storage_service, upload_service
 from imgtag.services.analysis_review_service import analysis_review_service
 from imgtag.services.image_update_service import image_update_service
@@ -164,6 +167,7 @@ async def _image_to_response(
 
 
 async def _images_to_responses(
+    session: AsyncSession,
     images: list[Image],
     tags_map: dict[int, list[dict]],
     subjects_map: dict[int, list[dict]] | None = None,
@@ -185,7 +189,7 @@ async def _images_to_responses(
     
     # Batch get URLs from storage endpoints
     # URL format is determined by each endpoint's public_url_prefix or default path
-    urls = await storage_service.get_read_urls(images)
+    urls = await storage_service.get_read_urls_with_session(session, images)
     
     # Build responses
     responses = []
@@ -923,6 +927,7 @@ async def get_image(
 
 
 @router.post("/search", response_model=ImageSearchResponse)
+@traced_search("gallery")
 async def search_images(
     request: ImageSearchRequest,
     session: AsyncSession = Depends(get_async_session),
@@ -941,7 +946,8 @@ async def search_images(
         ImageSearchResponse with results.
     """
     start_time = time.time()
-    logger.info(f"高级图像搜索: {request.model_dump()}")
+    logger.debug("高级图像搜索: page=%s size=%s keyword_chars=%s filter_tags=%s",
+                 request.page, request.size, len(request.keyword or ""), len(request.tags or []))
 
     try:
         # Visibility filter:
@@ -966,6 +972,7 @@ async def search_images(
             offset=(request.page - 1) * request.size,
             sort_by=request.sort_by,
             sort_desc=request.sort_desc,
+            load_tags=False,
         )
 
         # 批量获取标签信息（包含 level 和 source）
@@ -977,7 +984,7 @@ async def search_images(
         subjects_map = await image_subject_repository.list_by_image_ids(session, image_ids)
 
         # Convert to response with batch URL retrieval
-        images = await _images_to_responses(results["images"], tags_map, subjects_map)
+        images = await _images_to_responses(session, results["images"], tags_map, subjects_map)
 
         # 使用通用分页响应
         # 分页响应 (已移至顶部 import)
@@ -998,6 +1005,7 @@ async def search_images(
 
 
 @router.post("/smart-search", response_model=SimilarSearchResponse, dependencies=[Depends(guard_smart_search)])
+@traced_search("smart")
 async def smart_search(
     request: SimilarSearchRequest,
     session: AsyncSession = Depends(get_async_session),
@@ -1016,64 +1024,20 @@ async def smart_search(
     Returns:
         SimilarSearchResponse with similarity scores.
     """
-    start_time = time.time()
-    logger.info(f"智能向量搜索: '{request.text[:50] if request.text else ''}...'")
+    logger.debug("智能搜索: text_chars=%s filter_tags=%s size=%s", len(request.text), len(request.tags or []), request.size)
 
     try:
-        # Visibility filter:
-        # - Admin: skip_visibility_filter=True (see all)
-        # - Logged in user: visible_to_user_id=user_id (see public + own)
-        # - Anonymous: visible_to_user_id=None, skip=False (see public only)
-        is_admin = current_user.get("role") == "admin" if current_user else False
-        skip_visibility_filter = is_admin
-        visible_to_user_id = current_user.get("id") if current_user and not is_admin else None
-        
-        # Generate query vector
-        if request.tags:
-            query_vector = await embedding_service.get_embedding_combined(
-                request.text,
-                request.tags,
-            )
-        else:
-            query_vector = await embedding_service.get_embedding(request.text)
-
-        # Execute hybrid search
-        results = await image_repository.hybrid_search(
-            session,
-            query_vector=query_vector,
-            query_text=request.text,
-            limit=request.size,
-            threshold=request.threshold,
-            vector_weight=request.vector_weight,
-            tag_weight=request.tag_weight,
-            category_id=request.category_id,
-            resolution_id=request.resolution_id,
-            visible_to_user_id=visible_to_user_id,
-            skip_visibility_filter=skip_visibility_filter,
-        )
-
-        # Convert to response model
-        images = [ImageWithSimilarity(**img) for img in results]
-
-        # 使用通用分页响应
-        # 分页响应 (已移至顶部 import)
-        response = PaginatedResponse.create(
-            items=images,
-            total=len(images),
-            page=request.page,
-            size=request.size,
-        )
-
-        process_time = time.time() - start_time
-        perf_logger.info(f"智能向量搜索耗时: {process_time:.4f}秒")
-
-        return response
-    except Exception as e:
-        logger.error(f"智能向量搜索失败: {e}")
-        raise HTTPException(status_code=500, detail=f"搜索失败: {e}")
+        return await search_service.search_request(session, request, current_user)
+    except HTTPException:
+        raise
+    except EmbeddingAPIError:
+        raise
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/my", response_model=ImageSearchResponse)
+@traced_search("gallery.mine")
 async def get_my_images(
     request: ImageSearchRequest,
     user: dict = Depends(get_current_user),
@@ -1123,6 +1087,7 @@ async def get_my_images(
             offset=(request.page - 1) * request.size,
             sort_by=request.sort_by,
             sort_desc=request.sort_desc,
+            load_tags=False,
         )
 
         # 批量获取标签信息
@@ -1134,7 +1099,7 @@ async def get_my_images(
         subjects_map = await image_subject_repository.list_by_image_ids(session, image_ids)
 
         # Convert to response with batch URL retrieval
-        images = await _images_to_responses(results["images"], tags_map, subjects_map)
+        images = await _images_to_responses(session, results["images"], tags_map, subjects_map)
 
         # 使用通用分页响应
         # 分页响应 (已移至顶部 import)

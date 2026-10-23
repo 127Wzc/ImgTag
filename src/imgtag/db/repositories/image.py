@@ -8,19 +8,30 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import Float, and_, any_, asc, bindparam, case, column, desc, exists, func, or_, select, text, update
+from sqlalchemy import Float, Integer, and_, any_, asc, bindparam, case, column, desc, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, joinedload, selectinload
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import CTE
 
 from imgtag.core.config import settings
 from imgtag.core.config_cache import config_cache
+from imgtag.core.search_logging import search_stage, traced_search
 from imgtag.db.repositories.base import BaseRepository
+from imgtag.db.repositories.vector_index import vector_index_repository
 from imgtag.models.image import Image
 from imgtag.models.subject import Subject
 from imgtag.models.tag import ImageTag, Tag
+from imgtag.models.user import User
 from imgtag.utils.ids import dedup_positive_ints_keep_order
+
+
+class HybridSearchResults(list):
+    """搜索结果及实际使用的检索路径。"""
+
+    def __init__(self, images, search_mode: str):
+        super().__init__(images)
+        self.search_mode = search_mode
 
 
 class ImageRepository(BaseRepository[Image]):
@@ -69,17 +80,14 @@ class ImageRepository(BaseRepository[Image]):
         return [dict(row) for row in rows.mappings().all()], total
 
     async def resize_embedding_dimensions(self, session: AsyncSession, dimensions: int) -> None:
-        """在调用方事务内调整向量列和索引。"""
-        if dimensions <= 0:
-            raise ValueError("向量维度必须大于 0")
-        await session.execute(text("DROP INDEX IF EXISTS idx_images_embedding"))
+        """失效向量用 NULL 标记；索引由管理员在回填后显式构建。"""
+        if not 0 < dimensions <= 16000:
+            raise ValueError("向量维度必须为 1 至 16000")
+        await vector_index_repository.lock_resize(session)
+        await vector_index_repository.drop_for_resize(session)
         await session.execute(text(f"""
             ALTER TABLE images ALTER COLUMN embedding TYPE vector({dimensions})
-            USING (ARRAY_FILL(0::float, ARRAY[{dimensions}])::vector({dimensions}))
-        """))
-        await session.execute(text("""
-            CREATE INDEX idx_images_embedding ON public.images
-            USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)
+            USING NULL::vector({dimensions})
         """))
 
     async def list_embedding_inputs(self, session: AsyncSession) -> Sequence[Any]:
@@ -89,7 +97,7 @@ class ImageRepository(BaseRepository[Image]):
                    ARRAY(
                        SELECT t.name FROM tags t
                        JOIN image_tags it ON t.id = it.tag_id
-                       WHERE it.image_id = i.id AND t.level = 2
+                       WHERE it.image_id = i.id AND t.level IN (0, 2)
                    ) AS tags
             FROM images i ORDER BY i.id
         """))
@@ -227,11 +235,11 @@ class ImageRepository(BaseRepository[Image]):
 
     @staticmethod
     def subject_tag_marker():
-        """用相关子查询标记主体名称及别名标签，不展开 JOIN 导致标签重复。"""
-        return exists(select(Subject.id).where(
-            Subject.is_active.is_(True), Tag.level == 2,
-            or_(Subject.primary_tag_id == Tag.id, Subject.alias_tag_ids.any(Tag.id)),
-        )).label("is_subject")
+        """整批生成主体标签集合，避免为每个结果标签重复扫描主体。"""
+        active_tags = select(Subject.primary_tag_id).where(Subject.is_active.is_(True)).union(
+            select(func.unnest(Subject.alias_tag_ids)).where(Subject.is_active.is_(True)),
+        )
+        return and_(Tag.level == 2, Tag.id.in_(active_tags)).label("is_subject")
 
     async def get_image_tags_with_source(
         self,
@@ -304,19 +312,21 @@ class ImageRepository(BaseRepository[Image]):
             .where(ImageTag.image_id.in_(image_ids))
             .order_by(ImageTag.image_id, Tag.level, ImageTag.sort_order)
         )
-        result = await session.execute(stmt)
-
-        # Group by image_id
-        tags_map: dict[int, list[dict[str, Any]]] = {img_id: [] for img_id in image_ids}
-        for row in result:
-            tags_map[row.image_id].append({
-                "id": row.id,
-                "name": row.name,
-                "level": row.level,
-                "source": row.source,
-                "sort_order": row.sort_order,
-                "is_subject": bool(row.is_subject),
-            })
+        with search_stage("tags.batch", images=len(image_ids)) as stats:
+            result = await session.execute(stmt)
+            tags_map: dict[int, list[dict[str, Any]]] = {img_id: [] for img_id in image_ids}
+            row_count = 0
+            for row in result:
+                row_count += 1
+                tags_map[row.image_id].append({
+                    "id": row.id,
+                    "name": row.name,
+                    "level": row.level,
+                    "source": row.source,
+                    "sort_order": row.sort_order,
+                    "is_subject": bool(row.is_subject),
+                })
+            stats["rows"] = row_count
 
         return tags_map
 
@@ -410,6 +420,21 @@ class ImageRepository(BaseRepository[Image]):
         )
         return direct.union(expanded).cte(name)
 
+    async def match_search_tags(self, session: AsyncSession, query_text: str) -> list[tuple[str, bool]]:
+        identity = select(Subject.id).where(Subject.is_active.is_(True), or_(
+            Subject.primary_tag_id == Tag.id, Tag.id == any_(Subject.alias_tag_ids),
+        )).exists()
+        result = await session.execute(select(Tag.name, identity).where(
+            func.length(func.trim(Tag.name)) > 0,
+            func.strpos(func.lower(query_text), func.lower(Tag.name)) > 0,
+        ).order_by(func.length(Tag.name).desc(), Tag.id).limit(64))
+        return [(row[0], bool(row[1])) for row in result.all()]
+
+    async def configure_hnsw(self, session: AsyncSession, ef_search: int) -> None:
+        await session.execute(text("""SELECT set_config('hnsw.ef_search', :value, true),
+            set_config('hnsw.iterative_scan', 'strict_order', true)"""), {"value": str(ef_search)})
+
+    @traced_search("gallery.query")
     async def search_images(
         self,
         session: AsyncSession,
@@ -427,6 +452,8 @@ class ImageRepository(BaseRepository[Image]):
         offset: int = 0,
         sort_by: str = "id",
         sort_desc: bool = True,
+        load_tags: bool = True,
+        load_uploader: bool = True,
     ) -> dict[str, Any]:
         """Advanced image search with multiple filters.
 
@@ -448,8 +475,14 @@ class ImageRepository(BaseRepository[Image]):
         Returns:
             Dict with images, total, limit, offset.
         """
-        # Base query - eager load tags to avoid lazy-load issues
-        stmt = select(Image).options(selectinload(Image.tags), selectinload(Image.uploader))
+        if sort_by not in {"id", "created_at"}:
+            raise ValueError("排序字段只支持 id、created_at")
+        # 列表不读取向量；调用方只加载实际使用的关联，上传者与图片合并查询。
+        stmt = select(Image).options(defer(Image.embedding, raiseload=True))
+        if load_tags:
+            stmt = stmt.options(selectinload(Image.tags))
+        if load_uploader:
+            stmt = stmt.options(joinedload(Image.uploader).load_only(User.id, User.username, raiseload=True))
         count_stmt = select(func.count()).select_from(Image)
 
         conditions = []
@@ -537,20 +570,27 @@ class ImageRepository(BaseRepository[Image]):
             count_stmt = count_stmt.where(and_(*conditions))
 
         # Count total
-        total = (await session.execute(count_stmt)).scalar() or 0
+        with search_stage("gallery.count", limit=limit, offset=offset,
+                          keyword_chars=len(keyword or ""), filter_tags=len(tags or [])) as stats:
+            total = (await session.execute(count_stmt)).scalar() or 0
+            stats.update(total=total, skip_results=offset >= total)
+        if offset >= total:
+            return {"images": [], "total": total, "limit": limit, "offset": offset}
 
         # Sorting
-        sort_column = getattr(Image, sort_by, Image.id)
-        if sort_desc:
-            stmt = stmt.order_by(desc(sort_column))
-        else:
-            stmt = stmt.order_by(asc(sort_column))
+        sort_column = {"id": Image.id, "created_at": Image.created_at}[sort_by]
+        sort_order = desc if sort_desc else asc
+        stmt = stmt.order_by(sort_order(sort_column))
+        if sort_by != "id":
+            stmt = stmt.order_by(sort_order(Image.id))
 
         # Pagination
         stmt = stmt.limit(limit).offset(offset)
 
-        result = await session.execute(stmt)
-        images = result.scalars().all()
+        with search_stage("gallery.rows", limit=limit, offset=offset) as stats:
+            result = await session.execute(stmt)
+            images = result.scalars().all()
+            stats["returned"] = len(images)
 
         return {
             "images": images,
@@ -677,14 +717,15 @@ class ImageRepository(BaseRepository[Image]):
 
         return images, total
 
+    @traced_search("smart.query")
     async def hybrid_search(
         self,
         session: AsyncSession,
         *,
-        query_vector: list[float],
+        query_vector: list[float] | None,
         query_text: str,
         limit: int = 20,
-        threshold: float = 0.5,
+        threshold: float = 0.15,
         vector_weight: float = 0.7,
         tag_weight: float = 0.3,
         category_id: Optional[int] = None,
@@ -692,6 +733,9 @@ class ImageRepository(BaseRepository[Image]):
         tags: Optional[list[str]] = None,
         visible_to_user_id: Optional[int] = None,
         skip_visibility_filter: bool = False,
+        query_tag_weights: dict[str, float] | None = None,
+        candidate_limit: int | None = None,
+        include_uploader: bool = True,
     ) -> list[dict[str, Any]]:
         """Hybrid search: vector similarity + tag matching.
 
@@ -716,7 +760,7 @@ class ImageRepository(BaseRepository[Image]):
         """
         # Use raw SQL for complex hybrid query
         # This is a pragmatic choice for performance-critical search
-        vector_str = ",".join(map(str, query_vector))
+        vector_str = ",".join(map(str, query_vector)) if query_vector else ""
 
         # Build extra conditions
         params = {
@@ -757,99 +801,97 @@ class ImageRepository(BaseRepository[Image]):
             else:
                 filter_sql += " AND i.is_public = true"
 
+        weights = query_tag_weights if query_tag_weights is not None else {query_text: 1.0}
+        weight_cases = []
+        for index, (name, weight) in enumerate(weights.items()):
+            weight_cases.append(f"WHEN matched_name = :term_{index} THEN :weight_{index}")
+            params[f"term_{index}"] = name
+            params[f"weight_{index}"] = weight
+        weight_sql = "CASE " + " ".join(weight_cases) + " ELSE 0.0 END" if weights else "0.0"
+        params["total_tag_weight"] = sum(weights.values()) or 1.0
+        ctes = []
+        if tags:
+            ctes.append(self._search_tag_groups(
+                Tag.name.in_(bindparam("filter_tags", expanding=True)), name="filter_tag_groups",
+            ))
+        source, tag_score_sql = "images i", "0.0"
+        if weights:
+            groups = self._search_tag_groups(
+                Tag.name.in_(list(weights)) if query_tag_weights is not None else Tag.name == bindparam("query_text"),
+                name="query_tag_groups",
+            )
+            tag_matches = text(f"""
+                SELECT image_id, SUM({weight_sql}) * 1.0 / :total_tag_weight AS tag_score
+                FROM (
+                    SELECT DISTINCT it.image_id, qg.matched_name FROM image_tags it
+                    JOIN query_tag_groups qg ON qg.tag_id = it.tag_id
+                ) matched_terms GROUP BY image_id
+            """).columns(column("image_id", Integer), column("tag_score", Float)).cte("tag_matches")
+            ctes.extend([groups, tag_matches])
+            source = "images i LEFT JOIN tag_matches tm ON i.id = tm.image_id"
+            tag_score_sql = "COALESCE(tm.tag_score, 0.0)"
+        outer_filter = filter_sql
+        if candidate_limit and query_vector:
+            params["candidate_limit"] = candidate_limit
+            vector_candidates = text(f"""
+                SELECT i.id FROM images i WHERE i.embedding IS NOT NULL {filter_sql}
+                ORDER BY i.embedding <=> :vector LIMIT :candidate_limit
+            """).columns(column("id", Integer)).cte("vector_candidates").prefix_with("MATERIALIZED")
+            ctes.append(vector_candidates)
+            if weights:
+                outer_filter += " AND (i.id IN (SELECT id FROM vector_candidates) OR tm.image_id IS NOT NULL)"
+            else:
+                # 未命中词典时直接读取向量候选，不再扫描整张图片表。
+                source = "vector_candidates vc JOIN images i ON i.id = vc.id"
+                outer_filter = ""
+        if query_vector:
+            # 物化的只有 ID、距离和标签分；距离每行计算一次，大字段在最终 LIMIT 后读取。
+            distances = text(f"""
+                SELECT i.id, (i.embedding <=> :vector) AS distance, {tag_score_sql} AS tag_score
+                FROM {source} WHERE true {outer_filter}
+            """).columns(column("id", Integer), column("distance", Float),
+                         column("tag_score", Float)).cte("search_distances").prefix_with("MATERIALIZED")
+            ctes.append(distances)
+            scored_sql = """SELECT id, CASE WHEN distance BETWEEN 0.0 AND 2.0
+                THEN 1 - distance ELSE 0.0 END AS vector_score, tag_score FROM search_distances"""
+        else:
+            scored_sql = f"SELECT i.id, 0.0 AS vector_score, {tag_score_sql} AS tag_score FROM {source} WHERE true {outer_filter}"
+        semantic_filter = "vector_score > :threshold OR tag_score > 0" if query_text.strip() else "true"
+        uploader_join = "LEFT JOIN users u ON u.id = i.uploaded_by" if include_uploader else ""
+        uploader_name = "u.username" if include_uploader else "NULL"
         query = text(f"""
-            SELECT id, description, original_url, vector_score, tag_score
-            FROM (
-            SELECT 
-                i.id, 
-                i.description, 
-                i.original_url,
-                -- 零向量的余弦距离为 NaN；先归零，再参与筛选、排序和 LIMIT。
-                -- 合法余弦距离范围为 [0, 2]，NaN/NULL 均不会进入有效分支。
-                (CASE WHEN (i.embedding <=> :vector) BETWEEN 0.0 AND 2.0
-                    THEN 1 - (i.embedding <=> :vector) ELSE 0.0 END) as vector_score,
-                (CASE WHEN tm.image_id IS NOT NULL THEN 1.0 ELSE 0.0 END) as tag_score
-            FROM images i
-            LEFT JOIN (
-                SELECT DISTINCT image_id FROM image_tags
-                WHERE tag_id IN (SELECT tag_id FROM query_tag_groups)
-            ) tm ON i.id = tm.image_id
-            WHERE i.embedding IS NOT NULL
-              {filter_sql}
-            ) scored_images
-            WHERE vector_score > :threshold OR tag_score > 0
+            SELECT ranked.id, i.description, i.original_url, ranked.vector_score, ranked.tag_score,
+                   i.uploaded_by, i.is_public, {uploader_name} AS uploaded_by_username FROM (
+            SELECT id, vector_score, tag_score FROM ({scored_sql}) scored_images
+            WHERE {semantic_filter}
             ORDER BY (vector_score * :vector_weight + tag_score * :tag_weight) DESC, id DESC
             LIMIT :limit
+            ) ranked JOIN images i ON i.id = ranked.id {uploader_join}
+            ORDER BY (ranked.vector_score * :vector_weight + ranked.tag_score * :tag_weight) DESC, ranked.id DESC
         """).columns(
             Image.id, Image.description, Image.original_url,
             column("vector_score", Float), column("tag_score", Float),
-        ).add_cte(self._search_tag_groups(Tag.name == bindparam("query_text"), name="query_tag_groups"))
-        if tags:
-            query = query.add_cte(self._search_tag_groups(
-                Tag.name.in_(bindparam("filter_tags", expanding=True)), name="filter_tag_groups",
-            ))
+            Image.uploaded_by, Image.is_public, column("uploaded_by_username"),
+        ).add_cte(*ctes)
 
-        result = await session.execute(query, params)
-        rows = result.fetchall()
+        mode = "filters" if not query_vector else "hnsw" if candidate_limit else "exact"
+        with search_stage("hybrid.sql", mode=mode,
+                          limit=limit, candidate_limit=candidate_limit or 0, matched_terms=len(weights)) as stats:
+            result = await session.execute(query, params)
+            rows = result.fetchall()
+            stats["returned"] = len(rows)
 
         # Get image IDs for tag lookup and URL generation
         image_ids = [row[0] for row in rows]
 
         # Batch fetch tags with full info (level, source) - SQLAlchemy 2.0 ORM style
-        tags_map: dict[int, list[dict[str, Any]]] = {img_id: [] for img_id in image_ids}
-        if image_ids:
-            tag_stmt = (
-                select(
-                    ImageTag.image_id,
-                    Tag.id,
-                    Tag.name,
-                    Tag.level,
-                    ImageTag.source,
-                    ImageTag.sort_order,
-                    self.subject_tag_marker(),
-                )
-                .join(Tag, Tag.id == ImageTag.tag_id)
-                .where(ImageTag.image_id.in_(image_ids))
-                .order_by(ImageTag.image_id, Tag.level, ImageTag.sort_order)
-            )
-            tag_result = await session.execute(tag_stmt)
-            for tag_row in tag_result:
-                tags_map[tag_row.image_id].append({
-                    "id": tag_row.id,
-                    "name": tag_row.name,
-                    "level": tag_row.level,
-                    "source": tag_row.source,
-                    "sort_order": tag_row.sort_order,
-                    "is_subject": bool(tag_row.is_subject),
-                })
+        tags_map = await self.get_batch_image_tags_with_source(session, image_ids)
         
         # Batch fetch URLs using storage service (avoids N+1)
         url_map: dict[int, str] = {}
         if image_ids:
             from imgtag.services.storage_service import storage_service
-            images_for_url = await self.get_by_ids(session, image_ids)
-            url_map = await storage_service.get_read_urls(list(images_for_url))
-
-        # Batch fetch uploader info（用于前端展示与权限判断）
-        uploader_map: dict[int, dict[str, Any]] = {}
-        if image_ids:
-            from imgtag.models.user import User
-
-            uploader_stmt = (
-                select(
-                    Image.id.label("image_id"),
-                    Image.uploaded_by,
-                    User.username.label("uploaded_by_username"),
-                )
-                .outerjoin(User, User.id == Image.uploaded_by)
-                .where(Image.id.in_(image_ids))
-            )
-            uploader_result = await session.execute(uploader_stmt)
-            for row in uploader_result:
-                uploader_map[int(row.image_id)] = {
-                    "uploaded_by": row.uploaded_by,
-                    "uploaded_by_username": row.uploaded_by_username,
-                }
+            url_map = await storage_service.get_read_urls_by_ids(session, image_ids)
 
         # Build response
         images = []
@@ -861,7 +903,6 @@ class ImageRepository(BaseRepository[Image]):
             
             # Get URL from storage service (fallback to empty string)
             display_url = url_map.get(image_id, "")
-            uploader = uploader_map.get(int(image_id)) or {}
 
             images.append({
                 "id": image_id,
@@ -869,14 +910,15 @@ class ImageRepository(BaseRepository[Image]):
                 "tags": tags_map.get(image_id, []),
                 "description": row[1],
                 "original_url": row[2],
-                "uploaded_by": uploader.get("uploaded_by"),
-                "uploaded_by_username": uploader.get("uploaded_by_username"),
+                "uploaded_by": row[5],
+                "is_public": bool(row[6]),
+                "uploaded_by_username": row[7],
                 "similarity": final_score,
                 "vector_score": vector_score,
                 "tag_score": tag_score,
             })
 
-        return images
+        return HybridSearchResults(images, "hnsw" if candidate_limit else "exact")
 
     # ==================== Batch Operations ====================
 
@@ -918,8 +960,6 @@ class ImageRepository(BaseRepository[Image]):
         image_ids = dedup_positive_ints_keep_order(image_ids)
         if not image_ids:
             return {}
-
-        from imgtag.models.user import User
 
         uploader_map: dict[int, dict[str, Any]] = {}
         uploader_stmt = (
@@ -1051,6 +1091,7 @@ class ImageRepository(BaseRepository[Image]):
         await session.flush()
         return updated_count
 
+    @traced_search("random.query")
     async def get_random_by_tags(
         self,
         session: AsyncSession,
@@ -1101,15 +1142,17 @@ class ImageRepository(BaseRepository[Image]):
 
         stmt = (
             select(Image)
-            .options(selectinload(Image.tags))
+            .options(defer(Image.embedding, raiseload=True), selectinload(Image.tags))
             .order_by(func.random())
             .limit(count)
         )
         if conditions:
             stmt = stmt.where(and_(*conditions))
 
-        result = await session.execute(stmt)
-        images = result.scalars().all()
+        with search_stage("random.rows", limit=count, filter_tags=len(tag_names)) as stats:
+            result = await session.execute(stmt)
+            images = result.scalars().all()
+            stats["returned"] = len(images)
 
         # Batch fetch URLs using storage service (avoids N+1)
         from imgtag.services.storage_service import storage_service

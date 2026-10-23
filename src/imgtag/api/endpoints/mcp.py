@@ -49,6 +49,7 @@ from imgtag.api.dependencies import (
     verify_mcp_api_key,
 )
 from imgtag.core.logging_config import get_logger
+from imgtag.core.search_logging import traced_search
 from imgtag.core.permissions import (
     Permission,
     check_permission,
@@ -64,6 +65,7 @@ from imgtag.db.repositories import (
     tag_repository,
 )
 from imgtag.services import embedding_service
+from imgtag.services.search_service import search_service
 from imgtag.services.search_guard_service import SearchRejected, search_client_host, search_guard
 from imgtag.services.storage_service import storage_service
 from imgtag.services.task_queue import task_queue
@@ -154,9 +156,10 @@ async def _browse_images(
         limit=count,
         offset=offset,
         **visibility,
+        load_uploader=False,
     )
     images = result["images"]
-    urls = await storage_service.get_read_urls(images)
+    urls = await storage_service.get_read_urls_with_session(session, images)
 
     return {
         "match": resolved_match,
@@ -175,6 +178,7 @@ async def _browse_images(
     }
 
 
+@traced_search("mcp")
 async def _tool_search_images(arguments: dict, session: AsyncSession, api_user: dict | None) -> dict:
     keyword = arguments.get("keyword")
     match = str(arguments.get("match") or "auto").lower()
@@ -184,7 +188,7 @@ async def _tool_search_images(arguments: dict, session: AsyncSession, api_user: 
     caller = f"ip:{search_client_host.get()}"
     try:
         await search_guard.check(
-            caller, texts=(arguments.get("keyword"),), tags=arguments.get("tags"),
+            caller, texts=(arguments.get("keyword"),), tags=arguments.get("tags"), session=session,
         )
     except SearchRejected as exc:
         raise MCPUserError(str(exc)) from exc
@@ -253,14 +257,16 @@ async def _search_images_unchecked(
 
     # ---- 有 keyword：优先语义，失败按 match 策略降级 ----
     if match in ("auto", "semantic"):
+        if page != 1:
+            raise MCPUserError("智能搜索只支持第一页，最多返回 50 张；翻页请使用 match=fuzzy")
         try:
-            query_vector = await embedding_service.get_embedding(keyword)
-            results = await image_repository.hybrid_search(
+            results = await search_service.search(
                 session,
-                query_vector=query_vector,
-                query_text=keyword,
+                text=keyword,
                 limit=count,
                 tags=tags or None,
+                include_uploader=False,
+                release_connection=True,
                 **visibility,
             )
             return {
@@ -282,7 +288,7 @@ async def _search_images_unchecked(
         except Exception as e:
             if match == "semantic":
                 raise MCPUserError("语义搜索暂不可用，请稍后重试") from e
-            logger.warning(f"[MCP] 语义搜索失败，自动降级为模糊匹配: {e}")
+            logger.warning("[MCP] 语义搜索失败，自动降级为模糊匹配: %s", type(e).__name__)
 
     # 显式 fuzzy 或 auto 降级
     return await _browse_images(
@@ -565,8 +571,8 @@ _TOOL_DEFS = [
         description=(
             "图库检索。不传任何条件时随机抽取；传 tags 按标签筛选（AND 关系，所有模式硬过滤）；"
             "传 keyword 按关键词搜索：match=semantic 走语义向量搜索、fuzzy 走描述/标签名模糊匹配、"
-            "auto 优先语义失败自动降级。sort=latest 时按最新排序且支持 page 分页浏览；"
-            "random/relevance 不支持分页。"
+            "auto 优先语义失败自动降级。语义搜索只返回第一页，最多 50 张；"
+            "模糊搜索和无 keyword 的 sort=latest 浏览支持 page 分页，随机模式不支持分页。"
         ),
         input_schema={
             "type": "object",
@@ -597,14 +603,14 @@ _TOOL_DEFS = [
                     "minimum": 1,
                     "maximum": 50,
                     "default": 10,
-                    "description": "返回数量（latest 模式下为每页数量）"
+                    "description": "返回数量，最多 50 张；模糊搜索和 latest 浏览时为每页数量"
                 },
                 "page": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 10000,
                     "default": 1,
-                    "description": "页码，仅 sort=latest 时生效"
+                    "description": "页码，用于模糊搜索或无关键词的 latest 浏览；语义搜索只支持第 1 页"
                 }
             }
         },

@@ -248,6 +248,8 @@ def image_search_session(monkeypatch):
     connection = sqlite3.connect(':memory:')
 
     def cosine_distance(stored, query):
+        if stored is None or query is None:
+            return None
         left, right = json.loads(stored), json.loads(query)
         norm = math.hypot(*left) * math.hypot(*right)
         return 1 - sum(a * b for a, b in zip(left, right)) / norm if norm else None
@@ -257,6 +259,7 @@ def image_search_session(monkeypatch):
         CREATE TABLE images (id INTEGER, description TEXT, original_url TEXT,
             embedding TEXT, is_public BOOLEAN, uploaded_by INTEGER);
         CREATE TABLE tags (id INTEGER, name TEXT);
+        CREATE TABLE users (id INTEGER, username TEXT);
         CREATE TABLE image_tags (image_id INTEGER, tag_id INTEGER);
         CREATE TABLE subjects (id INTEGER, primary_tag_id INTEGER,
             alias_tag_ids TEXT, is_active BOOLEAN);
@@ -310,8 +313,7 @@ def image_search_session(monkeypatch):
         )
         return sql.replace('ILIKE', 'LIKE').replace('%%', '%')
 
-    monkeypatch.setattr(image_repository, 'get_by_ids', AsyncMock(return_value=[]))
-    monkeypatch.setattr(images.storage_service, 'get_read_urls', AsyncMock(return_value={}))
+    monkeypatch.setattr(images.storage_service, 'get_read_urls_by_ids', AsyncMock(return_value={}))
     try:
         yield SimpleNamespace(execute=execute, connection=connection)
     finally:
@@ -406,3 +408,30 @@ async def test_shared_alias_does_not_transitively_expand_other_subjects(image_se
         session, query_vector=[0.0, 1.0], query_text='doro', tags=['Doro', '其他主体'],
     )
     assert [row['id'] for row in both] == [10, 7]
+
+
+async def test_weighted_tag_coverage_counts_aliases_once_and_includes_missing_vectors(image_search_session):
+    session = image_search_session
+    session.connection.execute('UPDATE images SET embedding=NULL WHERE id=6')
+    rows = await image_repository.hybrid_search(
+        session, query_vector=[0.0, 1.0], query_text='Doro 开心',
+        query_tag_weights={'Doro': 2.0, '开心': 1.0},
+    )
+    assert len(rows) == 5
+    assert [row['id'] for row in rows] == [6, 10, 8, 7, 1]
+    assert [row['tag_score'] for row in rows] == pytest.approx([1, 2/3, 2/3, 2/3, 1/3])
+    assert rows[0]['vector_score'] == 0
+    assert rows[0]['similarity'] == pytest.approx(0.3)
+    # 同图同时包含主名、别名不会重复加分；私有图不会进入评分。
+    assert rows[1]['tag_score'] == pytest.approx(2/3)
+    filtered = await image_repository.hybrid_search(
+        session, query_vector=None, query_text='', tags=['Doro', '开心'],
+    )
+    assert [row['id'] for row in filtered] == [6]
+
+
+async def test_hybrid_single_page_limits_results_without_full_count(image_search_session):
+    params = dict(query_vector=[0.0, 1.0], query_text='doro', limit=2)
+    rows = await image_repository.hybrid_search(image_search_session, **params)
+    assert [row['id'] for row in rows] == [10, 8]
+    assert not hasattr(rows, 'total')

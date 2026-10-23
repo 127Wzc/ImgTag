@@ -577,7 +577,7 @@ def vision_transport(monkeypatch):
     values = {"vision_api_key": "secret-never-log", "vision_model": "test-model", "vision_api_base_url": "https://vision.test/v1", "vision_prompt": "全局规则" + "长文本" * 600 + "全局结束标记"}
     reads = []
 
-    async def get(key, default=None, *, fresh=False):
+    async def get(key, default=None, *, fresh=False, session=None):
         reads.append((key, fresh))
         return values.get(key, default)
 

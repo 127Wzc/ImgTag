@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.core.config_defaults import DEFAULT_CONFIG
 from imgtag.core.internal_config import INTERNAL_CONFIG_KEYS
@@ -40,7 +41,9 @@ class ConfigCache:
     # ==================== Async Read Operations ====================
     
     @classmethod
-    async def get(cls, key: str, default: str | None = None, *, fresh: bool = False) -> str | None:
+    async def get(
+        cls, key: str, default: str | None = None, *, fresh: bool = False, session: AsyncSession | None = None,
+    ) -> str | None:
         """Get configuration value with caching.
         
         Args:
@@ -52,33 +55,29 @@ class ConfigCache:
         """
         if key in INTERNAL_CONFIG_KEYS:
             return default
-        now = time.time()
-        
-        # Check cache first
-        if not fresh and now - cls._cache_time < cls._ttl and key in cls._cache:
-            return cls._cache.get(key, default)
-        
-        # Query database directly (no repository dependency)
         try:
-            async with async_session_maker() as session:
-                stmt = select(Config.value).where(Config.key == key)
-                result = await session.execute(stmt)
-                row = result.scalar_one_or_none()
-                
-                # Use default from DEFAULT_CONFIG if not in database
-                if row is None:
-                    value = default if default is not None else DEFAULT_CONFIG.get(key)
-                else:
-                    value = row
-                    
-                cls._cache[key] = value
-                cls._cache_time = now
-                return value
+            # 时间戳对应完整快照，不能用一个键的刷新延长其他旧键的有效期。
+            if fresh or time.time() - cls._cache_time >= cls._ttl:
+                await cls._load_snapshot(session)
+            fallback = default if default is not None else DEFAULT_CONFIG.get(key)
+            return cls._cache.get(key, fallback)
         except Exception as e:
             logger.warning(f"配置读取失败 [{key}]: {e}")
             if fresh:
                 raise
             return cls._cache.get(key, default)
+
+    @classmethod
+    async def _load_snapshot(cls, session: AsyncSession | None = None) -> None:
+        if session is None:
+            async with async_session_maker() as own_session:
+                await cls._load_snapshot(own_session)
+            return
+        result = await session.execute(
+            select(Config.key, Config.value).where(Config.key.not_in(INTERNAL_CONFIG_KEYS))
+        )
+        cls._cache = dict(result.fetchall())
+        cls._cache_time = time.time()
     
     @classmethod
     async def get_int(cls, key: str, default: int = 0) -> int:
@@ -138,14 +137,8 @@ class ConfigCache:
         Call this at application startup to ensure get_sync() works.
         """
         try:
-            async with async_session_maker() as session:
-                stmt = select(Config.key, Config.value).where(Config.key.not_in(INTERNAL_CONFIG_KEYS))
-                result = await session.execute(stmt)
-                rows = result.fetchall()
-                for key, value in rows:
-                    cls._cache[key] = value
-                cls._cache_time = time.time()
-                logger.info(f"配置缓存已预加载 ({len(rows)} 项)")
+            await cls._load_snapshot()
+            logger.info(f"配置缓存已预加载 ({len(cls._cache)} 项)")
         except Exception as e:
             logger.warning(f"预加载配置缓存失败: {e}")
     

@@ -332,10 +332,11 @@ function isAnyOpPending(imageId: number): boolean {
           <!-- 相似度 -->
           <div
             v-if="showSimilarity && getSimilarity(image) !== undefined"
+            title="综合相关度（语义相似度与标签匹配加权），不代表匹配概率"
             class="px-2 py-0.5 text-white text-[10px] font-bold rounded-full shadow-sm backdrop-blur-sm"
             :class="getSimilarityColor(getSimilarity(image)!)"
           >
-            {{ (getSimilarity(image)! * 100).toFixed(0) }}%
+            相关度 {{ (getSimilarity(image)! * 100).toFixed(0) }}
           </div>
         </div>
 

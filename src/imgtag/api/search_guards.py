@@ -33,12 +33,13 @@ async def get_search_user(
 async def guard_smart_search(
     request: SimilarSearchRequest, http_request: Request,
     user: dict | None = Depends(get_search_user),
+    session: AsyncSession = Depends(get_async_session),
 ) -> None:
     if user is not None:
         return
     host = http_request.client.host if http_request.client else "unknown"
     try:
-        await search_guard.check(f"ip:{host}", texts=(request.text,), tags=request.tags)
+        await search_guard.check(f"ip:{host}", texts=(request.text,), tags=request.tags, session=session)
     except SearchRejected as exc:
         headers = {"Retry-After": str(exc.retry_after)} if exc.status_code == 429 else None
         raise HTTPException(exc.status_code, detail=str(exc), headers=headers) from exc

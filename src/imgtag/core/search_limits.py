@@ -3,13 +3,18 @@
 from dataclasses import dataclass
 
 
+SMART_SEARCH_LIMIT = 50
+
 SEARCH_DEFAULTS = {
+    "search_hnsw_enabled": "false",
+    "search_hnsw_ef_search": "40",
     "search_max_text_length": "200",
     "search_rate_limit": "20",
     "search_rate_interval": "1",
     "search_rate_unit": "minute",
 }
 SEARCH_CONFIG_BOUNDS = {
+    "search_hnsw_ef_search": (40, 1000),
     "search_max_text_length": (1, 10000),
     "search_rate_limit": (1, 1000),
     "search_rate_interval": (1, 60),
@@ -18,6 +23,8 @@ SEARCH_TIME_UNITS = {"second": 1, "minute": 60, "hour": 3600}
 
 
 def validate_search_config(configs: dict[str, str]) -> None:
+    if "search_hnsw_enabled" in configs and configs["search_hnsw_enabled"] not in {"true", "false"}:
+        raise ValueError("HNSW 开关必须是 true 或 false")
     for key, (minimum, maximum) in SEARCH_CONFIG_BOUNDS.items():
         if key not in configs:
             continue

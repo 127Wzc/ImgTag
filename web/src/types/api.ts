@@ -81,6 +81,8 @@ export interface ImageResponse {
 
 export interface ImageWithSimilarity extends ImageResponse {
     similarity: number
+    vector_score?: number
+    tag_score?: number
 }
 
 export interface ImageSearchRequest {
@@ -109,15 +111,17 @@ export interface SimilarSearchRequest {
     tags?: string[]
     category_id?: number
     resolution_id?: number
-    // Page/Size 风格分页
-    page?: number
+    // 智能搜索只返回第一页，size 最大 50。
+    page?: 1
     size?: number
     threshold?: number
     vector_weight?: number
     tag_weight?: number
 }
 
-export interface SimilarSearchResponse extends PaginatedResponse<ImageWithSimilarity> { }
+export interface SimilarSearchResponse extends PaginatedResponse<ImageWithSimilarity> {
+    search_mode?: 'exact' | 'hnsw'
+}
 
 export interface UploadAnalyzeResponse {
     id: number

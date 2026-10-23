@@ -19,11 +19,11 @@ from imgtag.api.endpoints.auth import require_admin
 from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger, get_perf_logger
 from imgtag.db import get_async_session
-from imgtag.db.database import engine
-from imgtag.db.repositories import image_repository, config_repository
+from imgtag.db.repositories import image_repository
 from imgtag.services import embedding_service
 from imgtag.services.vector_rebuild_service import vector_rebuild_service
 from imgtag.services.vector_maintenance_service import vector_maintenance_service
+from imgtag.services.vector_index_service import vector_index_service
 from imgtag.services.task_queue import task_queue
 
 logger = get_logger(__name__)
@@ -33,6 +33,30 @@ router = APIRouter()
 
 # 重建状态由 Service 统一维护。
 rebuild_status = vector_rebuild_service.status
+
+
+@router.get("/index/status")
+async def get_index_status(
+    admin: dict = Depends(require_admin), session: AsyncSession = Depends(get_async_session),
+):
+    return await vector_index_service.status(session)
+
+
+@router.post("/index/build", status_code=202)
+async def build_vector_index(
+    background_tasks: BackgroundTasks, force: bool = Query(False), admin: dict = Depends(require_admin),
+):
+    try:
+        job = await vector_index_service.prepare(force=force)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except SQLAlchemyError as exc:
+        logger.exception("准备索引维护失败")
+        raise HTTPException(503, "无法准备索引维护，请检查数据库") from exc
+    if job is None:
+        return {"message": "已有可用索引，无需重建", "started": False}
+    background_tasks.add_task(vector_index_service.run, *job)
+    return {"message": "索引维护已启动，搜索继续可用", "started": True}
 
 
 @router.get("/anomalies")
@@ -85,16 +109,9 @@ async def get_vector_status(
 
         if mode == "local":
             model = await config_cache.get("embedding_local_model", "BAAI/bge-small-zh-v1.5") or "BAAI/bge-small-zh-v1.5"
-            if "small" in model:
-                dimensions = 512
-            elif "base" in model:
-                dimensions = 768
-            else:
-                dimensions = 512
         else:
             model = await config_cache.get("embedding_model", "text-embedding-3-small") or "text-embedding-3-small"
-            dim_str = await config_cache.get("embedding_dimensions", "1536")
-            dimensions = int(dim_str) if dim_str else 1536
+        dimensions = await embedding_service.get_dimensions()
 
         db_dimensions = await get_db_vector_dimensions(session)
 
@@ -285,53 +302,14 @@ async def resize_vector_table(
         Resize result.
     """
     try:
-        mode = await config_cache.get("embedding_mode", "local") or "local"
-
-        if mode == "local":
-            model_name = await config_cache.get("embedding_local_model", "BAAI/bge-small-zh-v1.5") or "BAAI/bge-small-zh-v1.5"
-            if "small" in model_name:
-                new_dim = 512
-            elif "base" in model_name:
-                new_dim = 768
-            else:
-                new_dim = 512
-        else:
-            dim_str = await config_cache.get("embedding_dimensions", "1536")
-            new_dim = int(dim_str) if dim_str else 1536
-
-        current_dim = await get_db_vector_dimensions(session)
-
-        if current_dim == new_dim:
-            return {"message": f"数据库维度已经是 {new_dim}，无需修改"}
-
-        logger.info(f"修改向量维度: {current_dim} -> {new_dim}")
-
-        # Use raw connection for DDL
-        conn = await session.connection()
-        await conn.execute(text("DROP INDEX IF EXISTS idx_images_embedding"))
-        await conn.execute(text(f"""
-            ALTER TABLE images 
-            ALTER COLUMN embedding TYPE vector({new_dim})
-            USING (ARRAY_FILL(0::float, ARRAY[{new_dim}])::vector({new_dim}))
-        """))
-        await conn.execute(text(f"""
-            CREATE INDEX idx_images_embedding ON public.images 
-            USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)
-        """))
-
-        await config_repository.set_value(session, "embedding_dimensions", str(new_dim))
-        await session.commit()
-        await config_cache.refresh()
-
-        # ALTER TABLE 会导致 asyncpg 预编译语句缓存失效；主动回收连接池，避免后续请求随机 500
-        background_tasks.add_task(engine.dispose)
-
-        logger.info(f"向量维度修改成功: {new_dim}")
-        return {"message": f"数据库向量维度已修改为 {new_dim}，请重建向量数据"}
-
-    except Exception as e:
-        logger.error(f"修改向量维度失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        dimensions = await vector_rebuild_service.resize(session)
+        return {"message": f"数据库向量维度为 {dimensions}，请回填向量后按需构建索引"}
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except SQLAlchemyError as exc:
+        await session.rollback()
+        logger.exception("修改向量维度失败")
+        raise HTTPException(500, "修改向量维度失败，请检查数据库") from exc
 
 
 @router.post("/rebuild", response_model=dict[str, str])

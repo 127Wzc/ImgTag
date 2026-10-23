@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from imgtag.core.search_logging import search_stage
 from imgtag.db.repositories.base import BaseRepository
 from imgtag.models.subject import ImageSubject, Subject, SubjectSample
 from imgtag.models.tag import ImageTag, Tag
@@ -381,10 +382,13 @@ class ImageSubjectRepository(BaseRepository[ImageSubject]):
             .where(ImageSubject.image_id.in_(image_ids), ImageSubject.is_current.is_(True))
             .order_by(ImageSubject.image_id, ImageSubject.is_primary.desc(), ImageSubject.id.asc())
         )
-        result = await session.execute(stmt)
+        with search_stage("subjects.batch", images=len(image_ids)) as stats:
+            result = await session.execute(stmt)
+            rows = result.fetchall()
+            stats["rows"] = len(rows)
 
         out: dict[int, list[dict[str, Any]]] = {iid: [] for iid in image_ids}
-        for row in result.fetchall():
+        for row in rows:
             confidence = float(row.confidence) if row.confidence is not None else None
             out[int(row.image_id)].append(
                 {

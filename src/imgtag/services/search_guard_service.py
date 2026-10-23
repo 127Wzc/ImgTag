@@ -7,6 +7,8 @@ from itertools import chain
 from math import ceil
 from time import monotonic
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from imgtag.core.config_cache import config_cache
 from imgtag.core.logging_config import get_logger
 from imgtag.core.search_limits import SEARCH_DEFAULTS, SearchPolicy
@@ -28,8 +30,9 @@ class SearchGuardService:
     def __init__(self):
         self._callers: dict[str, deque[float]] = {}
 
-    async def load_policy(self) -> SearchPolicy:
-        values = {key: await config_cache.get(key, default) for key, default in SEARCH_DEFAULTS.items()}
+    async def load_policy(self, *, session: AsyncSession | None = None) -> SearchPolicy:
+        values = {key: await config_cache.get(key, default, session=session)
+                  for key, default in SEARCH_DEFAULTS.items() if not key.startswith('search_hnsw_')}
         try:
             return SearchPolicy.from_config(values)
         except ValueError:
@@ -49,8 +52,9 @@ class SearchGuardService:
 
     async def check(
         self, caller: str, *, texts: Sequence[str | None] = (), tags: list[str] | None = None,
+        session: AsyncSession | None = None,
     ) -> None:
-        policy = await self.load_policy()
+        policy = await self.load_policy(session=session)
         self.validate_inputs(policy, texts, tags)
         now = monotonic()
         cutoff = now - policy.window_seconds
