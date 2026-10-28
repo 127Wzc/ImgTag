@@ -12,6 +12,7 @@ import random
 import re
 import tempfile
 from typing import Optional, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -440,7 +441,7 @@ class StorageService:
         URL 构建优先级：
         1. public_url_prefix - 用于 CDN 或自定义域名
         2. 本地端点 - 使用 /data/{bucket}/... 格式
-        3. S3 端点 - 使用 endpoint_url/{bucket}/... 格式
+        3. S3 端点 - 根据 path_style 将 bucket 放在路径或子域名中
         
         Args:
             endpoint: Storage endpoint configuration.
@@ -461,8 +462,10 @@ class StorageService:
             if endpoint.provider == StorageProvider.LOCAL:
                 # 本地端点需要 /data/ 路由前缀
                 return f"{prefix}/data/{bucket}/{full_path}"
-            # S3 等远程端点直接拼接
-            return f"{prefix}/{bucket}/{full_path}"
+            # 服务地址沿用追加桶名的行为；桶专属域名直接拼接对象路径。
+            if endpoint.public_url_include_bucket:
+                return f"{prefix}/{bucket}/{full_path}"
+            return f"{prefix}/{full_path}"
         
         # 2. 本地端点使用动态路由
         if endpoint.provider == StorageProvider.LOCAL:
@@ -471,7 +474,12 @@ class StorageService:
         # 3. S3 端点使用 endpoint_url
         if endpoint.endpoint_url and bucket:
             base = endpoint.endpoint_url.rstrip("/")
-            return f"{base}/{bucket}/{full_path}"
+            if endpoint.path_style:
+                return f"{base}/{bucket}/{full_path}"
+            # 虚拟主机风格将 bucket 放到域名前，保留端口和端点路径。
+            parts = urlsplit(base)
+            base = urlunsplit(parts._replace(netloc=f"{bucket}.{parts.netloc}"))
+            return f"{base}/{full_path}"
         
         return ""
 

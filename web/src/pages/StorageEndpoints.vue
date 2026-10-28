@@ -2,6 +2,9 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { getErrorMessage } from '@/utils/api-error'
 import { notifyError, notifySuccess } from '@/utils/notify'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
@@ -15,6 +18,7 @@ import {
   Trash2,
   Play,
   TestTube,
+  Check,
   CheckCircle,
   XCircle,
   Star,
@@ -46,6 +50,7 @@ interface StorageEndpoint {
   access_key_id: string | null  // 明文，前端显示时伪装
   secret_access_key: string | null  // 明文，前端显示时伪装
   public_url_prefix: string | null
+  public_url_include_bucket: boolean
   path_prefix: string
   path_style: boolean
   role: string
@@ -93,6 +98,7 @@ const form = ref({
   access_key_id: '',
   secret_access_key: '',
   public_url_prefix: '',
+  public_url_include_bucket: true,
   path_prefix: '',
   path_style: true,
   role: 'primary',
@@ -122,26 +128,35 @@ const isLocal = computed(() => form.value.provider === 'local')
 // URL 预览计算
 const urlPreview = computed(() => {
   const bucket = form.value.bucket_name || 'uploads'
-  const prefix = form.value.public_url_prefix?.replace(/\/$/, '') || ''
-  const pathPrefix = form.value.path_prefix?.replace(/^\/|\/$/g, '') || ''
+  const prefix = form.value.public_url_prefix?.replace(/\/+$/, '') || ''
+  const pathPrefix = form.value.path_prefix?.replace(/^\/+|\/+$/g, '') || ''
   const example = 'example.jpg'
+  const fullPath = pathPrefix ? `${pathPrefix}/${example}` : example
   
   if (prefix) {
     // 有 CDN/公开 URL
-    return pathPrefix 
-      ? `${prefix}/${bucket}/${pathPrefix}/${example}`
-      : `${prefix}/${bucket}/${example}`
+    return isLocal.value
+      ? `${prefix}/data/${bucket}/${fullPath}`
+      : form.value.public_url_include_bucket
+        ? `${prefix}/${bucket}/${fullPath}`
+        : `${prefix}/${fullPath}`
   } else if (isLocal.value) {
     // 本地相对路径
-    return pathPrefix 
-      ? `/${bucket}/${pathPrefix}/${example}`
-      : `/${bucket}/${example}`
+    return `/data/${bucket}/${fullPath}`
   } else {
     // S3 直接 URL
-    const endpoint = form.value.endpoint_url?.replace(/\/$/, '') || 'https://s3.example.com'
-    return pathPrefix 
-      ? `${endpoint}/${bucket}/${pathPrefix}/${example}`
-      : `${endpoint}/${bucket}/${example}`
+    const endpoint = form.value.endpoint_url?.replace(/\/+$/, '') || 'https://s3.example.com'
+    if (form.value.path_style) {
+      return `${endpoint}/${bucket}/${fullPath}`
+    }
+    try {
+      const url = new URL(endpoint)
+      url.hostname = `${bucket}.${url.hostname}`
+      return `${url.toString().replace(/\/+$/, '')}/${fullPath}`
+    } catch {
+      // 输入端点地址的过程中可能暂时不是合法 URL。
+      return '请输入有效的端点 URL'
+    }
   }
 })
 
@@ -182,6 +197,7 @@ function openCreate() {
     access_key_id: '',
     secret_access_key: '',
     public_url_prefix: '',
+    public_url_include_bucket: true,
     path_prefix: '',
     path_style: true,
     role: 'primary',
@@ -205,6 +221,7 @@ function openEdit(ep: StorageEndpoint) {
     access_key_id: ep.access_key_id || '',  // 从 API 加载
     secret_access_key: ep.secret_access_key || '',  // 从 API 加载
     public_url_prefix: ep.public_url_prefix || '',
+    public_url_include_bucket: ep.public_url_include_bucket ?? true,
     path_prefix: ep.path_prefix,
     path_style: ep.path_style ?? true,
     role: ep.role,
@@ -574,256 +591,260 @@ onUnmounted(() => {
       <Transition name="fade">
         <div v-if="showDialog" class="fixed inset-0 z-50 flex items-center justify-center">
           <div class="absolute inset-0 bg-black/50" @click="showDialog = false" />
-          <div class="relative bg-card border border-border rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto m-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="endpoint-dialog-title" class="relative flex flex-col bg-card border border-border rounded-lg shadow-lg w-full max-w-3xl max-h-[calc(100dvh-2rem)] overflow-hidden m-4">
             <!-- 头部 -->
-            <div class="flex items-center justify-between p-5 border-b border-border">
-              <h2 class="text-lg font-semibold text-foreground">
+            <div class="flex shrink-0 items-center justify-between px-5 py-3 border-b border-border">
+              <h2 id="endpoint-dialog-title" class="text-lg font-semibold text-foreground">
                 {{ editingEndpoint ? '编辑端点' : '创建端点' }}
               </h2>
-              <button @click="showDialog = false" class="p-2 hover:bg-muted rounded-lg">
+              <button @click="showDialog = false" class="p-1.5 hover:bg-muted rounded-lg" aria-label="关闭">
                 <X class="w-5 h-5 text-muted-foreground" />
               </button>
             </div>
 
             <!-- 表单 -->
-            <div class="p-5 space-y-4">
-              <!-- 默认端点提示 -->
-              <div v-if="isDefaultEndpoint" class="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-sm text-amber-600 dark:text-amber-400">
-                默认本地端点只能修改 Bucket 和公开 URL 前缀
-              </div>
-
-              <!-- 名称 -->
-              <div class="space-y-1.5">
-                <label class="block text-sm font-medium">端点名称</label>
-                <input 
-                  v-model="form.name"
-                  type="text"
-                  class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
-                  placeholder="如: 阿里云主存储"
-                  :disabled="isDefaultEndpoint"
-                />
-              </div>
-
-              <!-- 类型 (隐藏默认端点的类型选择) -->
-              <div v-if="!isDefaultEndpoint" class="space-y-1.5">
-                <label class="block text-sm font-medium">存储类型</label>
-                <div class="grid grid-cols-3 gap-2">
-                  <button
-                    v-for="p in providers"
-                    :key="p.value"
-                    @click="form.provider = p.value"
-                    class="p-3 rounded-xl border text-center transition-all text-sm"
-                    :class="form.provider === p.value 
-                      ? 'bg-primary/10 border-primary' 
-                      : 'bg-muted/30 border-border hover:bg-muted/50'"
-                  >
-                    <component :is="p.icon" class="w-5 h-5 mx-auto mb-1" />
-                    {{ p.label.split(' ')[0] }}
-                  </button>
+            <div class="min-h-0 overflow-y-auto px-4 py-3 sm:px-5 space-y-2.5">
+              <div class="grid gap-3 sm:grid-cols-2">
+                <!-- 名称与类型 -->
+                <div class="space-y-1" :class="{ 'sm:col-span-2': isDefaultEndpoint }">
+                  <label for="endpoint-name" class="block text-sm font-medium">端点名称</label>
+                  <Input
+                    id="endpoint-name"
+                    v-model="form.name"
+                    type="text"
+                    placeholder="如: 阿里云主存储"
+                    :disabled="isDefaultEndpoint"
+                  />
                 </div>
+
+                <!-- 类型 (隐藏默认端点的类型选择) -->
+                <div v-if="!isDefaultEndpoint" class="space-y-1">
+                  <label class="block text-sm font-medium">存储类型</label>
+                  <div class="grid grid-cols-2 gap-2">
+                    <Button
+                      v-for="p in providers"
+                      :key="p.value"
+                      @click="form.provider = p.value"
+                      :aria-pressed="form.provider === p.value"
+                      type="button"
+                      :variant="form.provider === p.value ? 'default' : 'outline'"
+                      class="relative w-full px-6"
+                    >
+                      <component :is="p.icon" class="w-4 h-4" />
+                      {{ p.label.split(' ')[0] }}
+                      <Check v-if="form.provider === p.value" class="absolute right-2 w-3.5 h-3.5" aria-hidden="true" />
+                    </Button>
+                  </div>
+                </div>
+
               </div>
 
               <!-- S3 专属配置 -->
               <template v-if="isS3Like && !isDefaultEndpoint">
-                <div class="space-y-1.5">
-                  <label class="block text-sm font-medium">端点 URL</label>
-                  <input 
-                    v-model="form.endpoint_url"
-                    type="text"
-                    class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                    placeholder="https://s3.amazonaws.com"
-                  />
+                <div class="grid grid-cols-[minmax(0,1fr)_6rem] sm:grid-cols-[minmax(0,1fr)_8rem] gap-3">
+                  <div class="min-w-0 space-y-1">
+                    <label for="endpoint-url" class="block text-sm font-medium">端点 URL</label>
+                    <Input
+                      id="endpoint-url"
+                      v-model="form.endpoint_url"
+                      type="text"
+                      placeholder="https://s3.amazonaws.com"
+                    />
+                  </div>
+
+                  <div class="space-y-1">
+                    <label for="endpoint-region" class="block text-sm font-medium">区域</label>
+                    <Input
+                      id="endpoint-region"
+                      v-model="form.region"
+                      type="text"
+                      placeholder="auto"
+                    />
+                  </div>
+
                 </div>
 
-                <div class="space-y-1.5">
-                  <label class="block text-sm font-medium">区域</label>
-                  <input 
-                    v-model="form.region"
-                    type="text"
-                    class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                    placeholder="auto"
-                  />
-                </div>
-
-                <div class="grid grid-cols-2 gap-4">
-                  <div class="space-y-1.5">
-                    <label class="block text-sm font-medium">Access Key ID</label>
-                    <input 
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div class="space-y-1">
+                    <label for="endpoint-access-key" class="block text-sm font-medium">Access Key ID</label>
+                    <Input
+                      id="endpoint-access-key"
                       v-model="form.access_key_id"
                       :type="showCredentials ? 'text' : 'password'"
-                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                      class="font-mono"
                       placeholder=""
                     />
                   </div>
-                  <div class="space-y-1.5">
-                    <label class="block text-sm font-medium">Secret Access Key</label>
-                    <input 
+                  <div class="space-y-1">
+                    <label for="endpoint-secret-key" class="block text-sm font-medium">Secret Access Key</label>
+                    <Input
+                      id="endpoint-secret-key"
                       v-model="form.secret_access_key"
                       :type="showCredentials ? 'text' : 'password'"
-                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                      class="font-mono"
                       placeholder=""
                     />
                   </div>
                 </div>
-                <label class="flex items-center gap-2 cursor-pointer text-sm text-muted-foreground">
-                  <input 
-                    v-model="showCredentials"
-                    type="checkbox"
-                    class="w-3.5 h-3.5 rounded border-border"
-                  />
-                  <span>显示密钥</span>
-                </label>
+                <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
+                  <label class="flex items-center gap-2 cursor-pointer text-sm text-muted-foreground">
+                    <Checkbox :model-value="showCredentials" @update:model-value="showCredentials = $event === true" />
+                    <span>显示密钥</span>
+                  </label>
 
-                <label class="flex items-center gap-3 cursor-pointer">
-                  <input 
-                    v-model="form.path_style"
-                    type="checkbox"
-                    class="w-4 h-4 rounded border-border"
-                  />
-                  <div>
-                    <span class="text-sm">使用路径风格 (Path Style)</span>
-                    <p class="text-xs text-muted-foreground">S3 兼容存储推荐开启</p>
-                  </div>
-                </label>
+                  <label class="flex items-center gap-2 cursor-pointer" title="控制 S3 请求中的桶名位置，不影响公开地址类型">
+                    <Checkbox :model-value="form.path_style" @update:model-value="form.path_style = $event === true" />
+                    <span class="text-sm">路径风格 (Path Style)</span>
+                  </label>
+                </div>
               </template>
 
               <!-- 通用存储配置 (所有端点) -->
-              <div class="space-y-4 pt-2 border-t border-border/50">
-                <div class="grid grid-cols-2 gap-4">
-                  <div class="space-y-1.5">
-                    <label class="block text-sm font-medium">
+              <div class="space-y-2.5 pt-3 border-t border-border/50">
+                <div class="grid grid-cols-2 gap-3">
+                  <div class="space-y-1" :class="{ 'col-span-2': isDefaultEndpoint }">
+                    <label for="endpoint-bucket" class="block text-sm font-medium">
                       {{ isLocal ? '存储目录 (Bucket)' : 'Bucket 名称' }}
                     </label>
-                    <input 
+                    <Input
+                      id="endpoint-bucket"
                       v-model="form.bucket_name"
                       type="text"
-                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
                       :placeholder="isLocal ? 'uploads' : 'my-bucket'"
                       :disabled="!!(editingEndpoint && editingEndpoint.location_count > 0)"
                     />
-                    <p class="text-xs text-muted-foreground">
-                      <template v-if="editingEndpoint && editingEndpoint.location_count > 0">
-                        <span class="text-amber-500">⚠ 有 {{ editingEndpoint.location_count }} 张关联图片，无法修改</span>
-                      </template>
-                      <template v-else>
-                        {{ isLocal ? '相对于项目根目录的存储路径' : 'S3 存储桶名称' }}
-                      </template>
-                    </p>
                   </div>
-                  <div v-if="!isDefaultEndpoint" class="space-y-1.5">
-                    <label class="block text-sm font-medium">路径前缀</label>
-                    <input 
+                  <div v-if="!isDefaultEndpoint" class="space-y-1">
+                    <label for="endpoint-path-prefix" class="block text-sm font-medium">路径前缀</label>
+                    <Input
+                      id="endpoint-path-prefix"
                       v-model="form.path_prefix"
                       type="text"
-                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
-                      placeholder="images/"
+                      placeholder="可选，如 images/"
                       :disabled="!!(editingEndpoint && editingEndpoint.location_count > 0)"
                     />
-                    <p v-if="editingEndpoint && editingEndpoint.location_count > 0" class="text-xs text-amber-500">
-                      ⚠ 有 {{ editingEndpoint.location_count }} 张关联图片，无法修改
-                    </p>
                   </div>
                 </div>
 
-                <div class="space-y-1.5">
-                  <label class="block text-sm font-medium">公开 URL 前缀</label>
-                  <input 
-                    v-model="form.public_url_prefix"
-                    type="text"
-                    class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                    placeholder="https://cdn.example.com"
-                  />
-                  <p class="text-xs text-muted-foreground">
-                    {{ isLocal 
-                      ? 'CDN 或反向代理地址，留空则使用相对路径 (如 /uploads/...)' 
-                      : 'CDN 地址，留空则使用 S3 端点直接访问' 
-                    }}
-                  </p>
+                <p v-if="editingEndpoint && editingEndpoint.location_count > 0" class="text-xs text-amber-600 dark:text-amber-400">
+                  已关联 {{ editingEndpoint.location_count }} 张图片，存储目录与路径前缀已锁定
+                </p>
+
+                <div class="grid gap-3" :class="{ 'sm:grid-cols-[minmax(0,1fr)_14rem]': isS3Like && form.public_url_prefix }">
+                  <div class="min-w-0 space-y-1">
+                    <label for="endpoint-public-url" class="block text-sm font-medium">公开 URL 前缀</label>
+                    <Input
+                      id="endpoint-public-url"
+                      v-model="form.public_url_prefix"
+                      type="text"
+                      placeholder="https://cdn.example.com"
+                    />
+                  </div>
+                  <div v-if="isS3Like && form.public_url_prefix" class="space-y-1">
+                    <label for="public-url-type" class="block text-sm font-medium">公开地址类型</label>
+                    <Select
+                      :model-value="form.public_url_include_bucket ? 'service' : 'bucket'"
+                      @update:model-value="form.public_url_include_bucket = $event === 'service'"
+                    >
+                      <SelectTrigger id="public-url-type" class="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="service">服务地址（追加桶名）</SelectItem>
+                        <SelectItem value="bucket">桶专属地址（不追加桶名）</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
+                <p class="text-xs text-muted-foreground">
+                  {{ isLocal ? '留空使用本站地址' : 'R2 填写公开域名，选择桶专属地址' }}
+                </p>
 
                 <!-- URL 预览 -->
-                <div class="p-3 bg-muted/30 rounded-xl">
-                  <p class="text-xs text-muted-foreground mb-1">生成的访问 URL 示例：</p>
-                  <code class="text-xs text-primary break-all">{{ urlPreview }}</code>
+                <div class="px-3 py-2 bg-muted/40 rounded-md">
+                  <p class="text-xs text-muted-foreground mb-1">访问地址示例</p>
+                  <code class="block text-xs text-foreground break-all">{{ urlPreview }}</code>
                 </div>
               </div>
 
-              <!-- 读取策略配置 (所有端点通用) -->
-              <div class="space-y-4 pt-2 border-t border-border/50">
-                <p class="text-xs text-muted-foreground">读取策略：优先级相同时按权重随机负载均衡</p>
-                <div class="grid grid-cols-2 gap-4">
-                  <div class="space-y-1.5">
-                    <label class="block text-sm font-medium">读取优先级</label>
-                    <input 
-                      v-model.number="form.read_priority"
-                      type="number"
-                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                    />
-                    <p class="text-xs text-muted-foreground">数值越小优先级越高</p>
-                  </div>
-                  <div class="space-y-1.5">
-                    <label class="block text-sm font-medium">负载权重</label>
-                    <input 
-                      v-model.number="form.read_weight"
-                      type="number"
-                      min="0"
-                      class="w-full px-3 py-2 bg-muted/50 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                    />
-                    <p class="text-xs text-muted-foreground">权重越大越容易被选中 (0=不参与)</p>
-                  </div>
-                </div>
-              </div>
-
-              <!-- 开关选项 (非默认端点) -->
-              <div v-if="!isDefaultEndpoint" class="space-y-4 pt-2 border-t border-border/50">
-                <!-- 角色选择 -->
-                <div class="space-y-1.5">
-                  <label class="block text-sm font-medium">端点角色</label>
-                  <div class="grid grid-cols-3 gap-2">
-                    <button
-                      v-for="r in roles"
-                      :key="r.value"
-                      @click="form.role = r.value"
-                      class="p-2 rounded-xl border text-center transition-all text-sm"
-                      :class="form.role === r.value 
-                        ? 'bg-primary/10 border-primary' 
-                        : 'bg-muted/30 border-border hover:bg-muted/50'"
-                    >
-                      <div class="font-medium">{{ r.label }}</div>
-                      <div class="text-xs text-muted-foreground">{{ r.description }}</div>
-                    </button>
+              <details class="group pt-3 border-t border-border/50">
+                <summary class="flex items-center justify-between cursor-pointer list-none text-sm">
+                  <span class="font-medium">高级设置</span>
+                  <span class="flex items-center gap-2 text-xs text-muted-foreground">
+                    读取策略{{ !isDefaultEndpoint ? '、端点角色' : '' }}
+                    <ChevronDown class="w-4 h-4 transition-transform group-open:rotate-180" />
+                  </span>
+                </summary>
+                <!-- 读取策略配置 (所有端点通用) -->
+                <div class="space-y-3 mt-3">
+                  <div class="grid grid-cols-2 gap-3">
+                    <div class="space-y-1">
+                      <label for="endpoint-priority" class="block text-sm font-medium">读取优先级</label>
+                      <Input
+                        id="endpoint-priority"
+                        v-model.number="form.read_priority"
+                        type="number"
+                      />
+                      <p class="text-xs text-muted-foreground">数值越小越优先</p>
+                    </div>
+                    <div class="space-y-1">
+                      <label for="endpoint-weight" class="block text-sm font-medium">负载权重</label>
+                      <Input
+                        id="endpoint-weight"
+                        v-model.number="form.read_weight"
+                        type="number"
+                        min="0"
+                      />
+                      <p class="text-xs text-muted-foreground">同优先级按权重分配</p>
+                    </div>
                   </div>
                 </div>
 
-                <!-- 备份端点提示 -->
-                <div v-if="form.role === 'backup'" class="p-3 bg-blue-500/10 border border-blue-500/30 rounded-xl">
-                  <p class="text-sm text-blue-600 dark:text-blue-400">
-                    💾 备份端点会自动同步所有上传到主端点的图片。系统仅允许一个备份端点。
+                <!-- 开关选项 (非默认端点) -->
+                <div v-if="!isDefaultEndpoint" class="space-y-3 mt-3">
+                  <!-- 角色选择 -->
+                  <div class="space-y-1">
+                    <label class="block text-sm font-medium">端点角色</label>
+                    <div class="grid grid-cols-2 gap-2">
+                      <Button
+                        v-for="r in roles"
+                        :key="r.value"
+                        @click="form.role = r.value"
+                        :aria-pressed="form.role === r.value"
+                        :title="r.description"
+                        type="button"
+                        :variant="form.role === r.value ? 'default' : 'outline'"
+                        class="relative w-full px-6"
+                      >
+                        <div class="font-medium">{{ r.label }}</div>
+                        <Check v-if="form.role === r.value" class="absolute right-2 w-3.5 h-3.5" aria-hidden="true" />
+                      </Button>
+                    </div>
+                  </div>
+
+                  <!-- 备份端点提示 -->
+                  <p v-if="form.role === 'backup'" class="text-xs text-muted-foreground">
+                    自动同步主端点图片，仅限一个备份端点
                   </p>
-                </div>
 
-                <!-- 其他开关 -->
+                </div>
+              </details>
+
+              <!-- 其他开关 -->
+              <div v-if="!isDefaultEndpoint" class="flex flex-wrap items-center gap-x-6 gap-y-2">
                 <label class="flex items-center gap-3 cursor-pointer">
-                  <input 
-                    v-model="form.is_enabled"
-                    type="checkbox"
-                    class="w-4 h-4 rounded border-border"
-                  />
-                  <span class="text-sm">启用此端点</span>
+                  <Checkbox :model-value="form.is_enabled" @update:model-value="form.is_enabled = $event === true" />
+                  <span class="text-sm">启用端点</span>
                 </label>
                 <label class="flex items-center gap-3 cursor-pointer">
-                  <input 
-                    v-model="form.is_default_upload"
-                    type="checkbox"
-                    class="w-4 h-4 rounded border-border"
-                  />
-                  <span class="text-sm">设为默认上传端点</span>
+                  <Checkbox :model-value="form.is_default_upload" @update:model-value="form.is_default_upload = $event === true" />
+                  <span class="text-sm">默认上传</span>
                 </label>
               </div>
             </div>
 
             <!-- 底部按钮 -->
-            <div class="flex justify-end gap-2 p-5 border-t border-border">
+            <div class="flex shrink-0 justify-end gap-2 px-5 py-3 border-t border-border">
               <Button variant="outline" @click="showDialog = false">取消</Button>
               <Button @click="saveEndpoint" :disabled="saving">
                 <Loader2 v-if="saving" class="w-4 h-4 mr-2 animate-spin" />

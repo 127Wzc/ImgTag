@@ -23,6 +23,10 @@ uv run python scripts/test_db_init.py
 
 ## 修改数据库结构
 
+### 存储公开地址升级
+
+`0009_public_url_addressing` 为存储端点新增 `public_url_include_bucket`，升级前运行 `uv run alembic upgrade head`（应用启动也会执行迁移）。已有配置默认保持在公开前缀后追加桶名；R2 自定义域名、`r2.dev` 或已包含桶名的公开前缀，应在端点设置中选择“桶专属地址”。该选项不改变物理文件、对象键或 S3 请求的路径风格。
+
 ### 搜索索引升级
 
 `0008_search_indexes` 添加标签反向索引并删除两个历史 IVFFlat 索引，描述、标签和向量数据不变。迁移使用并发索引操作，建议低峰升级；中断后可重新执行。

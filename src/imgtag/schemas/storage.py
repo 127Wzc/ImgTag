@@ -35,6 +35,7 @@ class EndpointResponse(BaseSchema):
     access_key_id: Optional[str] = None
     secret_access_key: Optional[str] = None
     public_url_prefix: Optional[str] = None
+    public_url_include_bucket: bool = True
     path_prefix: str = ""
     role: str
     is_enabled: bool
@@ -87,6 +88,7 @@ class EndpointCreate(BaseModel):
     access_key_id: Optional[str] = None
     secret_access_key: Optional[str] = None
     public_url_prefix: Optional[str] = None
+    public_url_include_bucket: bool = True
     path_prefix: str = ""
     role: str = "primary"
     is_enabled: bool = True
@@ -108,6 +110,7 @@ class EndpointUpdate(BaseModel):
     access_key_id: Optional[str] = None
     secret_access_key: Optional[str] = None
     public_url_prefix: Optional[str] = None
+    public_url_include_bucket: bool = True
     path_prefix: Optional[str] = None
     role: Optional[str] = None
     is_enabled: Optional[bool] = None

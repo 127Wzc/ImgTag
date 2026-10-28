@@ -39,6 +39,8 @@ class ImageLocationRepository(BaseRepository[ImageLocation]):
                           ImageLocation.object_key, raiseload=True),
                 load_only(StorageEndpoint.id, StorageEndpoint.provider, StorageEndpoint.endpoint_url,
                           StorageEndpoint.bucket_name, StorageEndpoint.path_prefix, StorageEndpoint.public_url_prefix,
+                          StorageEndpoint.path_style,
+                          StorageEndpoint.public_url_include_bucket,
                           StorageEndpoint.is_enabled, StorageEndpoint.read_priority, StorageEndpoint.read_weight,
                           raiseload=True),
             )

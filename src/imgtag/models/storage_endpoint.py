@@ -31,6 +31,7 @@ class StorageEndpoint(Base, TimestampMixin):
         access_key_id: Encrypted access key ID.
         secret_access_key: Encrypted secret access key.
         public_url_prefix: CDN or public access URL prefix.
+        public_url_include_bucket: Whether public URLs append the bucket name.
         path_prefix: Object key prefix for organization.
         role: Endpoint role (primary/backup).
         is_enabled: Whether endpoint is active.
@@ -78,6 +79,10 @@ class StorageEndpoint(Base, TimestampMixin):
     # Public access configuration
     public_url_prefix: Mapped[Optional[str]] = mapped_column(
         Text, comment="CDN或公开访问前缀"
+    )
+    public_url_include_bucket: Mapped[bool] = mapped_column(
+        Boolean, server_default="true", nullable=False,
+        comment="公开URL前缀后是否追加桶名(true=服务地址, false=桶专属地址)"
     )
     path_prefix: Mapped[str] = mapped_column(
         String(100), server_default="", nullable=False, comment="对象路径前缀"
