@@ -2,6 +2,7 @@
 import { computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import Sidebar from './Sidebar.vue'
+import PublicHeader from './PublicHeader.vue'
 import FloatingUploadButton from './FloatingUploadButton.vue'
 import { useUserStore, useThemeStore } from '@/stores'
 
@@ -10,7 +11,10 @@ const userStore = useUserStore()
 const themeStore = useThemeStore()
 
 // 公开页面（不需要侧边栏的页面）
-const publicPages = ['/', '/gallery', '/search', '/login']
+const publicPages = ['/', '/gallery', '/search', '/login', '/connect']
+
+// 页头由布局持有，公开页面切换时保持导航位置和组件状态稳定。
+const showPublicHeader = computed(() => route.path === '/' || (!userStore.isLoggedIn && ['/gallery', '/search', '/connect'].includes(route.path)))
 
 // 是否显示侧边栏布局
 const showSidebar = computed(() => {
@@ -30,6 +34,7 @@ watch(() => route.path, () => {
 
 <template>
   <div class="min-h-screen bg-background">
+    <PublicHeader v-if="showPublicHeader" />
     <!-- 带侧边栏的布局（登录后） -->
     <template v-if="showSidebar">
       <Sidebar />

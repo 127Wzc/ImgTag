@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { PublicHeader } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import ImageGrid from '@/components/ImageGrid.vue'
@@ -246,7 +245,6 @@ async function handleImageUpdated() {
 
 <template>
   <div class="min-h-screen">
-    <PublicHeader v-if="!isLoggedIn" />
 
     <main class="py-6 px-6 max-w-[1800px] mx-auto" :class="isLoggedIn ? '' : 'max-w-7xl pt-24'">
 

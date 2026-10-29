@@ -204,6 +204,7 @@ onMounted(() => {
         
         <p class="text-sm text-muted-foreground mb-4">
           API 密钥可用于外部程序访问 ImgTag API，请妥善保管。
+          <RouterLink to="/connect?scope=personal" class="ml-2 text-primary hover:underline">连接 MCP ↗</RouterLink>
         </p>
 
         <!-- 加载中 -->

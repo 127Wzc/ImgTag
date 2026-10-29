@@ -21,7 +21,8 @@ import {
   Activity,
   HardDrive,
   Search,
-  Inbox
+  Inbox,
+  Plug
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -51,6 +52,7 @@ const coreItems = computed(() => [
     label: '探索',
     requiresAuth: false
   },
+  { name: 'McpConnect', path: '/connect', icon: Plug, label: '连接 MCP', requiresAuth: false },
 ])
 
 const adminItems = computed(() => [

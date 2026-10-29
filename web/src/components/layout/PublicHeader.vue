@@ -1,176 +1,59 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { useUserStore, useThemeStore } from '@/stores'
 import { Button } from '@/components/ui/button'
-import { Moon, Sun, LogIn, ArrowLeft, Menu, X, FolderOpen, Sparkles } from 'lucide-vue-next'
+import { Moon, Sun, LogIn, ArrowLeft, Menu, X, FolderOpen, Sparkles, Plug } from 'lucide-vue-next'
 
-defineProps<{
-  showBack?: boolean
-}>()
-
+defineProps<{ showBack?: boolean }>()
 const route = useRoute()
 const userStore = useUserStore()
 const themeStore = useThemeStore()
-
-// 移动端菜单
 const mobileMenuOpen = ref(false)
+const navigation = [
+  { label: '图库浏览', to: '/search?mode=gallery', icon: FolderOpen, active: () => route.path === '/search' && route.query.mode !== 'smart' },
+  { label: '智能搜索', to: '/search?mode=smart', icon: Sparkles, active: () => route.path === '/search' && route.query.mode === 'smart' },
+  { label: '连接 MCP', to: '/connect', icon: Plug, active: () => route.path === '/connect' },
+]
+watch(() => route.fullPath, () => { mobileMenuOpen.value = false })
 </script>
 
 <template>
-  <header class="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-md border-b border-border">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-      <div class="flex items-center justify-between h-14 sm:h-16">
-        <!-- 左侧：返回/Logo -->
-        <div class="flex items-center gap-2 sm:gap-4">
-          <RouterLink v-if="showBack" to="/">
-            <Button variant="ghost" size="icon" class="text-muted-foreground w-8 h-8 sm:w-9 sm:h-9">
-              <ArrowLeft class="w-4 h-4 sm:w-5 sm:h-5" />
-            </Button>
-          </RouterLink>
-          <RouterLink to="/" class="flex items-center gap-2">
-            <img src="/logo.png" alt="ImgTag" class="w-8 h-8 sm:w-9 sm:h-9 rounded-xl" />
-            <span class="text-lg sm:text-xl font-bold bg-gradient-to-r from-foreground to-muted-foreground bg-clip-text text-transparent">
-              ImgTag
-            </span>
-          </RouterLink>
-        </div>
-
-        <!-- 中间导航 (桌面端) - 使用分段控制器风格 -->
-        <nav class="hidden md:flex items-center">
-          <div class="flex items-center bg-muted/50 rounded-full p-1">
-            <RouterLink 
-              to="/search?mode=gallery" 
-              class="flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-full transition-all"
-              :class="route.query.mode !== 'smart'
-                ? 'bg-background text-foreground shadow-sm' 
-                : 'text-muted-foreground hover:text-foreground'"
-            >
-              <FolderOpen class="w-4 h-4" />
-              图库浏览
-            </RouterLink>
-            <RouterLink 
-              to="/search?mode=smart" 
-              class="flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-full transition-all"
-              :class="route.query.mode === 'smart' 
-                ? 'bg-gradient-to-r from-violet-500 to-purple-600 text-white shadow-sm' 
-                : 'text-muted-foreground hover:text-foreground'"
-            >
-              <Sparkles class="w-4 h-4" />
-              智能搜索
-            </RouterLink>
-          </div>
-        </nav>
-
-        <!-- 右侧操作 -->
-        <div class="flex items-center gap-1 sm:gap-2">
-          <Button 
-            variant="ghost" 
-            size="icon" 
-            @click="themeStore.toggleDark()"
-            class="text-muted-foreground w-8 h-8 sm:w-9 sm:h-9"
-          >
-            <Moon v-if="themeStore.isDark" class="w-4 h-4 sm:w-5 sm:h-5" />
-            <Sun v-else class="w-4 h-4 sm:w-5 sm:h-5" />
-          </Button>
-
-          <!-- 未登录时显示登录按钮 -->
-          <template v-if="!userStore.isLoggedIn">
-            <RouterLink to="/login" class="hidden sm:block">
-              <Button variant="default" size="sm" class="gap-2">
-                <LogIn class="w-4 h-4" />
-                登录
-              </Button>
-            </RouterLink>
-          </template>
-
-          <!-- 移动端菜单按钮 -->
-          <Button 
-            variant="ghost" 
-            size="icon" 
-            class="md:hidden text-muted-foreground w-8 h-8"
-            @click="mobileMenuOpen = !mobileMenuOpen"
-          >
-            <X v-if="mobileMenuOpen" class="w-5 h-5" />
-            <Menu v-else class="w-5 h-5" />
-          </Button>
-        </div>
+  <header class="fixed inset-x-0 top-0 z-50 border-b border-border bg-background/90 backdrop-blur-md">
+    <div class="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:h-16 sm:px-6 lg:px-8">
+      <div class="flex items-center gap-2 md:flex-1">
+        <RouterLink v-if="showBack" to="/" aria-label="返回首页"><ArrowLeft class="h-4 w-4" /></RouterLink>
+        <RouterLink to="/" class="flex items-center gap-2">
+          <img src="/logo.png" alt="" class="h-8 w-8 rounded-xl sm:h-9 sm:w-9" />
+          <span class="text-lg font-bold tracking-tight">ImgTag</span>
+        </RouterLink>
+      </div>
+      <nav aria-label="主导航" class="hidden items-center gap-1 rounded-full bg-muted/50 p-1 md:flex">
+        <RouterLink v-for="item in navigation" :key="item.to" :to="item.to" :aria-current="item.active() ? 'page' : undefined" class="flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-colors duration-150" :class="item.active() ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:bg-background/50 hover:text-foreground'">
+          <component :is="item.icon" class="h-4 w-4" />{{ item.label }}
+        </RouterLink>
+      </nav>
+      <div class="flex items-center justify-end gap-2 md:flex-1">
+        <Button variant="ghost" size="icon" aria-label="切换主题" class="h-8 w-8 text-muted-foreground" @click="themeStore.toggleDark()"><Moon v-if="themeStore.isDark" class="h-4 w-4" /><Sun v-else class="h-4 w-4" /></Button>
+        <Button as-child size="sm" variant="outline" class="hidden sm:inline-flex"><RouterLink :to="userStore.isLoggedIn ? '/dashboard' : '/login'">{{ userStore.isLoggedIn ? '控制台' : '登录' }}</RouterLink></Button>
+        <Button variant="ghost" size="icon" aria-label="导航菜单" :aria-expanded="mobileMenuOpen" aria-controls="public-mobile-menu" class="h-8 w-8 md:hidden" @click="mobileMenuOpen = !mobileMenuOpen"><X v-if="mobileMenuOpen" class="h-5 w-5" /><Menu v-else class="h-5 w-5" /></Button>
       </div>
     </div>
-
-    <!-- 移动端下拉菜单 -->
-    <Transition name="slide-down">
-      <div 
-        v-if="mobileMenuOpen"
-        class="md:hidden border-t border-border bg-background/95 backdrop-blur-lg"
-      >
-        <nav class="px-4 py-3 space-y-1">
-          <!-- 分段控制器风格的导航 -->
-          <div class="flex items-center bg-muted/50 rounded-xl p-1 mb-3">
-            <RouterLink 
-              to="/search?mode=gallery" 
-              class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg transition-all"
-              :class="route.query.mode !== 'smart' 
-                ? 'bg-background text-foreground shadow-sm' 
-                : 'text-muted-foreground'"
-              @click="mobileMenuOpen = false"
-            >
-              <FolderOpen class="w-4 h-4" />
-              图库浏览
-            </RouterLink>
-            <RouterLink 
-              to="/search?mode=smart" 
-              class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg transition-all"
-              :class="route.query.mode === 'smart' 
-                ? 'bg-gradient-to-r from-violet-500 to-purple-600 text-white shadow-sm' 
-                : 'text-muted-foreground'"
-              @click="mobileMenuOpen = false"
-            >
-              <Sparkles class="w-4 h-4" />
-              智能搜索
-            </RouterLink>
-          </div>
-          
-          <div class="pt-2 border-t border-border">
-            <!-- 登录用户显示"我的图库"入口 -->
-            <template v-if="userStore.isLoggedIn">
-              <RouterLink 
-                to="/my-files" 
-                class="flex items-center justify-between px-4 py-3 text-primary font-medium hover:bg-accent rounded-lg"
-                @click="mobileMenuOpen = false"
-              >
-                <span class="flex items-center gap-2">
-                  <FolderOpen class="w-4 h-4" />
-                  我的图库
-                </span>
-              </RouterLink>
-            </template>
-            <!-- 未登录显示登录 -->
-            <template v-else>
-              <RouterLink 
-                to="/login" 
-                class="flex items-center gap-2 px-4 py-3 text-primary font-medium hover:bg-accent rounded-lg"
-                @click="mobileMenuOpen = false"
-              >
-                <LogIn class="w-4 h-4" />
-                登录
-              </RouterLink>
-            </template>
-          </div>
-        </nav>
-      </div>
+    <Transition name="menu">
+      <nav v-if="mobileMenuOpen" id="public-mobile-menu" aria-label="移动导航" class="border-t border-border bg-background px-4 py-3 md:hidden">
+        <RouterLink v-for="item in navigation" :key="item.to" :to="item.to" :aria-current="item.active() ? 'page' : undefined" class="flex items-center gap-3 rounded-lg px-3 py-3 text-sm transition-colors" :class="item.active() ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground hover:bg-muted/50'">
+          <component :is="item.icon" class="h-4 w-4" />{{ item.label }}
+        </RouterLink>
+        <RouterLink :to="userStore.isLoggedIn ? '/dashboard' : '/login'" class="mt-2 flex items-center gap-3 border-t border-border px-3 pt-3 text-sm"><LogIn class="h-4 w-4" />{{ userStore.isLoggedIn ? '控制台' : '登录' }}</RouterLink>
+      </nav>
     </Transition>
   </header>
 </template>
 
 <style scoped>
-.slide-down-enter-active,
-.slide-down-leave-active {
-  transition: all 0.2s ease;
-}
-.slide-down-enter-from,
-.slide-down-leave-to {
-  opacity: 0;
-  transform: translateY(-10px);
+.menu-enter-active, .menu-leave-active { transition: opacity 150ms ease, transform 150ms ease; }
+.menu-enter-from, .menu-leave-to { opacity: 0; transform: translateY(-4px); }
+@media (prefers-reduced-motion: reduce) {
+  .menu-enter-active, .menu-leave-active { transition: none; }
 }
 </style>

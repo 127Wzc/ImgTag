@@ -92,6 +92,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/pages/StorageEndpoints.vue'),
         meta: { title: '存储端点', requiresAdmin: true },
     },
+    {
+        path: '/connect',
+        name: 'McpConnect',
+        component: () => import('@/pages/McpConnect.vue'),
+        meta: { title: '连接 MCP' },
+    },
     // 404 页面
     {
         path: '/:pathMatch(.*)*',

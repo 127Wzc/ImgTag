@@ -18,8 +18,8 @@ const { canUpload, checkPermissionWithToast } = usePermission()
 // 弹框状态
 const uploadDialogOpen = ref(false)
 
-// 隐藏的路由（上传页、登录页不显示）
-const hiddenRoutes = ['/upload', '/login']
+// 上传、登录和连接配置页不显示悬浮操作。
+const hiddenRoutes = ['/upload', '/login', '/connect']
 
 const isVisible = computed(() => {
   // 未登录或在隐藏路由时不显示

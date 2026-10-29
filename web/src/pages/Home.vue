@@ -4,7 +4,6 @@
  * 采用 Linear/Vercel 风格：深色极简、网格背景、微光动效、Bento Grid 布局
  */
 import { RouterLink } from 'vue-router'
-import { useUserStore } from '@/stores'
 import { Button } from '@/components/ui/button'
 import {
   Sparkles, Search, Shield, Zap,
@@ -12,8 +11,6 @@ import {
 } from 'lucide-vue-next'
 import { ref, computed } from 'vue'
 import { version as appVersion } from '../../package.json'
-
-const userStore = useUserStore()
 
 // 鼠标位置追踪，用于卡片 Spotlight 效果
 const wrapperRef = ref<HTMLElement | null>(null)
@@ -98,45 +95,7 @@ const galleryRow2 = computed(() => images.value.slice(Math.ceil(images.value.len
       <div class="absolute left-0 right-0 top-0 -z-10 m-auto h-[310px] w-[310px] rounded-full bg-primary/20 opacity-20 blur-[100px]"></div>
     </div>
 
-    <!-- 顶部导航 -->
-    <header class="sticky top-0 z-50 w-full border-b border-border/40 bg-background/80 backdrop-blur-md">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-        <RouterLink to="/" class="flex items-center gap-2.5 group">
-          <div class="relative w-8 h-8 rounded-lg overflow-hidden shadow-sm group-hover:shadow-md transition-all ring-1 ring-border/50">
-            <img src="/logo.png" alt="ImgTag" class="w-full h-full object-cover" />
-            <div class="absolute inset-0 bg-gradient-to-tr from-primary/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-          </div>
-          <span class="font-bold text-lg tracking-tight">ImgTag</span>
-        </RouterLink>
-
-        <nav class="flex items-center gap-3">
-          <a
-            href="https://github.com/127Wzc/ImgTag"
-            target="_blank"
-            class="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hidden sm:block"
-          >
-            GitHub
-          </a>
-          <div class="h-4 w-px bg-border hidden sm:block" />
-          <template v-if="userStore.isLoggedIn">
-            <RouterLink to="/dashboard">
-              <Button size="sm" variant="default" class="rounded-full px-5 shadow-sm shadow-primary/20">
-                控制台
-              </Button>
-            </RouterLink>
-          </template>
-          <template v-else>
-            <RouterLink to="/login">
-              <Button size="sm" class="rounded-full px-5 shadow-sm shadow-primary/20">
-                登录
-              </Button>
-            </RouterLink>
-          </template>
-        </nav>
-      </div>
-    </header>
-
-    <main class="relative z-10">
+    <main class="relative z-10 pt-14 sm:pt-16">
       <!-- Hero Section -->
       <section class="relative pt-20 pb-32 lg:pt-32 lg:pb-40 overflow-hidden">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 text-center">
