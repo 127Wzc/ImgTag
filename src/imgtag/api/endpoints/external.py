@@ -150,6 +150,7 @@ async def analyze_image_from_url(
     logger.info("外部添加图片: user_id=%s", api_user.get("id"))
 
     try:
+        ensure_permission(api_user, Permission.UPLOAD_IMAGE)
         await ensure_create_tags_if_missing(session, api_user, request.tags)
 
         # 权限校验需在上传/落库前完成，避免产生副作用
@@ -219,6 +220,7 @@ async def analyze_image_from_url(
             session,
             image_id=new_image.id,
             endpoint_id=target_endpoint.id,
+            expected_generation=getattr(target_endpoint, "operation_generation", 0) or 0,
             object_key=full_object_key,
             category_code=category_code,
             is_primary=True,

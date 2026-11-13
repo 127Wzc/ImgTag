@@ -16,6 +16,7 @@ from sqlalchemy.exc import DBAPIError, TimeoutError as PoolTimeoutError
 from imgtag.core.config import settings
 from imgtag.core.logging_config import get_logger
 from imgtag.core.storage_constants import BATCH_CONFIG, StorageTaskStatus, StorageTaskType
+from imgtag.core.storage_runtime import StorageOperationStopped, notify_storage_tasks, record_storage_progress
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import (
     image_location_repository,
@@ -24,6 +25,7 @@ from imgtag.db.repositories import (
 )
 from imgtag.models.storage_endpoint import StorageEndpoint
 from imgtag.services.storage_service import storage_service
+from imgtag.services.storage_task_control import load_endpoint_snapshot, snapshot_endpoint, storage_task_control
 
 logger = get_logger(__name__)
 
@@ -79,7 +81,6 @@ class StorageSyncService:
     BATCH_CONFIG = BATCH_CONFIG  # Use unified config
 
     def __init__(self):
-        self._running = False
         self._sync_semaphore = asyncio.Semaphore(settings.STORAGE_SYNC_CONCURRENCY)
 
     async def start_batch_sync(
@@ -88,6 +89,7 @@ class StorageSyncService:
         target_endpoint_id: int,
         image_ids: Optional[list[int]] = None,
         force_overwrite: bool = False,
+        automatic_backup: bool = False,
     ) -> list[str]:
         """Start batch synchronization task(s).
         
@@ -105,6 +107,30 @@ class StorageSyncService:
         task_ids = []
         
         async with async_session_maker() as session:
+            endpoints = {ep.id: ep for ep in await storage_endpoint_repository.lock_all(session)}
+            source, target = endpoints.get(source_endpoint_id), endpoints.get(target_endpoint_id)
+            if not source or not target or source.id == target.id:
+                raise ValueError("同步源或目标端点无效")
+            if not source.is_enabled or not target.is_enabled:
+                raise ValueError("同步源和目标端点必须启用")
+            if automatic_backup and (source.role != "primary" or target.role != "backup"):
+                raise ValueError("主备配置已变化，等待后续补备份")
+            for endpoint_id in (source.id, target.id):
+                if await storage_endpoint_repository.has_cleanup_task(session, endpoint_id):
+                    raise ValueError("端点正在清理或等待远程删除收尾")
+            active_tasks = {}
+            for endpoint_id in (source.id, target.id):
+                for active in await task_repository.get_active_storage_for_endpoint(session, endpoint_id):
+                    active_tasks[active.id] = active
+            for active in active_tasks.values():
+                if not automatic_backup or active.type != StorageTaskType.SYNC.value:
+                    raise ValueError("端点已有进行中的任务，请等待完成或先中断")
+            if automatic_backup and image_ids is not None:
+                queued = {image_id for task in active_tasks.values()
+                          if (task.payload or {}).get("target_endpoint_id") == target.id
+                          for image_id in (task.payload or {}).get("image_ids", [])}
+                image_ids = list(dict.fromkeys(image_id for image_id in image_ids if image_id not in queued))
+            snapshots = {"source_snapshot": snapshot_endpoint(source), "target_snapshot": snapshot_endpoint(target)}
             # If no image_ids provided, stream from source endpoint
             if image_ids is None:
                 # Stream image IDs in batches to avoid memory issues with large datasets
@@ -123,6 +149,7 @@ class StorageSyncService:
                             task_id=task_id,
                             task_type=self.TASK_TYPE.value,
                             payload={
+                                **snapshots,
                                 "sync_type": "batch",
                                 "source_endpoint_id": source_endpoint_id,
                                 "target_endpoint_id": target_endpoint_id,
@@ -144,6 +171,7 @@ class StorageSyncService:
                         task_id=task_id,
                         task_type=self.TASK_TYPE.value,
                         payload={
+                            **snapshots,
                             "sync_type": "batch",
                             "source_endpoint_id": source_endpoint_id,
                             "target_endpoint_id": target_endpoint_id,
@@ -164,9 +192,8 @@ class StorageSyncService:
                     await session.commit()
                     logger.info(f"Created {len(task_ids)} sync tasks")
                     
-                    # Start processing tasks in background
-                    for task_id in task_ids:
-                        asyncio.create_task(self._process_sync_task(task_id))
+                    # 提交后唤醒统一调度
+                    notify_storage_tasks()
                 else:
                     logger.info("No images to sync")
                 return task_ids
@@ -189,6 +216,7 @@ class StorageSyncService:
                     task_id=task_id,
                     task_type="storage_sync",
                     payload={
+                        **snapshots,
                         "sync_type": "batch",
                         "source_endpoint_id": source_endpoint_id,
                         "target_endpoint_id": target_endpoint_id,
@@ -208,30 +236,15 @@ class StorageSyncService:
             
             await session.commit()
         
-        # Start processing tasks in background
-        for task_id in task_ids:
-            asyncio.create_task(self._process_sync_task(task_id))
+        # 提交后唤醒统一调度
+        notify_storage_tasks()
         
         return task_ids
 
     async def _process_sync_task(self, task_id: str) -> None:
         """Process a sync task with checkpoint support."""
         async with self._sync_semaphore:
-            try:
-                await self._do_sync_task(task_id)
-            except Exception as e:
-                logger.error(f"Sync task {task_id} failed: {e}")
-                try:
-                    await self._mark_task_failed(task_id, str(e))
-                except Exception:
-                    # 数据库完全不可用时无法持久化失败状态，明确记录，避免后台异常丢失。
-                    logger.exception("同步任务 %s 已停止，但无法保存失败状态，请恢复连接后重新同步", task_id)
-
-    @retry_sync_db
-    async def _mark_task_failed(self, task_id: str, error: str) -> None:
-        async with async_session_maker() as session:
-            await task_repository.update_status(session, task_id, "failed", error=error)
-            await session.commit()
+            await storage_task_control.run(task_id, lambda: self._do_sync_task(task_id))
 
     @retry_sync_db
     async def _load_sync_task(
@@ -242,12 +255,11 @@ class StorageSyncService:
             if not task:
                 return None
             payload = dict(task.payload or {})
-            source = await storage_endpoint_repository.get_by_id(session, payload.get("source_endpoint_id"))
-            target = await storage_endpoint_repository.get_by_id(session, payload.get("target_endpoint_id"))
+            source = await load_endpoint_snapshot(session, payload.get("source_snapshot"), payload.get("source_endpoint_id"))
+            target = await load_endpoint_snapshot(session, payload.get("target_snapshot"), payload.get("target_endpoint_id"))
             if not source or not target:
                 raise ValueError("Invalid source or target endpoint")
-            await task_repository.update_status(session, task_id, "processing")
-            await session.commit()
+            payload["_completed_ids"] = (task.result or {}).get("completed_image_ids", [])
             return payload, source, target
 
     async def _do_sync_task(self, task_id: str) -> None:
@@ -259,42 +271,50 @@ class StorageSyncService:
         force_overwrite = payload.get("force_overwrite", False)
 
         # Process images
-        completed = 0
+        completed_ids = set(payload.get("_completed_ids", []))
+        completed = len(completed_ids)
         failed = 0
         failed_ids = []
+        consecutive_failures = 0
         
-        for i, image_id in enumerate(image_ids):
+        for image_id in image_ids:
+            if image_id in completed_ids:
+                continue
             try:
-                success = await self._sync_single_image(
-                    image_id,
-                    source_endpoint,
-                    target_endpoint,
-                    force_overwrite,
-                )
+                success = await asyncio.wait_for(self._sync_single_image(
+                    image_id, source_endpoint, target_endpoint, force_overwrite,
+                ), timeout=settings.STORAGE_ITEM_TIMEOUT)
                 if success:
                     completed += 1
+                    completed_ids.add(image_id)
+                    consecutive_failures = 0
                 else:
+                    consecutive_failures += 1
                     failed += 1
                     if len(failed_ids) < 50:
                         failed_ids.append({"id": image_id, "error": "Sync returned false"})
+            except StorageOperationStopped:
+                raise
             except Exception as e:
                 if is_transient_db_error(e):
                     # 持续拥塞时停止本批，避免把后续图片全部快速记为失败。
                     raise
                 failed += 1
+                consecutive_failures += 1
+                error = "单张图片同步超时" if isinstance(e, asyncio.TimeoutError) else str(e)
                 if len(failed_ids) < 50:
-                    failed_ids.append({"id": image_id, "error": str(e)})
-                logger.error(f"Failed to sync image {image_id}: {e}")
+                    failed_ids.append({"id": image_id, "error": error})
+                logger.error("图片同步失败: image_id=%s error=%s", image_id, error)
             
-            # Checkpoint every N images
-            if (i + 1) % BATCH_CONFIG.checkpoint_interval == 0:
-                await self._update_progress(task_id, completed, failed, failed_ids)
+            await self._update_progress(task_id, completed, failed, failed_ids, completed_ids=completed_ids)
+            if consecutive_failures >= settings.STORAGE_MAX_CONSECUTIVE_FAILURES:
+                raise RuntimeError("连续同步失败，任务已停止；已完成项目保留")
             
             # Rate limiting
             await asyncio.sleep(BATCH_CONFIG.rate_limit_seconds)
         
         # Final update
-        await self._update_progress(task_id, completed, failed, failed_ids, final=True)
+        await self._update_progress(task_id, completed, failed, failed_ids, final=True, completed_ids=completed_ids)
         logger.info(f"Sync task {task_id} completed: {completed} success, {failed} failed")
 
     @retry_sync_db
@@ -315,9 +335,13 @@ class StorageSyncService:
     @retry_sync_db
     async def _save_sync_location(
         self, image_id: int, target_endpoint: StorageEndpoint,
-        object_key: str, category_code: str | None,
+        object_key: str, category_code: str | None, source_endpoint: StorageEndpoint | None = None,
     ) -> None:
+        generations = {target_endpoint.id: getattr(target_endpoint, "operation_generation", 0) or 0}
+        if source_endpoint is not None:
+            generations[source_endpoint.id] = getattr(source_endpoint, "operation_generation", 0) or 0
         async with async_session_maker() as session:
+            await storage_endpoint_repository.guard_write(session, generations)
             # 重读记录以支持提交结果不确定后的重试。
             target = await image_location_repository.get_by_image_and_endpoint(
                 session, image_id, target_endpoint.id
@@ -327,7 +351,7 @@ class StorageSyncService:
             else:
                 await image_location_repository.create(
                     session, image_id=image_id, endpoint_id=target_endpoint.id,
-                    object_key=object_key, category_code=category_code,
+                    expected_generation=generations[target_endpoint.id], object_key=object_key, category_code=category_code,
                     sync_status="synced", synced_at=datetime.now(timezone.utc),
                 )
             await session.commit()
@@ -336,6 +360,10 @@ class StorageSyncService:
         self, image_id: int, source_endpoint: StorageEndpoint,
         target_endpoint: StorageEndpoint, force_overwrite: bool,
     ) -> bool:
+        async with async_session_maker() as session:
+            await storage_endpoint_repository.guard_write(session, {
+                ep.id: getattr(ep, "operation_generation", 0) or 0 for ep in (source_endpoint, target_endpoint)
+            })
         object_key, category_code, synced = await self._load_sync_locations(
             image_id, source_endpoint, target_endpoint
         )
@@ -354,7 +382,7 @@ class StorageSyncService:
             logger.error("无法写入目标端点：图片 %s", image_id)
             return False
         # 保存元数据失败时只重试数据库写入，不重复下载已传输的图片。
-        await self._save_sync_location(image_id, target_endpoint, object_key, category_code)
+        await self._save_sync_location(image_id, target_endpoint, object_key, category_code, source_endpoint)
         return True
 
     @retry_sync_db
@@ -365,21 +393,25 @@ class StorageSyncService:
         failed: int,
         failed_ids: list,
         final: bool = False,
+        completed_ids: set[int] | None = None,
     ) -> None:
         """Update task progress in database."""
         async with async_session_maker() as session:
             result = {
                 "success_count": completed,  # 统一字段名
                 "failed_count": failed,
-                "failed_items": failed_ids,  # 统一字段名
+                "failed_items": failed_ids,
+                "completed_image_ids": sorted(completed_ids or []),  # 统一字段名
             }
             
             status = (StorageTaskStatus.FAILED.value if failed else StorageTaskStatus.COMPLETED.value) if final else StorageTaskStatus.PROCESSING.value
-            await task_repository.update_status(
+            changed = await task_repository.update_status(
                 session, task_id, status, result=result,
                 error=f"{failed} 张图片同步失败，请重新发起同步" if final and failed else None
             )
             await session.commit()
+            if changed:
+                record_storage_progress(task_id)
 
     async def get_sync_progress(self, task_id: str) -> dict:
         """Get sync task progress.
@@ -416,50 +448,6 @@ class StorageSyncService:
                 "total_batches": payload.get("total_batches"),
             }
 
-    async def process_pending_locations(self, limit: int = 100) -> int:
-        """Process pending sync locations (for auto-mirror).
-        
-        Called periodically by background worker to sync pending items.
-        
-        Args:
-            limit: Maximum locations to process.
-            
-        Returns:
-            Number of locations processed.
-        """
-        processed = 0
-        async with async_session_maker() as session:
-            pending = await image_location_repository.get_pending_sync(session, limit=limit)
-            items = [(loc.id, loc.image_id, loc.endpoint_id) for loc in pending]
-
-        for location_id, image_id, endpoint_id in items:
-            try:
-                endpoints = await self._load_pending_endpoints(location_id, image_id, endpoint_id)
-                if endpoints is None:
-                    continue
-                source, target = endpoints
-                success = await self._sync_single_image(image_id, source, target, False)
-                processed += int(success)
-            except Exception as error:
-                logger.exception("自动同步图片 %s 失败", image_id)
-                if is_transient_db_error(error):
-                    break
-            await asyncio.sleep(BATCH_CONFIG.rate_limit_seconds)
-        return processed
-
-    @retry_sync_db
-    async def _load_pending_endpoints(
-        self, location_id: int, image_id: int, endpoint_id: int,
-    ) -> tuple[StorageEndpoint, StorageEndpoint] | None:
-        async with async_session_maker() as session:
-            primary = await image_location_repository.get_primary_location(session, image_id)
-            source = await storage_endpoint_repository.get_by_id(session, primary.endpoint_id) if primary else None
-            target = await storage_endpoint_repository.get_by_id(session, endpoint_id)
-            if not source or not target:
-                await image_location_repository.mark_failed(session, location_id, "Source or target endpoint not found")
-                await session.commit()
-                return None
-            return source, target
 
 
 # Singleton instance

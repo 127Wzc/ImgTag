@@ -219,10 +219,12 @@ class TaskService:
             await session.commit()
             return deleted
     
-    async def batch_delete(self, task_ids: list[str]) -> int:
+    async def batch_delete(self, task_ids: list[str], *, user: dict) -> int:
         """批量删除任务"""
         async with async_session_maker() as session:
-            deleted = await task_repository.batch_delete(session, task_ids)
+            deleted = await task_repository.batch_delete(
+                session, task_ids, owner_id=None if user.get("role") == "admin" else user["id"]
+            )
             await session.commit()
             logger.info(f"批量删除了 {deleted} 个任务")
             return deleted

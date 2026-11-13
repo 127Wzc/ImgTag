@@ -33,6 +33,7 @@ class StorageTaskType(str, Enum):
     SYNC = "storage_sync"
     DELETE = "storage_delete"
     UNLINK = "storage_unlink"  # 解绑端点并清理
+    CLEANUP = "storage_cleanup"  # 本地清理审计，不执行远程 I/O
     
     @classmethod
     def all_values(cls) -> list[str]:
@@ -46,6 +47,7 @@ class StorageTaskType(str, Enum):
             cls.SYNC.value: "同步",
             cls.DELETE.value: "删除",
             cls.UNLINK.value: "解除关联",
+            cls.CLEANUP.value: "本地清理",
         }
         return names.get(task_type, task_type)
 

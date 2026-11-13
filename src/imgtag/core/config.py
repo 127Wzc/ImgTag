@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     STORAGE_SYNC_CONCURRENCY: int = Field(default=2, ge=1)
     STORAGE_SYNC_DB_MAX_ATTEMPTS: int = Field(default=5, ge=1, le=10)
     STORAGE_SYNC_DB_RETRY_DELAY: float = Field(default=2, gt=0, le=30)
+    STORAGE_CONNECT_TIMEOUT: float = Field(default=5, gt=0)
+    STORAGE_READ_TIMEOUT: float = Field(default=30, gt=0)
+    STORAGE_REQUEST_ATTEMPTS: int = Field(default=2, ge=1, le=5)
+    STORAGE_ITEM_TIMEOUT: float = Field(default=60, gt=0)
+    STORAGE_MAX_CONSECUTIVE_FAILURES: int = Field(default=3, ge=1)
+    STORAGE_TASK_LEASE_SECONDS: int = Field(default=60, ge=10)
 
     # 视觉模型配置 (OpenAI 兼容)
     VISION_API_BASE_URL: str = Field(

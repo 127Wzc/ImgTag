@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import apiClient from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { getErrorMessage } from '@/utils/api-error'
 import { notifyError, notifySuccess } from '@/utils/notify'
@@ -26,6 +27,7 @@ import {
   Save,
   ChevronDown,
   Unlink,
+  Square,
 } from 'lucide-vue-next'
 
 // 端点类型
@@ -61,6 +63,9 @@ interface StorageEndpoint {
   read_priority: number
   read_weight: number
   is_healthy: boolean
+  last_health_check: string | null
+  health_check_error: string | null
+  has_active_sync: boolean
   location_count: number
   active_task: ActiveTaskInfo | null
 }
@@ -72,6 +77,7 @@ const editingEndpoint = ref<StorageEndpoint | null>(null)
 const saving = ref(false)
 const testing = ref<number | null>(null)
 const deleting = ref<number | null>(null)
+const cancelling = ref<number | null>(null)
 const unlinking = ref<number | null>(null)  // 解绑位置记录
 
 // 确认弹窗
@@ -107,6 +113,9 @@ const form = ref({
   read_priority: 100,
   read_weight: 1
 })
+
+const originalForm = ref({ ...form.value })
+const basicLocked = computed(() => !!endpoints.value.find(ep => ep.id === editingEndpoint.value?.id)?.has_active_sync)
 
 const providers = [
   { value: 'local', label: '本地存储', icon: HardDrive },
@@ -230,6 +239,7 @@ function openEdit(ep: StorageEndpoint) {
     read_priority: ep.read_priority,
     read_weight: ep.read_weight
   }
+  originalForm.value = { ...form.value }
   showDialog.value = true
 }
 
@@ -242,7 +252,10 @@ async function saveEndpoint() {
   saving.value = true
   try {
     if (editingEndpoint.value) {
-      await apiClient.put(`/storage/endpoints/${editingEndpoint.value.id}`, form.value)
+      const changed = Object.fromEntries(Object.entries(form.value).filter(
+        ([key, value]) => value !== originalForm.value[key as keyof typeof originalForm.value]
+      ))
+      await apiClient.put(`/storage/endpoints/${editingEndpoint.value.id}`, changed)
       notifySuccess('端点已更新', { once: true })
     } else {
       await apiClient.post('/storage/endpoints', form.value)
@@ -305,30 +318,73 @@ async function deleteEndpoint(ep: StorageEndpoint) {
   }
 }
 
-// 解绑端点位置记录
-async function unlinkLocations(ep: StorageEndpoint) {
+async function cancelTasks(ep: StorageEndpoint) {
   const result = await confirm({
-    title: '解除关联',
-    message: `确定解除端点 "${ep.name}" 的所有 ${ep.location_count} 张图片关联吗？此操作不可恢复！`,
-    variant: 'danger',
-    confirmText: '解除',
-    checkboxLabel: '同时删除物理文件',
-    checkboxDefault: false,
+    title: '强制中断任务', variant: 'danger', confirmText: '中断',
+    message: `中断端点「${ep.name}」涉及的全部同步、解绑和删除任务？已完成的操作保留，已发出的远程请求可能仍会完成。`,
   })
   if (!result.confirmed) return
-  
+  cancelling.value = ep.id
+  try {
+    const { data } = await apiClient.post(`/storage/endpoints/${ep.id}/cancel-tasks`)
+    notifySuccess(data.message, { once: true })
+    await fetchEndpoints()
+  } catch (error) {
+    notifyError(getErrorMessage(error))
+  } finally {
+    cancelling.value = null
+  }
+}
+
+const unlinkTarget = ref<StorageEndpoint | null>(null)
+const unlinkImpact = ref<{ total_locations: number; unique_images: number } | null>(null)
+const impactLoading = ref(false)
+const impactError = ref('')
+const deleteRemoteFiles = ref(false)
+const unlinkHasTask = computed(() => !!endpoints.value.find(ep => ep.id === unlinkTarget.value?.id)?.active_task)
+const unlinkDisabled = computed(() => unlinking.value !== null || !unlinkImpact.value ||
+  (deleteRemoteFiles.value && (unlinkHasTask.value || unlinkImpact.value.total_locations === 0)))
+
+function setUnlinkOpen(open: boolean) {
+  if (!open && unlinking.value === null) unlinkTarget.value = null
+}
+
+async function unlinkLocations(ep: StorageEndpoint) {
+  unlinkTarget.value = ep
+  unlinkImpact.value = null
+  impactError.value = ''
+  impactLoading.value = true
+  deleteRemoteFiles.value = false
+  try {
+    const { data } = await apiClient.get(`/storage/endpoints/${ep.id}/deletion-impact`)
+    if (unlinkTarget.value === ep) unlinkImpact.value = data
+  } catch (error) {
+    if (unlinkTarget.value === ep) impactError.value = getErrorMessage(error)
+  } finally {
+    if (unlinkTarget.value === ep) impactLoading.value = false
+  }
+}
+
+async function submitUnlink() {
+  const ep = unlinkTarget.value
+  if (!ep || unlinkDisabled.value) return
   unlinking.value = ep.id
   try {
-    const { data } = await apiClient.delete(`/storage/endpoints/${ep.id}/locations`, {
-      data: { 
-        confirm: true,
-        delete_files: result.checkboxChecked,
-      }
-    })
-    notifySuccess(data.message || '位置记录已解除关联', { once: true })
+    if (!deleteRemoteFiles.value) {
+      await apiClient.post(`/storage/endpoints/${ep.id}/force-cleanup`, {
+        confirm: true, endpoint_name: ep.name, remove_endpoint: false,
+      })
+      notifySuccess('本地关联已清理，端点配置保持不变', { once: true })
+    } else {
+      await apiClient.delete(`/storage/endpoints/${ep.id}/locations`, {
+        data: { confirm: true, delete_files: deleteRemoteFiles.value },
+      })
+      notifySuccess('已提交解除关联任务', { once: true })
+    }
+    unlinkTarget.value = null
     await fetchEndpoints()
-  } catch (e: any) {
-    notifyError(getErrorMessage(e))
+  } catch (error) {
+    notifyError(getErrorMessage(error))
   } finally {
     unlinking.value = null
   }
@@ -376,8 +432,8 @@ function getProviderLabel(provider: string) {
   return p?.label || provider
 }
 
-// 轮询间隔（如有活动任务，30秒刷新一次）
-const POLL_INTERVAL_MS = 30000
+// 仅有活动任务时，每 10 秒刷新进度。
+const POLL_INTERVAL_MS = 10000
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
 // 检查是否有端点正在执行任务
@@ -396,6 +452,8 @@ function updatePolling() {
     pollTimer = null
   }
 }
+
+watch(hasActiveTask, updatePolling)
 
 onMounted(async () => {
   await fetchEndpoints()
@@ -467,6 +525,7 @@ onUnmounted(() => {
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2 mb-1">
                 <h3 class="font-semibold text-foreground">{{ ep.name }}</h3>
+                <span class="text-xs text-muted-foreground">{{ ep.role === 'backup' ? '备份端点' : '主端点' }}</span>
                 <span v-if="ep.is_default_upload" 
                       class="px-2 py-0.5 text-xs bg-primary/10 text-primary rounded-full flex items-center gap-1">
                   <Star class="w-3 h-3" />
@@ -482,11 +541,11 @@ onUnmounted(() => {
                 <template v-if="ep.bucket_name"> · {{ ep.bucket_name }}</template>
               </p>
               <div class="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
-                <span class="flex items-center gap-1">
+                <span class="flex items-center gap-1" :title="ep.last_health_check ? `${new Date(ep.last_health_check).toLocaleString()} ${ep.health_check_error || ''}` : '尚未手动测试连接'">
                   <component :is="ep.is_healthy ? CheckCircle : XCircle" 
                              :class="ep.is_healthy ? 'text-green-500' : 'text-red-500'" 
                              class="w-3.5 h-3.5" />
-                  {{ ep.is_healthy ? '健康' : '异常' }}
+                  {{ !ep.last_health_check ? '未测试' : ep.is_healthy ? '上次测试成功' : '上次测试失败' }}
                 </span>
                 <span>{{ ep.location_count }} 张图片</span>
                 <span :title="`优先级 ${ep.read_priority}：数值越小越优先`">
@@ -506,7 +565,7 @@ onUnmounted(() => {
                 <div class="flex items-center gap-2 text-xs">
                   <Loader2 class="w-3 h-3 animate-spin text-primary" />
                   <span class="text-muted-foreground">
-                    {{ ep.active_task.task_type === 'storage_sync' ? '同步中' : 
+                    {{ ['cancelled', 'failed', 'completed'].includes(ep.active_task.status) ? '等待远程删除收尾' : ep.active_task.status === 'pending' ? '排队中' : ep.active_task.task_type === 'storage_sync' ? '同步中' :
                        ep.active_task.task_type === 'storage_delete' ? '删除中' : '解除关联中' }}
                   </span>
                   <span class="text-primary font-medium">
@@ -531,7 +590,7 @@ onUnmounted(() => {
                 variant="ghost" 
                 size="sm"
                 @click="testConnection(ep)"
-                :disabled="testing === ep.id || !!ep.active_task"
+                :disabled="testing === ep.id"
                 title="测试连接"
               >
                 <Loader2 v-if="testing === ep.id" class="w-4 h-4 animate-spin" />
@@ -542,8 +601,8 @@ onUnmounted(() => {
                 variant="ghost" 
                 size="sm"
                 @click="setDefault(ep)"
-                :disabled="!!ep.active_task"
-                title="设为默认上传端点"
+                :disabled="ep.role === 'backup'"
+                title="设为默认上传端点（备份端点需先切换为主端点）"
               >
                 <Star class="w-4 h-4" />
               </Button>
@@ -551,23 +610,21 @@ onUnmounted(() => {
                 variant="ghost" 
                 size="sm"
                 @click="openEdit(ep)"
-                :disabled="!!ep.active_task"
                 title="编辑配置"
               >
                 <Pencil class="w-4 h-4" />
               </Button>
-              <!-- 解绑位置记录按钮 -->
-              <Button 
-                v-if="ep.location_count > 0 && ep.id !== 1"
-                variant="ghost" 
-                size="sm"
-                class="text-amber-600 hover:text-amber-600"
-                @click="unlinkLocations(ep)"
-                :disabled="unlinking === ep.id || !!ep.active_task"
-                :title="ep.active_task ? '有任务进行中' : '解除关联'"
-              >
+              <Button v-if="ep.active_task" variant="ghost" size="sm"
+                      @click="cancelTasks(ep)" :disabled="cancelling === ep.id" title="强制中断全部相关任务">
+                <Square class="w-4 h-4" />
+                <span class="sr-only">强制中断</span>
+              </Button>
+              <Button v-if="ep.id !== 1" variant="ghost" size="sm"
+                      class="text-amber-600 hover:text-amber-600" @click="unlinkLocations(ep)"
+                      :disabled="unlinking === ep.id" title="解除关联">
                 <Loader2 v-if="unlinking === ep.id" class="w-4 h-4 animate-spin" />
                 <Unlink v-else class="w-4 h-4" />
+                <span class="sr-only">解除关联</span>
               </Button>
               <Button 
                 variant="ghost" 
@@ -604,169 +661,174 @@ onUnmounted(() => {
 
             <!-- 表单 -->
             <div class="min-h-0 overflow-y-auto px-4 py-3 sm:px-5 space-y-2.5">
-              <div class="grid gap-3 sm:grid-cols-2">
-                <!-- 名称与类型 -->
-                <div class="space-y-1" :class="{ 'sm:col-span-2': isDefaultEndpoint }">
-                  <label for="endpoint-name" class="block text-sm font-medium">端点名称</label>
-                  <Input
-                    id="endpoint-name"
-                    v-model="form.name"
-                    type="text"
-                    placeholder="如: 阿里云主存储"
-                    :disabled="isDefaultEndpoint"
-                  />
-                </div>
-
-                <!-- 类型 (隐藏默认端点的类型选择) -->
-                <div v-if="!isDefaultEndpoint" class="space-y-1">
-                  <label class="block text-sm font-medium">存储类型</label>
-                  <div class="grid grid-cols-2 gap-2">
-                    <Button
-                      v-for="p in providers"
-                      :key="p.value"
-                      @click="form.provider = p.value"
-                      :aria-pressed="form.provider === p.value"
-                      type="button"
-                      :variant="form.provider === p.value ? 'default' : 'outline'"
-                      class="relative w-full px-6"
-                    >
-                      <component :is="p.icon" class="w-4 h-4" />
-                      {{ p.label.split(' ')[0] }}
-                      <Check v-if="form.provider === p.value" class="absolute right-2 w-3.5 h-3.5" aria-hidden="true" />
-                    </Button>
-                  </div>
-                </div>
-
-              </div>
-
-              <!-- S3 专属配置 -->
-              <template v-if="isS3Like && !isDefaultEndpoint">
-                <div class="grid grid-cols-[minmax(0,1fr)_6rem] sm:grid-cols-[minmax(0,1fr)_8rem] gap-3">
-                  <div class="min-w-0 space-y-1">
-                    <label for="endpoint-url" class="block text-sm font-medium">端点 URL</label>
+              <p v-if="basicLocked" class="text-xs text-amber-600 dark:text-amber-400">
+                同步中，基础配置已锁定；仍可调整读取策略、启停和主备角色。主备切换仅影响后续任务。
+              </p>
+              <fieldset :disabled="basicLocked" class="min-w-0 space-y-2.5">
+                <div class="grid gap-3 sm:grid-cols-2">
+                  <!-- 名称与类型 -->
+                  <div class="space-y-1" :class="{ 'sm:col-span-2': isDefaultEndpoint }">
+                    <label for="endpoint-name" class="block text-sm font-medium">端点名称</label>
                     <Input
-                      id="endpoint-url"
-                      v-model="form.endpoint_url"
+                      id="endpoint-name"
+                      v-model="form.name"
                       type="text"
-                      placeholder="https://s3.amazonaws.com"
+                      placeholder="如: 阿里云主存储"
+                      :disabled="isDefaultEndpoint"
                     />
                   </div>
 
-                  <div class="space-y-1">
-                    <label for="endpoint-region" class="block text-sm font-medium">区域</label>
-                    <Input
-                      id="endpoint-region"
-                      v-model="form.region"
-                      type="text"
-                      placeholder="auto"
-                    />
-                  </div>
-
-                </div>
-
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div class="space-y-1">
-                    <label for="endpoint-access-key" class="block text-sm font-medium">Access Key ID</label>
-                    <Input
-                      id="endpoint-access-key"
-                      v-model="form.access_key_id"
-                      :type="showCredentials ? 'text' : 'password'"
-                      class="font-mono"
-                      placeholder=""
-                    />
-                  </div>
-                  <div class="space-y-1">
-                    <label for="endpoint-secret-key" class="block text-sm font-medium">Secret Access Key</label>
-                    <Input
-                      id="endpoint-secret-key"
-                      v-model="form.secret_access_key"
-                      :type="showCredentials ? 'text' : 'password'"
-                      class="font-mono"
-                      placeholder=""
-                    />
-                  </div>
-                </div>
-                <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
-                  <label class="flex items-center gap-2 cursor-pointer text-sm text-muted-foreground">
-                    <Checkbox :model-value="showCredentials" @update:model-value="showCredentials = $event === true" />
-                    <span>显示密钥</span>
-                  </label>
-
-                  <label class="flex items-center gap-2 cursor-pointer" title="控制 S3 请求中的桶名位置，不影响公开地址类型">
-                    <Checkbox :model-value="form.path_style" @update:model-value="form.path_style = $event === true" />
-                    <span class="text-sm">路径风格 (Path Style)</span>
-                  </label>
-                </div>
-              </template>
-
-              <!-- 通用存储配置 (所有端点) -->
-              <div class="space-y-2.5 pt-3 border-t border-border/50">
-                <div class="grid grid-cols-2 gap-3">
-                  <div class="space-y-1" :class="{ 'col-span-2': isDefaultEndpoint }">
-                    <label for="endpoint-bucket" class="block text-sm font-medium">
-                      {{ isLocal ? '存储目录 (Bucket)' : 'Bucket 名称' }}
-                    </label>
-                    <Input
-                      id="endpoint-bucket"
-                      v-model="form.bucket_name"
-                      type="text"
-                      :placeholder="isLocal ? 'uploads' : 'my-bucket'"
-                      :disabled="!!(editingEndpoint && editingEndpoint.location_count > 0)"
-                    />
-                  </div>
+                  <!-- 类型 (隐藏默认端点的类型选择) -->
                   <div v-if="!isDefaultEndpoint" class="space-y-1">
-                    <label for="endpoint-path-prefix" class="block text-sm font-medium">路径前缀</label>
-                    <Input
-                      id="endpoint-path-prefix"
-                      v-model="form.path_prefix"
-                      type="text"
-                      placeholder="可选，如 images/"
-                      :disabled="!!(editingEndpoint && editingEndpoint.location_count > 0)"
-                    />
+                    <label class="block text-sm font-medium">存储类型</label>
+                    <div class="grid grid-cols-2 gap-2">
+                      <Button
+                        v-for="p in providers"
+                        :key="p.value"
+                        @click="form.provider = p.value"
+                        :aria-pressed="form.provider === p.value"
+                        type="button"
+                        :variant="form.provider === p.value ? 'default' : 'outline'"
+                        class="relative w-full px-6"
+                      >
+                        <component :is="p.icon" class="w-4 h-4" />
+                        {{ p.label.split(' ')[0] }}
+                        <Check v-if="form.provider === p.value" class="absolute right-2 w-3.5 h-3.5" aria-hidden="true" />
+                      </Button>
+                    </div>
+                  </div>
+
+                </div>
+
+                <!-- S3 专属配置 -->
+                <template v-if="isS3Like && !isDefaultEndpoint">
+                  <div class="grid grid-cols-[minmax(0,1fr)_6rem] sm:grid-cols-[minmax(0,1fr)_8rem] gap-3">
+                    <div class="min-w-0 space-y-1">
+                      <label for="endpoint-url" class="block text-sm font-medium">端点 URL</label>
+                      <Input
+                        id="endpoint-url"
+                        v-model="form.endpoint_url"
+                        type="text"
+                        placeholder="https://s3.amazonaws.com"
+                      />
+                    </div>
+
+                    <div class="space-y-1">
+                      <label for="endpoint-region" class="block text-sm font-medium">区域</label>
+                      <Input
+                        id="endpoint-region"
+                        v-model="form.region"
+                        type="text"
+                        placeholder="auto"
+                      />
+                    </div>
+
+                  </div>
+
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div class="space-y-1">
+                      <label for="endpoint-access-key" class="block text-sm font-medium">Access Key ID</label>
+                      <Input
+                        id="endpoint-access-key"
+                        v-model="form.access_key_id"
+                        :type="showCredentials ? 'text' : 'password'"
+                        class="font-mono"
+                        placeholder=""
+                      />
+                    </div>
+                    <div class="space-y-1">
+                      <label for="endpoint-secret-key" class="block text-sm font-medium">Secret Access Key</label>
+                      <Input
+                        id="endpoint-secret-key"
+                        v-model="form.secret_access_key"
+                        :type="showCredentials ? 'text' : 'password'"
+                        class="font-mono"
+                        placeholder=""
+                      />
+                    </div>
+                  </div>
+                  <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
+                    <label class="flex items-center gap-2 cursor-pointer text-sm text-muted-foreground">
+                      <Checkbox :model-value="showCredentials" @update:model-value="showCredentials = $event === true" />
+                      <span>显示密钥</span>
+                    </label>
+
+                    <label class="flex items-center gap-2 cursor-pointer" title="控制 S3 请求中的桶名位置，不影响公开地址类型">
+                      <Checkbox :model-value="form.path_style" @update:model-value="form.path_style = $event === true" />
+                      <span class="text-sm">路径风格 (Path Style)</span>
+                    </label>
+                  </div>
+                </template>
+
+                <!-- 通用存储配置 (所有端点) -->
+                <div class="space-y-2.5 pt-3 border-t border-border/50">
+                  <div class="grid grid-cols-2 gap-3">
+                    <div class="space-y-1" :class="{ 'col-span-2': isDefaultEndpoint }">
+                      <label for="endpoint-bucket" class="block text-sm font-medium">
+                        {{ isLocal ? '存储目录 (Bucket)' : 'Bucket 名称' }}
+                      </label>
+                      <Input
+                        id="endpoint-bucket"
+                        v-model="form.bucket_name"
+                        type="text"
+                        :placeholder="isLocal ? 'uploads' : 'my-bucket'"
+                        :disabled="!!(editingEndpoint && editingEndpoint.location_count > 0)"
+                      />
+                    </div>
+                    <div v-if="!isDefaultEndpoint" class="space-y-1">
+                      <label for="endpoint-path-prefix" class="block text-sm font-medium">路径前缀</label>
+                      <Input
+                        id="endpoint-path-prefix"
+                        v-model="form.path_prefix"
+                        type="text"
+                        placeholder="可选，如 images/"
+                        :disabled="!!(editingEndpoint && editingEndpoint.location_count > 0)"
+                      />
+                    </div>
+                  </div>
+
+                  <p v-if="editingEndpoint && editingEndpoint.location_count > 0" class="text-xs text-amber-600 dark:text-amber-400">
+                    已关联 {{ editingEndpoint.location_count }} 张图片，存储目录与路径前缀已锁定
+                  </p>
+
+                  <div class="grid gap-3" :class="{ 'sm:grid-cols-[minmax(0,1fr)_14rem]': isS3Like && form.public_url_prefix }">
+                    <div class="min-w-0 space-y-1">
+                      <label for="endpoint-public-url" class="block text-sm font-medium">公开 URL 前缀</label>
+                      <Input
+                        id="endpoint-public-url"
+                        v-model="form.public_url_prefix"
+                        type="text"
+                        placeholder="https://cdn.example.com"
+                      />
+                    </div>
+                    <div v-if="isS3Like && form.public_url_prefix" class="space-y-1">
+                      <label for="public-url-type" class="block text-sm font-medium">公开地址类型</label>
+                      <Select
+                        :model-value="form.public_url_include_bucket ? 'service' : 'bucket'"
+                        @update:model-value="form.public_url_include_bucket = $event === 'service'"
+                      >
+                        <SelectTrigger id="public-url-type" class="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="service">服务地址（追加桶名）</SelectItem>
+                          <SelectItem value="bucket">桶专属地址（不追加桶名）</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <p class="text-xs text-muted-foreground">
+                    {{ isLocal ? '留空使用本站地址' : 'R2 填写公开域名，选择桶专属地址' }}
+                  </p>
+
+                  <!-- URL 预览 -->
+                  <div class="px-3 py-2 bg-muted/40 rounded-md">
+                    <p class="text-xs text-muted-foreground mb-1">访问地址示例</p>
+                    <code class="block text-xs text-foreground break-all">{{ urlPreview }}</code>
                   </div>
                 </div>
 
-                <p v-if="editingEndpoint && editingEndpoint.location_count > 0" class="text-xs text-amber-600 dark:text-amber-400">
-                  已关联 {{ editingEndpoint.location_count }} 张图片，存储目录与路径前缀已锁定
-                </p>
-
-                <div class="grid gap-3" :class="{ 'sm:grid-cols-[minmax(0,1fr)_14rem]': isS3Like && form.public_url_prefix }">
-                  <div class="min-w-0 space-y-1">
-                    <label for="endpoint-public-url" class="block text-sm font-medium">公开 URL 前缀</label>
-                    <Input
-                      id="endpoint-public-url"
-                      v-model="form.public_url_prefix"
-                      type="text"
-                      placeholder="https://cdn.example.com"
-                    />
-                  </div>
-                  <div v-if="isS3Like && form.public_url_prefix" class="space-y-1">
-                    <label for="public-url-type" class="block text-sm font-medium">公开地址类型</label>
-                    <Select
-                      :model-value="form.public_url_include_bucket ? 'service' : 'bucket'"
-                      @update:model-value="form.public_url_include_bucket = $event === 'service'"
-                    >
-                      <SelectTrigger id="public-url-type" class="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="service">服务地址（追加桶名）</SelectItem>
-                        <SelectItem value="bucket">桶专属地址（不追加桶名）</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-                <p class="text-xs text-muted-foreground">
-                  {{ isLocal ? '留空使用本站地址' : 'R2 填写公开域名，选择桶专属地址' }}
-                </p>
-
-                <!-- URL 预览 -->
-                <div class="px-3 py-2 bg-muted/40 rounded-md">
-                  <p class="text-xs text-muted-foreground mb-1">访问地址示例</p>
-                  <code class="block text-xs text-foreground break-all">{{ urlPreview }}</code>
-                </div>
-              </div>
-
+              </fieldset>
               <details class="group pt-3 border-t border-border/50">
                 <summary class="flex items-center justify-between cursor-pointer list-none text-sm">
                   <span class="font-medium">高级设置</span>
@@ -809,7 +871,7 @@ onUnmounted(() => {
                       <Button
                         v-for="r in roles"
                         :key="r.value"
-                        @click="form.role = r.value"
+                        @click="form.role = r.value; if (r.value === 'backup') form.is_default_upload = false"
                         :aria-pressed="form.role === r.value"
                         :title="r.description"
                         type="button"
@@ -824,7 +886,7 @@ onUnmounted(() => {
 
                   <!-- 备份端点提示 -->
                   <p v-if="form.role === 'backup'" class="text-xs text-muted-foreground">
-                    自动同步主端点图片，仅限一个备份端点
+                    自动同步主端点图片；切换为备份后，原备份端点将转为主端点。正在执行的同步方向保持不变。
                   </p>
 
                 </div>
@@ -837,7 +899,7 @@ onUnmounted(() => {
                   <span class="text-sm">启用端点</span>
                 </label>
                 <label class="flex items-center gap-3 cursor-pointer">
-                  <Checkbox :model-value="form.is_default_upload" @update:model-value="form.is_default_upload = $event === true" />
+                  <Checkbox :model-value="form.is_default_upload" :disabled="form.role === 'backup'" @update:model-value="form.is_default_upload = $event === true" />
                   <span class="text-sm">默认上传</span>
                 </label>
               </div>
@@ -856,6 +918,45 @@ onUnmounted(() => {
         </div>
       </Transition>
     </Teleport>
+
+    <Dialog :open="unlinkTarget !== null" @update:open="setUnlinkOpen">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>解除关联</DialogTitle>
+          <DialogDescription>
+            <template v-if="deleteRemoteFiles">删除「{{ unlinkTarget?.name }}」的远程文件，并解除对应关联。</template>
+            <template v-else>解除「{{ unlinkTarget?.name }}」的图片位置关联，不删除远程文件。</template>
+          </DialogDescription>
+        </DialogHeader>
+        <div class="space-y-4 text-sm">
+          <p v-if="impactLoading" class="text-muted-foreground">正在统计关联…</p>
+          <p v-else-if="impactError" class="text-destructive" role="alert">{{ impactError }}</p>
+          <p v-else-if="unlinkImpact" class="text-muted-foreground">
+            共 {{ unlinkImpact.total_locations }} 条关联。
+            <span v-if="unlinkImpact.unique_images > 0" class="text-destructive">
+              其中 {{ unlinkImpact.unique_images }} 张图片仅位于此端点，{{ deleteRemoteFiles ? '文件删除成功后将同时删除图库记录' : '解除后将无可用地址' }}。
+            </span>
+          </p>
+          <label for="unlink-delete-files" class="flex items-center gap-3">
+            <Checkbox id="unlink-delete-files" :model-value="deleteRemoteFiles" :disabled="unlinking !== null"
+                      @update:model-value="deleteRemoteFiles = $event === true" />
+            <span>同时删除远程文件</span>
+          </label>
+          <p v-if="deleteRemoteFiles" class="text-xs text-destructive">文件删除成功后，无其他副本的图片将从图库删除；有其他副本则保留。此操作不可恢复，失败项保留关联。</p>
+          <p v-if="!deleteRemoteFiles" class="text-xs text-muted-foreground">
+            仅清理本地关联并中断相关任务，不访问远程存储，端点配置保持不变。如有远程删除在途，请确认请求结束后再操作。
+          </p>
+          <p v-else-if="unlinkHasTask" class="text-xs text-destructive">端点有进行中的任务，请先中断任务再删除远程文件。</p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" :disabled="unlinking !== null" @click="setUnlinkOpen(false)">取消</Button>
+          <Button variant="destructive" :disabled="unlinkDisabled" @click="submitUnlink">
+            <Loader2 v-if="unlinking !== null" class="mr-2 h-4 w-4 animate-spin" />
+            解除关联
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <!-- 同步对话框 -->
     <Teleport to="body">

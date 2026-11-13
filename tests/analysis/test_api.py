@@ -1,7 +1,9 @@
 """图片分析接口：单次补充要求、权限与任务响应契约。"""
 
 import asyncio
+import io
 import json
+import zipfile
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -13,12 +15,15 @@ import pytest
 
 from imgtag.api.endpoints import external, images, mcp, queue, tasks as task_api
 from imgtag.api.endpoints.auth import get_current_user
+from imgtag.core.config import settings
 from imgtag.core.exceptions import EmbeddingAPIError
 from imgtag.main import unhandled_exception_handler
 from imgtag.models.task import Task
 from imgtag.schemas.image import ImageCreateByUrl, TagWithSource
 from imgtag.schemas.task import Task as TaskResponse
+from imgtag.services.storage_service import StorageService
 from imgtag.services.task_service import task_service
+from imgtag.services.upload_service import upload_service
 
 
 async def test_queue_api_preserves_custom_field_and_checks_permission_before_enqueue(monkeypatch):
@@ -470,7 +475,8 @@ async def test_task_visibility_and_redaction_use_database_filter_before_paginati
         conn.execute(text('CREATE TABLE images (id INTEGER PRIMARY KEY, uploaded_by INTEGER)'))
         conn.execute(text('INSERT INTO images VALUES (1,1),(2,2)'))
         conn.execute(text('''CREATE TABLE tasks (id TEXT PRIMARY KEY, type TEXT, status TEXT,
-            payload JSON, result JSON, error TEXT, created_at DATETIME, updated_at DATETIME, completed_at DATETIME)'''))
+            payload JSON, result JSON, error TEXT, run_token TEXT, heartbeat_at DATETIME,
+            created_at DATETIME, updated_at DATETIME, completed_at DATETIME)'''))
     with Session(engine) as sync:
         now = datetime.now(timezone.utc)
         for task_id, kind, payload in [('own-a','analyze_image',{'image_id':1}),
@@ -508,3 +514,178 @@ async def test_task_visibility_and_redaction_use_database_filter_before_paginati
         assert (await task_service.get_tasks(user=admin))['total'] == 7
         assert (await task_service.get_task('other', user=admin))['result']['analysis_input'] == {'private':'内部定义'}
     engine.dispose()
+
+
+async def test_global_task_mutations_require_admin_before_side_effects(monkeypatch):
+    cleanup = AsyncMock(return_value=4)
+    create = AsyncMock(return_value='vector-task')
+    monkeypatch.setattr(task_service, 'cleanup_old_tasks', cleanup)
+    monkeypatch.setattr(task_service, 'create_task', create)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_app('user')), base_url='http://test') as client:
+        assert (await client.post('/tasks/cleanup')).status_code == 403
+        assert (await client.post('/tasks/vectorize?force=true', json=[999])).status_code == 403
+    cleanup.assert_not_awaited()
+    create.assert_not_awaited()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_app('admin')), base_url='http://test') as client:
+        assert (await client.post('/tasks/cleanup')).status_code == 200
+        assert (await client.post('/tasks/vectorize?force=true', json=[999])).status_code == 200
+    cleanup.assert_awaited_once_with(7)
+    create.assert_awaited_once_with('vectorize_batch', {'image_ids': [999], 'force': True})
+
+
+async def test_external_upload_requires_upload_permission_without_ai_or_tags(upload_dependencies):
+    app = FastAPI()
+    app.include_router(external.router, prefix='/external')
+    app.dependency_overrides[external.require_api_key] = lambda: {'id': 1, 'role': 'user', 'permissions': 0}
+    app.dependency_overrides[external.get_async_session] = lambda: upload_dependencies
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/external/images', json={'image_url': 'http://192.168.1.10/image.png', 'auto_analyze': False})
+    assert response.status_code == 403
+    external.upload_service.save_remote_image.assert_not_awaited()
+    external.image_repository.create_image.assert_not_awaited()
+
+
+@pytest.mark.parametrize('kind', ['analyze_image', 'rebuild_vector'])
+async def test_task_retry_checks_ownership_and_ai_permission(monkeypatch, kind):
+    app = make_app('user')
+    user = {'id': 1, 'role': 'user', 'permissions': 0}
+    app.dependency_overrides[get_current_user] = lambda: user
+    class ReadSession:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+    monkeypatch.setattr(task_api, 'async_session_maker', ReadSession)
+    task = SimpleNamespace(id='own', type=kind, status='failed', payload={'image_id': 1})
+    visible = AsyncMock(return_value=None)
+    monkeypatch.setattr(task_api.task_repository, 'get_visible_by_id', visible)
+    retry = AsyncMock(return_value=True)
+    monkeypatch.setattr(task_api.task_queue, 'retry_task', retry)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        assert (await client.post('/tasks/other/retry')).status_code == 404
+        assert visible.await_args.args[1:] == ('other', 1)
+        retry.assert_not_awaited()
+        visible.return_value = task
+        assert (await client.post('/tasks/own/retry')).status_code == 403
+        retry.assert_not_awaited()
+        user['permissions'] = int(images.Permission.AI_ANALYZE)
+        assert (await client.post('/tasks/own/retry')).status_code == 200
+        retry.assert_awaited_once_with('own')
+
+
+@pytest.mark.parametrize('redirect', [False, True])
+async def test_remote_image_stream_keeps_unrestricted_urls_and_enforces_size(monkeypatch, redirect):
+    original_client = httpx.AsyncClient
+    requests = []
+    async def handler(request):
+        requests.append(str(request.url))
+        if redirect and request.url.host == 'images.example':
+            return httpx.Response(302, headers={'location': 'http://192.168.1.10/private.png'})
+        return httpx.Response(200, headers={'content-type': 'image/png'}, content=b'image')
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original_client(transport=httpx.MockTransport(handler), **kwargs))
+    monkeypatch.setattr(settings, 'MAX_UPLOAD_SIZE', 5)
+    url = 'https://images.example/a.png' if redirect else 'http://127.0.0.1/private.png'
+    assert await upload_service.fetch_remote_image(url) == (b'image', 'image/png')
+    assert any('192.168.1.10' in request if redirect else '127.0.0.1' in request for request in requests)
+    monkeypatch.setattr(settings, 'MAX_UPLOAD_SIZE', 4)
+    with pytest.raises(ValueError, match='大小限制'):
+        await upload_service.fetch_remote_image(url)
+
+
+async def test_remote_image_stops_reading_oversized_stream(monkeypatch):
+    original_client = httpx.AsyncClient
+    consumed = 0
+    class Chunks(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            nonlocal consumed
+            for _ in range(20):
+                consumed += 1
+                yield b'x' * 65536
+    async def handler(request):
+        return httpx.Response(200, headers={'content-type': 'image/png', 'content-length': '1'}, stream=Chunks())
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original_client(transport=httpx.MockTransport(handler), **kwargs))
+    monkeypatch.setattr(settings, 'MAX_UPLOAD_SIZE', 65536)
+    with pytest.raises(ValueError, match='大小限制'):
+        await upload_service.fetch_remote_image('http://images.example/chunked.png')
+    assert consumed == 2
+
+
+async def test_remote_image_has_total_download_deadline(monkeypatch):
+    wait_for = asyncio.wait_for
+    async def short_deadline(operation, timeout):
+        assert timeout == 30.0
+        return await wait_for(operation, 0.01)
+    async def hang(url):
+        await asyncio.Event().wait()
+    monkeypatch.setattr(upload_service, '_stream_remote_image', hang)
+    monkeypatch.setattr(asyncio, 'wait_for', short_deadline)
+    with pytest.raises(ValueError, match='下载超时'):
+        await upload_service.fetch_remote_image('http://images.example/slow.png')
+
+
+async def test_zip_upload_commits_each_image_before_next_network_call(upload_dependencies, monkeypatch):
+    app = FastAPI()
+    app.include_router(images.router, prefix='/images')
+    app.dependency_overrides[get_current_user] = lambda: {'id': 1, 'role': 'admin'}
+    app.dependency_overrides[images.get_async_session] = lambda: upload_dependencies
+    upload_dependencies.expunge = Mock()
+    held_lock = False
+    async def commit():
+        nonlocal held_lock
+        held_lock = False
+    async def rollback():
+        nonlocal held_lock
+        held_lock = False
+    async def create_location(*args, **kwargs):
+        nonlocal held_lock
+        held_lock = True
+    uploads = 0
+    async def upload(*args):
+        nonlocal uploads
+        assert not held_lock, '下一张图片的网络上传不能持有上一张图片的端点锁'
+        uploads += 1
+        return uploads != 2
+    upload_dependencies.commit = AsyncMock(side_effect=commit)
+    upload_dependencies.rollback = AsyncMock(side_effect=rollback)
+    monkeypatch.setattr(images.image_location_repository, 'create', AsyncMock(side_effect=create_location))
+    monkeypatch.setattr(images.storage_service, 'upload_to_endpoint', AsyncMock(side_effect=upload))
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, 'w') as zip_file:
+        for name in ('one.png', 'bad.png', 'three.png'):
+            zip_file.writestr(name, b'image')
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/images/upload-zip', files={'file': ('images.zip', archive.getvalue(), 'application/zip')})
+    assert response.status_code == 201, response.text
+    assert response.json()['uploaded_count'] == 2 and response.json()['failed_files'] == ['bad.png']
+    assert images.image_repository.create_image.await_count == 2
+    assert upload_dependencies.commit.await_count == 3
+    upload_dependencies.rollback.assert_awaited_once()
+
+
+@pytest.mark.parametrize('local_success', [True, False])
+async def test_upload_timeout_falls_back_and_requires_success_before_metadata(upload_dependencies, monkeypatch, local_success):
+    app = FastAPI()
+    app.include_router(images.router, prefix='/images')
+    app.dependency_overrides[get_current_user] = lambda: {'id': 1, 'role': 'admin'}
+    app.dependency_overrides[images.get_async_session] = lambda: upload_dependencies
+    service = StorageService()
+    remote = SimpleNamespace(id=2, name='remote', provider='s3', operation_generation=0)
+    monkeypatch.setattr(images.storage_endpoint_repository, 'resolve_upload_endpoint', AsyncMock(return_value=(remote, None)))
+    monkeypatch.setattr(settings, 'STORAGE_ITEM_TIMEOUT', 0.01)
+    async def hang(*args):
+        await asyncio.Event().wait()
+    monkeypatch.setattr(service, '_upload_s3', hang)
+    local = AsyncMock(return_value=local_success)
+    monkeypatch.setattr(service, '_upload_local', local)
+    monkeypatch.setattr(images.storage_service, 'upload_to_endpoint', service.upload_to_endpoint)
+    monkeypatch.setattr(images, '_post_upload_process', AsyncMock())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/images/upload', files={'file': ('one.png', b'image', 'image/png')},
+                                     data={'auto_analyze': 'false'})
+    await asyncio.sleep(0)
+    local.assert_awaited_once()
+    if local_success:
+        assert response.status_code == 201, response.text
+        assert images.image_location_repository.create.await_args.kwargs['endpoint_id'] == 1
+    else:
+        assert response.status_code == 500
+        images.image_repository.create_image.assert_not_awaited()
+        images.image_location_repository.create.assert_not_awaited()

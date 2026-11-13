@@ -9,11 +9,15 @@ from typing import TYPE_CHECKING, Optional, Sequence
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
+from imgtag.core.storage_constants import BATCH_CONFIG
+from imgtag.core.storage_runtime import StorageOperationStopped
 from imgtag.db.repositories.base import BaseRepository
+from imgtag.db.repositories.storage_endpoint import storage_endpoint_repository
+from imgtag.models.image import Image
 from imgtag.models.image_location import ImageLocation
 from imgtag.models.storage_endpoint import StorageEndpoint
 
@@ -22,6 +26,64 @@ class ImageLocationRepository(BaseRepository[ImageLocation]):
     """Repository for ImageLocation model."""
 
     model = ImageLocation
+
+    async def get_files_for_images(self, session, image_ids: list[int], owner_id: int | None = None):
+        """仅返回允许删除的图片所涉及的文件，不加载图片向量和其他元数据。"""
+        stmt = select(self.model.endpoint_id, self.model.object_key).join(Image).where(Image.id.in_(image_ids))
+        if owner_id is not None:
+            stmt = stmt.where(Image.uploaded_by == owner_id)
+        return (await session.execute(stmt)).all()
+
+    async def get_missing_backup_batch(self, session, endpoint_id: int, after_image_id: int, limit: int):
+        backed_up = select(self.model.image_id).where(
+            self.model.endpoint_id == endpoint_id, self.model.sync_status == "synced"
+        )
+        result = await session.execute(select(self.model.image_id, self.model.endpoint_id)
+            .join(StorageEndpoint, StorageEndpoint.id == self.model.endpoint_id)
+            .where(self.model.image_id > after_image_id, self.model.image_id.not_in(backed_up),
+                   self.model.is_primary.is_(True), self.model.sync_status == "synced",
+                   StorageEndpoint.is_enabled.is_(True), StorageEndpoint.role == "primary")
+            .order_by(self.model.image_id).limit(limit))
+        return result.all()
+
+    async def create(self, session, *, expected_generation: int | None = None, **values):
+        endpoint_id = values["endpoint_id"]
+        if expected_generation is None:
+            endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
+            if endpoint is None or not endpoint.is_enabled:
+                raise StorageOperationStopped("端点不可用，禁止新增关联")
+            expected_generation = endpoint.operation_generation or 0
+        await storage_endpoint_repository.guard_write(session, {endpoint_id: expected_generation})
+        if await storage_endpoint_repository.has_cleanup_task(session, endpoint_id):
+            raise StorageOperationStopped("端点正在清理，禁止新增位置关联")
+        return await super().create(session, **values)
+
+    async def remove_locations(
+        self, session, endpoint_id: int, location_ids: list[int] | None = None,
+        *, delete_empty_images: bool = False,
+    ) -> int:
+        """移除位置并补选主位置；删除文件时同时删除已无任何位置的图片。"""
+        condition = self.model.endpoint_id == endpoint_id
+        if location_ids is not None:
+            condition = condition & self.model.id.in_(location_ids)
+        result = await session.execute(delete(self.model).where(condition).returning(self.model.image_id))
+        image_ids = list(result.scalars().all())
+        for offset in range(0, len(image_ids), BATCH_CONFIG.batch_size):
+            affected_ids = image_ids[offset:offset + BATCH_CONFIG.batch_size]
+            if delete_empty_images:
+                # 与位置移除同一事务，仅处理本次受影响的图片；关联数据由外键级联清理。
+                await session.execute(delete(Image).where(
+                    Image.id.in_(affected_ids),
+                    ~select(self.model.id).where(self.model.image_id == Image.id).exists(),
+                ).execution_options(synchronize_session=False))
+            primary = select(self.model.image_id).where(self.model.is_primary.is_(True)).subquery()
+            candidates = select(func.min(self.model.id).label("id")).where(
+                self.model.image_id.in_(affected_ids), self.model.sync_status == "synced",
+                self.model.image_id.not_in(select(primary.c.image_id)),
+            ).group_by(self.model.image_id).subquery()
+            await session.execute(update(self.model).where(self.model.id.in_(select(candidates.c.id)))
+                                  .values(is_primary=True).execution_options(synchronize_session=False))
+        return len(image_ids)
 
     async def get_readable_by_image_ids(
         self, session: AsyncSession, image_ids: list[int],
@@ -311,44 +373,6 @@ class ImageLocationRepository(BaseRepository[ImageLocation]):
         )
         result = await session.execute(stmt)
         return result.scalar() or 0
-
-    async def batch_count_by_object_keys(
-        self,
-        session: AsyncSession,
-        endpoint_id: int,
-        object_keys: list[str],
-    ) -> dict[str, int]:
-        """Batch count locations for multiple object_keys on an endpoint.
-        
-        优化性能：一次查询获取多个 object_key 的引用计数，避免 N+1 问题。
-        
-        Args:
-            session: Database session.
-            endpoint_id: Endpoint ID to filter by.
-            object_keys: List of object keys to count.
-            
-        Returns:
-            Dict mapping object_key to reference count.
-        """
-        if not object_keys:
-            return {}
-        
-        from sqlalchemy import func
-
-        stmt = (
-            select(self.model.object_key, func.count().label("cnt"))
-            .where(self.model.endpoint_id == endpoint_id)
-            .where(self.model.object_key.in_(object_keys))
-            .group_by(self.model.object_key)
-        )
-        result = await session.execute(stmt)
-        
-        # 构建结果字典，未查到的 key 默认为 0
-        counts = {key: 0 for key in object_keys}
-        for row in result:
-            counts[row.object_key] = row.cnt
-        
-        return counts
 
     async def delete_by_endpoint(
         self,

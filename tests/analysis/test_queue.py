@@ -750,7 +750,7 @@ async def test_queue_api_defaults_to_force_reanalysis(queue, monkeypatch):
 async def test_retry_keeps_force_flag_and_attempt(queue, monkeypatch):
     from imgtag.db.repositories import task_repository
 
-    row = SimpleNamespace(id="failed", status="failed", payload={"image_id": 1, "force_analyze": True, "attempt": 1}, error="old error", result={"old": True}, completed_at="old")
+    row = SimpleNamespace(id="failed", type="analyze_image", status="failed", payload={"image_id": 1, "force_analyze": True, "attempt": 1}, error="old error", result={"old": True}, completed_at="old")
     monkeypatch.setattr(task_repository, "get_by_id", AsyncMock(return_value=row))
     session = SimpleNamespace(flush=AsyncMock())
     await task_repository.update_status(session, row.id, "pending")

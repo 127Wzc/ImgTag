@@ -456,6 +456,7 @@ async def _tool_add_image(
         session,
         image_id=new_image.id,
         endpoint_id=default_endpoint.id,
+        expected_generation=getattr(default_endpoint, "operation_generation", 0) or 0,
         object_key=full_key,
         is_primary=True,
         sync_status="synced",

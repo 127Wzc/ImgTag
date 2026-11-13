@@ -50,6 +50,8 @@ class Task(Base, TimestampMixin):
     error: Mapped[Optional[str]] = mapped_column(Text, comment="错误信息")
 
     # Completion
+    run_token: Mapped[Optional[str]] = mapped_column(String(36), comment="存储任务本次执行标识")
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), comment="存储任务执行心跳")
     completed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), comment="完成时间"
     )

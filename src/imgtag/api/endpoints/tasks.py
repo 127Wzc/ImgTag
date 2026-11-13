@@ -10,7 +10,7 @@ from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 
-from imgtag.api.endpoints.auth import get_current_user
+from imgtag.api.endpoints.auth import get_current_user, require_admin
 from imgtag.core.logging_config import get_logger
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import task_repository
@@ -18,6 +18,7 @@ from imgtag.schemas import Task, TaskResponse
 from imgtag.schemas.base import PaginatedResponse
 from imgtag.services.task_queue import task_queue
 from imgtag.services.task_service import task_service
+from imgtag.services.storage_sync_service import storage_sync_service
 from imgtag.api.permission_guards import ensure_permission
 from imgtag.core.permissions import Permission
 
@@ -57,8 +58,8 @@ async def get_task(task_id: str, user: Dict = Depends(get_current_user)):
 
 
 @router.post("/cleanup", response_model=Dict[str, Any])
-async def cleanup_tasks(days: int = Query(7, ge=1, description="保留天数"), user: Dict = Depends(get_current_user)):
-    """清理旧任务（需登录）"""
+async def cleanup_tasks(days: int = Query(7, ge=1, description="保留天数"), user: Dict = Depends(require_admin)):
+    """清理全局旧任务（仅管理员）。"""
     count = await task_service.cleanup_old_tasks(days)
     return {"message": f"已清理 {count} 个旧任务"}
 
@@ -67,9 +68,9 @@ async def cleanup_tasks(days: int = Query(7, ge=1, description="保留天数"), 
 async def create_vectorize_task(
     image_ids: List[int],
     force: bool = Query(False, description="是否强制重新生成"),
-    user: Dict = Depends(get_current_user)
+    user: Dict = Depends(require_admin)
 ):
-    """创建批量向量化任务（需登录）"""
+    """创建批量向量维护任务（仅管理员）。"""
     task_id = await task_service.create_task(
         "vectorize_batch",
         {"image_ids": image_ids, "force": force}
@@ -88,7 +89,7 @@ async def batch_delete_tasks(
     user: Dict = Depends(get_current_user)
 ):
     """批量删除任务（需登录）"""
-    count = await task_service.batch_delete(request.task_ids)
+    count = await task_service.batch_delete(request.task_ids, user=user)
     return {"message": f"已删除 {count} 个任务", "deleted_count": count}
 
 
@@ -110,7 +111,10 @@ async def retry_task(
     """
     # 获取任务信息
     async with async_session_maker() as session:
-        task = await task_repository.get_by_id(session, task_id)
+        if user.get("role") == "admin":
+            task = await task_repository.get_by_id(session, task_id)
+        else:
+            task = await task_repository.get_visible_by_id(session, task_id, user["id"])
     
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -127,8 +131,23 @@ async def retry_task(
             detail=f"任务类型 {task.type} 不支持重试"
         )
 
-    if task.type == "analyze_image":
+    if task.type in ("analyze_image", "rebuild_vector"):
         ensure_permission(user, Permission.AI_ANALYZE)
+
+    if task.type == "storage_sync":
+        if user.get("role") != "admin":
+            raise HTTPException(403, "存储同步任务仅管理员可重试")
+        if task.status != "failed":
+            raise HTTPException(400, "仅支持重试失败的同步任务")
+        payload = task.payload or {}
+        try:
+            ids = await storage_sync_service.start_batch_sync(
+                payload["source_endpoint_id"], payload["target_endpoint_id"],
+                payload.get("image_ids"), payload.get("force_overwrite", False),
+            )
+        except (KeyError, ValueError) as error:
+            raise HTTPException(409, "端点不可用或存在冲突任务，请在存储端点中重新同步") from error
+        return {"message": "已创建新的同步任务，原任务结果保留", "task_ids": ids, "task_id": ids[0] if ids else None}
     
     # 尝试重试
     success = await task_queue.retry_task(task_id)

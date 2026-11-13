@@ -5,15 +5,20 @@ Provides async access to task records for job queue management.
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Sequence
+from uuid import uuid4
 
 from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from imgtag.core.logging_config import get_logger
+from imgtag.core.config import settings
+from imgtag.core.storage_constants import StorageTaskType
+from imgtag.core.storage_runtime import storage_attempt
 from imgtag.db.repositories.base import BaseRepository
 from imgtag.models.task import Task
 from imgtag.models.image import Image
+from imgtag.models.storage_endpoint import StorageEndpoint
 
 logger = get_logger(__name__)
 
@@ -94,6 +99,7 @@ class TaskRepository(BaseRepository[Task]):
             type=task_type,
             status="pending",
             payload=payload,
+            created_at=datetime.now(timezone.utc),
         )
         session.add(task)
         await session.flush()
@@ -125,6 +131,24 @@ class TaskRepository(BaseRepository[Task]):
         if not task:
             logger.warning(f"任务不存在: {task_id}")
             return False
+
+        if task.type in StorageTaskType.all_values():
+            values = {"status": status}
+            if result is not None:
+                values["result"] = result
+            if error is not None:
+                values["error"] = error
+            if status in ("completed", "failed", "cancelled"):
+                values["completed_at"] = datetime.now(timezone.utc)
+            conditions = [Task.id == task_id, Task.status.in_(["pending", "processing"])]
+            attempt = storage_attempt.get()
+            if attempt and attempt[0] == task_id:
+                conditions.append(Task.run_token == attempt[1])
+                if status == "processing" and result is not None:
+                    values["heartbeat_at"] = datetime.now(timezone.utc)
+            changed = await session.execute(update(Task).where(*conditions).values(**values)
+                                            .execution_options(synchronize_session=False))
+            return bool(changed.rowcount)
 
         task.status = status
         if status == "pending":
@@ -212,7 +236,7 @@ class TaskRepository(BaseRepository[Task]):
         task = await self.get_by_id(session, task_id)
         if not task or not task.payload:
             return False
-        task.payload[field] = value
+        task.payload = {**task.payload, field: value}
         await session.flush()
         return True
 
@@ -259,22 +283,130 @@ class TaskRepository(BaseRepository[Task]):
         Returns:
             Active task if found, None otherwise.
         """
-        from sqlalchemy.dialects.postgresql import JSONB
-        from sqlalchemy import cast
-        
-        stmt = (
-            select(Task)
-            .where(Task.status.in_(["pending", "processing"]))
-            .where(Task.payload["endpoint_id"].as_integer() == endpoint_id)
-            .order_by(Task.created_at.desc())
-            .limit(1)
-        )
-        
-        if task_types:
-            stmt = stmt.where(Task.type.in_(task_types))
-        
+        stmt = self._active_endpoint_query(endpoint_id, task_types).limit(1)
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def get_recoverable_storage_tasks(self, session: AsyncSession, limit: int = 1000):
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.STORAGE_TASK_LEASE_SECONDS)
+        result = await session.execute(select(Task).where(
+            Task.type.in_([StorageTaskType.SYNC.value, StorageTaskType.DELETE.value, StorageTaskType.UNLINK.value]),
+            or_(Task.status == "pending", and_(
+                Task.status == "processing", or_(Task.heartbeat_at.is_(None), Task.heartbeat_at <= cutoff)
+            )),
+        ).order_by(Task.created_at, Task.id).limit(limit))
+        return result.scalars().all()
+
+    @staticmethod
+    def endpoint_condition(endpoint_id: int):
+        return or_(*(Task.payload[key].as_integer() == endpoint_id
+                     for key in ("endpoint_id", "source_endpoint_id", "target_endpoint_id")))
+
+    def _active_endpoint_query(self, endpoint_id: int, task_types: list[str] | None = None):
+        """列表和详情共用：运行优先，包含仍在删除收尾的终态任务。"""
+        stmt = select(Task).where(
+            self.endpoint_condition(endpoint_id),
+            or_(Task.status.in_(["pending", "processing"]),
+                Task.payload["delete_in_flight"].as_boolean().is_(True)),
+        ).order_by((Task.status == "processing").desc(), Task.created_at, Task.id)
+        return stmt.where(Task.type.in_(task_types)) if task_types else stmt
+
+    async def get_active_storage_for_endpoint(self, session, endpoint_id: int):
+        result = await session.execute(self._active_endpoint_query(endpoint_id, StorageTaskType.all_values()))
+        return result.scalars().all()
+
+    async def revoke_endpoint_tasks(self, session: AsyncSession, endpoint_id: int) -> list[str]:
+        """强制清理的手动恢复出口；撤销执行资格并释放遗留删除标记。"""
+        result = await session.execute(select(Task).where(
+            Task.type.in_(StorageTaskType.all_values()), self.endpoint_condition(endpoint_id),
+            or_(Task.status.in_(["pending", "processing"]),
+                Task.payload["delete_in_flight"].as_boolean().is_(True)),
+        ).order_by(Task.id).with_for_update().execution_options(populate_existing=True))
+        tasks = list(result.scalars())
+        for task in tasks:
+            await self.update_status(session, task.id, "cancelled", error="端点本地关联强制清理，执行资格已撤销")
+            task.run_token = None
+            task.heartbeat_at = None
+            if (task.payload or {}).get("delete_in_flight"):
+                task.payload = {**task.payload, "delete_in_flight": False}
+        await session.flush()
+        return [task.id for task in tasks]
+
+    async def claim_storage_task(self, session, task_id: str):
+        candidate = await self.get_by_id(session, task_id)
+        if not candidate or candidate.type not in StorageTaskType.all_values():
+            return None
+        endpoint_ids = {candidate.payload[key] for key in
+                        ("endpoint_id", "source_endpoint_id", "target_endpoint_id")
+                        if (candidate.payload or {}).get(key) is not None}
+        # 与关联写入保持相同锁序：先端点、再任务；短事务内决定执行资格。
+        if endpoint_ids:
+            await session.execute(select(StorageEndpoint).where(StorageEndpoint.id.in_(endpoint_ids))
+                                  .order_by(StorageEndpoint.id).with_for_update())
+        result = await session.execute(select(Task).where(Task.id == task_id).with_for_update()
+                                       .execution_options(populate_existing=True))
+        task = result.scalar_one_or_none()
+        if not task or task.type not in StorageTaskType.all_values() or task.status not in ("pending", "processing"):
+            return None
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=settings.STORAGE_TASK_LEASE_SECONDS)
+        if endpoint_ids:
+            peers = list((await session.execute(select(Task).where(
+                Task.type.in_(StorageTaskType.all_values()), Task.status.in_(["pending", "processing"]),
+                or_(*(self.endpoint_condition(endpoint_id) for endpoint_id in endpoint_ids)),
+            ).order_by(Task.created_at, Task.id).with_for_update()
+              .execution_options(populate_existing=True))).scalars())
+        else:
+            peers = [task]
+        busy = False
+        for peer in peers:
+            if (peer.payload or {}).get("delete_in_flight"):
+                busy = True
+                continue
+            heartbeat = peer.heartbeat_at
+            if heartbeat and heartbeat.tzinfo is None:
+                heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+            if peer.status == "processing":
+                if heartbeat and heartbeat > cutoff:
+                    busy = True
+                else:
+                    # 即使其他任务还在运行，也先撤销过期执行器的回写资格。
+                    peer.status, peer.run_token, peer.heartbeat_at = "pending", None, None
+        await session.flush()
+        if busy:
+            return None
+        if peers and peers[0].id != task_id:
+            return None
+        blocked = await session.execute(select(Task.id).where(
+            Task.type.in_(StorageTaskType.all_values()),
+            Task.payload["delete_in_flight"].as_boolean().is_(True),
+            or_(*(self.endpoint_condition(endpoint_id) for endpoint_id in endpoint_ids)),
+        ).limit(1)) if endpoint_ids else None
+        if blocked is not None and blocked.scalar_one_or_none() is not None:
+            return None
+        task.run_token = str(uuid4())
+        task.heartbeat_at = now
+        task.status = "processing"
+        await session.flush()
+        return task.run_token
+
+    async def set_delete_in_flight(self, session, task_id: str, token: str, active: bool):
+        result = await session.execute(select(Task).where(Task.id == task_id, Task.run_token == token)
+                                       .with_for_update().execution_options(populate_existing=True))
+        task = result.scalar_one_or_none()
+        if task:
+            released = (not active and bool((task.payload or {}).get("delete_in_flight"))
+                        and task.status in ("completed", "failed", "cancelled"))
+            task.payload = {**(task.payload or {}), "delete_in_flight": active}
+            await session.flush()
+            return released
+        return False
+
+    async def heartbeat_storage_task(self, session, task_id: str, token: str) -> bool:
+        result = await session.execute(update(Task).where(
+            Task.id == task_id, Task.status == "processing", Task.run_token == token,
+        ).values(heartbeat_at=datetime.now(timezone.utc)).execution_options(synchronize_session=False))
+        return bool(result.rowcount)
 
     async def cleanup_old_tasks(
         self,
@@ -293,7 +425,8 @@ class TaskRepository(BaseRepository[Task]):
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         stmt = (
             delete(Task)
-            .where(Task.status.in_(["completed", "failed"]))
+            .where(Task.status.in_(["completed", "failed", "cancelled"]))
+            .where(Task.payload["delete_in_flight"].as_boolean().is_not(True))
             .where(Task.created_at < cutoff)
         )
         result = await session.execute(stmt)
@@ -305,6 +438,8 @@ class TaskRepository(BaseRepository[Task]):
         self,
         session: AsyncSession,
         task_ids: list[str],
+        *,
+        owner_id: int | None = None,
     ) -> int:
         """Delete multiple tasks by IDs.
 
@@ -317,7 +452,12 @@ class TaskRepository(BaseRepository[Task]):
         """
         if not task_ids:
             return 0
-        stmt = delete(Task).where(Task.id.in_(task_ids))
+        stmt = delete(Task).where(
+            Task.id.in_(task_ids), Task.status.in_(["completed", "failed", "cancelled"]),
+            Task.payload["delete_in_flight"].as_boolean().is_not(True)
+        )
+        if owner_id is not None:
+            stmt = stmt.where(self.visible_to_owner(owner_id))
         result = await session.execute(stmt)
         return result.rowcount or 0
 

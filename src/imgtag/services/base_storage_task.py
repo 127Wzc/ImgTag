@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Generic, TypeVar
 
+from imgtag.core.config import settings
 from imgtag.core.logging_config import get_logger
 from imgtag.core.storage_constants import (
     BATCH_CONFIG,
@@ -18,8 +19,10 @@ from imgtag.core.storage_constants import (
     StorageTaskStatus,
     StorageTaskType,
 )
+from imgtag.core.storage_runtime import notify_storage_tasks, record_storage_progress
 from imgtag.db.database import async_session_maker
-from imgtag.db.repositories import task_repository
+from imgtag.db.repositories import image_location_repository, storage_endpoint_repository, task_repository
+from imgtag.services.storage_task_control import snapshot_endpoint, storage_task_control
 
 logger = get_logger(__name__)
 
@@ -78,9 +81,6 @@ class BaseStorageTaskService(ABC, Generic[T]):
     # Batch configuration
     BATCH_CONFIG: BatchConfig = BATCH_CONFIG
     
-    def __init__(self):
-        self._semaphore = asyncio.Semaphore(self.BATCH_CONFIG.max_concurrent)
-    
     # ========== Abstract Methods (must implement) ==========
     
     @abstractmethod
@@ -125,22 +125,6 @@ class BaseStorageTaskService(ABC, Generic[T]):
         """
         ...
     
-    @abstractmethod
-    async def on_task_complete(
-        self, 
-        progress: TaskProgress, 
-        context: T,
-    ) -> None:
-        """Called when task completes (success or failure).
-        
-        Use this for cleanup, final database updates, etc.
-        
-        Args:
-            progress: Final progress state.
-            context: Task-specific context object.
-        """
-        ...
-    
     # ========== Task Creation ==========
     
     async def create_task(
@@ -157,140 +141,98 @@ class BaseStorageTaskService(ABC, Generic[T]):
         Returns:
             Task ID.
         """
-        task_id = str(uuid.uuid4())
-        
-        # Add common fields to payload
-        payload["initiated_by"] = initiated_by
-        payload["created_at"] = datetime.now(timezone.utc).isoformat()
-        
         async with async_session_maker() as session:
-            await task_repository.create_task(
-                session,
-                task_id=task_id,
-                task_type=self.TASK_TYPE.value,
-                payload=payload,
-            )
+            task_id = await self.enqueue_task(session, payload, initiated_by)
             await session.commit()
-        
-        # Start background processing
-        asyncio.create_task(self._run_task(task_id))
+
+        # 提交后唤醒统一调度
+        notify_storage_tasks()
         
         logger.info(f"Created {self.TASK_TYPE.value} task: {task_id}")
+        return task_id
+
+    async def enqueue_task(self, session, payload: dict, initiated_by: str = "system") -> str:
+        """在调用方事务内登记任务；提交后由调用方唤醒调度。"""
+        endpoint_id = payload["endpoint_id"]
+        endpoints = await storage_endpoint_repository.lock_all(session)
+        endpoint = next((ep for ep in endpoints if ep.id == endpoint_id), None)
+        if endpoint is None:
+            raise ValueError("端点不存在")
+        if await storage_endpoint_repository.has_cleanup_task(session, endpoint_id) or await task_repository.get_active_for_endpoint(session, endpoint_id, StorageTaskType.all_values()):
+            raise ValueError("端点已有进行中的任务，请等待完成或先中断")
+        endpoint.operation_generation += 1
+        task_id = str(uuid.uuid4())
+        payload.update(initiated_by=initiated_by, created_at=datetime.now(timezone.utc).isoformat(),
+                       endpoint_snapshot=snapshot_endpoint(endpoint), endpoint_name=endpoint.name)
+        payload["total_count"] = (len(payload["object_keys"]) if "object_keys" in payload else
+                                 await image_location_repository.count_by_endpoint(session, endpoint_id))
+        await task_repository.create_task(session, task_id=task_id, task_type=self.TASK_TYPE.value, payload=payload)
         return task_id
     
     # ========== Task Execution ==========
     
     async def _run_task(self, task_id: str) -> None:
-        """Run task with error handling."""
-        progress = TaskProgress(
-            task_id=task_id,
-            task_type=self.TASK_TYPE,
-            status=StorageTaskStatus.PROCESSING,
-        )
-        context: T | None = None
-        
-        try:
-            # Load task and build context
+        await storage_task_control.run(task_id, lambda: self._execute(task_id))
+
+    async def _execute(self, task_id: str) -> None:
+        async with async_session_maker() as session:
+            task = await task_repository.get_by_id(session, task_id)
+            payload, result = task.payload or {}, task.result or {}
+        context = await self.build_context(task_id, payload)
+        items = await self.get_items_to_process(context)
+        progress = TaskProgress(task_id=task_id, task_type=self.TASK_TYPE,
+            status=StorageTaskStatus.PROCESSING, total_count=payload.get("total_count", len(items)),
+            success_count=result.get("success_count", 0), failed_count=0)
+        await self._process_items(items, progress, context)
+        progress.status = StorageTaskStatus.FAILED if progress.failed_count else StorageTaskStatus.COMPLETED
+        await self._update_progress(progress, final=True)
+
+    async def _process_items(self, items: list[Any], progress: TaskProgress, context: T) -> None:
+        consecutive_failures = 0
+        for item in items:
+            # 在网络请求前验证租约；网络期间不持有数据库锁或连接。
             async with async_session_maker() as session:
-                task = await task_repository.get_by_id(session, task_id)
-                if not task:
-                    logger.error(f"Task {task_id} not found")
-                    return
-                
-                await task_repository.update_status(
-                    session, task_id, StorageTaskStatus.PROCESSING.value
-                )
-                await session.commit()
-            
-            payload = task.payload or {}
-            context = await self.build_context(task_id, payload)
-            
-            # Get items and set total
-            items = await self.get_items_to_process(context)
-            progress.total_count = len(items)
-            
-            # Process items in batches
-            await self._process_items(items, progress, context)
-            
-            # Mark complete
-            progress.status = StorageTaskStatus.COMPLETED
-            
-        except Exception as e:
-            logger.error(f"Task {task_id} failed: {e}", exc_info=True)
-            progress.status = StorageTaskStatus.FAILED
-            progress.failed_items.append({"error": str(e)})
-        
-        finally:
-            # Update final status
-            await self._update_progress(progress, final=True)
-            
-            # Call completion hook
-            if context is not None:
-                try:
-                    await self.on_task_complete(progress, context)
-                except Exception as e:
-                    logger.error(f"on_task_complete failed: {e}")
-            
-            logger.info(
-                f"Task {task_id} {progress.status.value}: "
-                f"{progress.success_count} success, {progress.failed_count} failed"
-            )
-    
-    async def _process_items(
-        self,
-        items: list[Any],
-        progress: TaskProgress,
-        context: T,
-    ) -> None:
-        """Process items with batch concurrency and checkpoints."""
-        config = self.BATCH_CONFIG
-        
-        async def process_with_semaphore(item: Any) -> tuple[bool, str | None]:
-            """Process single item with semaphore control."""
-            async with self._semaphore:
-                if config.rate_limit_seconds > 0:
-                    await asyncio.sleep(config.rate_limit_seconds)
-                return await self.process_single_item(item, context)
-        
-        # 按 checkpoint_interval 分批处理
-        for batch_start in range(0, len(items), config.checkpoint_interval):
-            batch = items[batch_start:batch_start + config.checkpoint_interval]
-            
-            # 并发执行当前批次
-            results = await asyncio.gather(
-                *[process_with_semaphore(item) for item in batch],
-                return_exceptions=True
-            )
-            
-            # 统计结果
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    progress.failed_count += 1
-                    if len(progress.failed_items) < 50:
-                        progress.failed_items.append({
-                            "item": str(batch[i]),
-                            "error": str(result),
-                        })
-                    logger.error(f"Failed to process item: {result}")
-                else:
-                    success, error = result
-                    if success:
-                        progress.success_count += 1
+                await storage_endpoint_repository.guard_write(session, {
+                    context.endpoint_id: context.endpoint.operation_generation or 0,
+                })
+            try:
+                success, error = await asyncio.wait_for(
+                    self.process_single_item(item, context), timeout=settings.STORAGE_ITEM_TIMEOUT)
+            except asyncio.TimeoutError:
+                success, error = False, "单项操作超时"
+            if success:
+                async with async_session_maker() as session:
+                    # 补选主位置会更新其他端点的位置行，统一锁序避免两个清理任务交叉等待。
+                    await storage_endpoint_repository.lock_all(session)
+                    await storage_endpoint_repository.guard_write(session, {
+                        context.endpoint_id: context.endpoint.operation_generation or 0,
+                    })
+                    location_id = item.get("location_id", item.get("id"))
+                    if location_id is not None:
+                        await image_location_repository.remove_locations(session, context.endpoint_id,
+                            [location_id],
+                            delete_empty_images=(self.TASK_TYPE == StorageTaskType.DELETE or context.delete_files))
                     else:
-                        progress.failed_count += 1
-                        if len(progress.failed_items) < 50:
-                            progress.failed_items.append({
-                                "item": str(batch[i]),
-                                "error": error or "Unknown error",
-                            })
-            
-            # Checkpoint update
-            await self._update_progress(progress)
-            logger.debug(
-                f"Task {progress.task_id} checkpoint: "
-                f"{progress.processed_count}/{progress.total_count}"
-            )
-    
+                        # 定向删文件任务没有位置行；与进度一起保存剩余文件，恢复时不重复计数。
+                        context.object_keys = [key for key in context.object_keys if key != item["object_key"]]
+                        await task_repository.update_payload_field(session, progress.task_id, "object_keys", context.object_keys)
+                    progress.success_count += 1
+                    changed = await task_repository.update_status(session, progress.task_id, "processing", result=progress.to_result_dict())
+                    await session.commit()
+                    if changed:
+                        record_storage_progress(progress.task_id)
+                consecutive_failures = 0
+            else:
+                progress.failed_count += 1
+                consecutive_failures += 1
+                if len(progress.failed_items) < self.BATCH_CONFIG.max_failed_items:
+                    progress.failed_items.append({"location_id": item.get("location_id", item.get("id")), "error": error})
+                await self._update_progress(progress)
+                if consecutive_failures >= settings.STORAGE_MAX_CONSECUTIVE_FAILURES:
+                    raise RuntimeError("连续操作失败，任务已停止；已完成结果保留，未完成项目可重试")
+            if self.BATCH_CONFIG.rate_limit_seconds:
+                await asyncio.sleep(self.BATCH_CONFIG.rate_limit_seconds)
+
     # ========== Progress Tracking ==========
     
     async def _update_progress(
@@ -301,13 +243,15 @@ class BaseStorageTaskService(ABC, Generic[T]):
         """Update task progress in database."""
         async with async_session_maker() as session:
             status = progress.status.value if final else StorageTaskStatus.PROCESSING.value
-            await task_repository.update_status(
+            changed = await task_repository.update_status(
                 session,
                 progress.task_id,
                 status,
                 result=progress.to_result_dict(),
             )
             await session.commit()
+            if changed:
+                record_storage_progress(progress.task_id)
     
     async def get_progress(self, task_id: str) -> dict:
         """Get task progress.

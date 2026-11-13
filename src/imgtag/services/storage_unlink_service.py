@@ -1,10 +1,9 @@
 """Storage unlink service for endpoint cleanup.
 
 Handles background unlinking of endpoint locations with optional
-file deletion and orphan metadata cleanup.
+file deletion. Images without remaining locations are removed only when deleting files.
 """
 
-import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,11 +12,11 @@ from imgtag.core.storage_constants import BATCH_CONFIG, StorageTaskType
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import (
     image_location_repository,
-    image_repository,
     storage_endpoint_repository,
 )
-from imgtag.services.base_storage_task import BaseStorageTaskService, TaskProgress
+from imgtag.services.base_storage_task import BaseStorageTaskService
 from imgtag.services.storage_service import storage_service
+from imgtag.services.storage_task_control import load_endpoint_snapshot
 
 logger = get_logger(__name__)
 
@@ -36,7 +35,7 @@ class StorageUnlinkService(BaseStorageTaskService[UnlinkContext]):
     
     Handles endpoint unlinking with:
     - Optional physical file deletion
-    - Orphan metadata cleanup (images with no other locations)
+    - Per-item location cleanup, removing images with no copies when deleting files
     - Batch processing with progress tracking
     """
     
@@ -89,10 +88,10 @@ class StorageUnlinkService(BaseStorageTaskService[UnlinkContext]):
         endpoint_id = payload["endpoint_id"]
         
         async with async_session_maker() as session:
-            endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
+            endpoint = await load_endpoint_snapshot(session, payload.get("endpoint_snapshot"), endpoint_id)
             if not endpoint:
-                raise ValueError(f"Endpoint {endpoint_id} not found")
-        
+                raise ValueError("端点不存在")
+
         return UnlinkContext(
             endpoint_id=endpoint_id,
             endpoint=endpoint,
@@ -103,25 +102,18 @@ class StorageUnlinkService(BaseStorageTaskService[UnlinkContext]):
     async def get_items_to_process(self, context: UnlinkContext) -> list[Any]:
         """Get all locations for unlinking.
         
-        Collects location info and determines which images will become orphans.
+        Collects stable location IDs and object keys.
         """
         items = []
         async with async_session_maker() as session:
             async for loc in image_location_repository.iter_by_endpoint(
                 session, context.endpoint_id, batch_size=BATCH_CONFIG.batch_size
             ):
-                # Check if this image will become orphan
-                loc_count = await image_location_repository.count_by_image(
-                    session, loc.image_id
-                )
-                is_orphan = loc_count == 1  # Only this location exists
-                
                 items.append({
                     "location_id": loc.id,
                     "image_id": loc.image_id,
                     "object_key": loc.object_key,
                     "category_code": loc.category_code,
-                    "is_orphan": is_orphan,
                 })
         return items
     
@@ -133,24 +125,19 @@ class StorageUnlinkService(BaseStorageTaskService[UnlinkContext]):
         """Process a single location: optionally delete file.
         
         File deletion happens here if delete_files is True.
-        Location and orphan image deletion happens in on_task_complete.
+        The base runner commits location removal only after this item succeeds.
         """
         if not context.delete_files:
             # No file deletion needed, just mark as success
             return (True, None)
         
         try:
-            # 从 item 中读取预先查询的引用计数（由 run_task 批量查询）
-            # ref_count 包含当前这个 location（尚未删除）
-            # 如果 > 1，说明有其他 location 也引用这个文件
-            ref_count = item.get("ref_count", 1)
-            if ref_count > 1:
-                logger.debug(
-                    f"跳过删除文件 {item['object_key']}: "
-                    f"仍有 {ref_count - 1} 个其他 location 引用"
+            async with async_session_maker() as session:
+                references = await image_location_repository.count_by_object_key(
+                    session, context.endpoint_id, item["object_key"]
                 )
-                return (True, None)  # 标记为成功，但实际跳过删除
-            
+            if references > 1:
+                return (True, None)
             # Use delete_from_endpoint for both local and S3 endpoints
             # This method correctly handles path_prefix for all provider types
             success = await storage_service.delete_from_endpoint(
@@ -163,70 +150,6 @@ class StorageUnlinkService(BaseStorageTaskService[UnlinkContext]):
         except Exception as e:
             logger.error(f"Failed to delete {item['object_key']}: {e}")
             return (False, str(e))
-    
-    async def on_task_complete(
-        self,
-        progress: TaskProgress,
-        context: UnlinkContext,
-    ) -> None:
-        """Clean up location and orphan image records after processing."""
-        async with async_session_maker() as session:
-            # Delete all location records for this endpoint
-            deleted_locations = await image_location_repository.delete_by_endpoint(
-                session, context.endpoint_id
-            )
-            
-            # Delete orphan images if we were deleting files
-            deleted_images = 0
-            if context.delete_files and progress.extra.get("orphan_image_ids"):
-                orphan_ids = progress.extra["orphan_image_ids"]
-                deleted_images, _ = await image_repository.delete_by_ids(session, orphan_ids)
-            
-            await session.commit()
-            
-            logger.info(
-                f"Unlink complete for endpoint {context.endpoint_id}: "
-                f"locations={deleted_locations}, images={deleted_images}"
-            )
-    
-    async def run_task(self, task_id: str) -> None:
-        """Override to collect orphan image IDs during processing."""
-        # Build context first
-        async with async_session_maker() as session:
-            task = await self._get_task(session, task_id)
-            if not task:
-                logger.error(f"Task {task_id} not found")
-                return
-        
-        context = await self.build_context(task_id, task.payload)
-        items = await self.get_items_to_process(context)
-        
-        progress = TaskProgress(
-            task_id=task_id,
-            task_type=self.TASK_TYPE,
-            total_count=len(items),
-        )
-        
-        # Collect orphan image IDs
-        orphan_image_ids = [item["image_id"] for item in items if item.get("is_orphan")]
-        progress.extra["orphan_image_ids"] = orphan_image_ids
-        
-        # 预先批量查询引用计数，避免 N+1 查询，并将结果添加到每个 item 中
-        if context.delete_files and items:
-            object_keys = [item["object_key"] for item in items]
-            async with async_session_maker() as session:
-                ref_counts = await image_location_repository.batch_count_by_object_keys(
-                    session, context.endpoint_id, object_keys
-                )
-            # 将引用计数添加到每个 item 中
-            for item in items:
-                item["ref_count"] = ref_counts.get(item["object_key"], 1)
-        
-        # Call parent's batch processing
-        await self._process_items(items, context, progress)
-        
-        # Complete task
-        await self.on_task_complete(progress, context)
     
     async def get_unlink_progress(self, task_id: str) -> dict:
         """Get unlink task progress."""

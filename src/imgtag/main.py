@@ -30,7 +30,8 @@ from imgtag.services.task_queue import task_queue, QUEUE_TASK_TYPES
 from imgtag.services.auth_service import init_default_admin
 from imgtag.services.backup_service import schedule_daily_backup
 from imgtag.services.encryption_service import encryption_service
-from imgtag.services.storage_sync_service import storage_sync_service
+from imgtag.services.storage_task_recovery import recover_storage_tasks
+from imgtag.services.storage_service import storage_service
 from imgtag.services.upload_service import upload_service
 
 logger = get_logger(__name__)
@@ -149,11 +150,6 @@ async def lifespan(app: FastAPI):
             analysis_count = sum(1 for t in pending_tasks if t.type in QUEUE_TASK_TYPES)
             sync_count = sum(1 for t in pending_tasks if t.type == "storage_sync")
             
-            # 处理 storage_sync 任务（单独的服务）
-            for task_data in pending_tasks:
-                if task_data.type == "storage_sync":
-                    asyncio.create_task(storage_sync_service._process_sync_task(task_data.id))
-            
             # PostgreSQL 队列的 start_processing 内置了恢复机制
             # 会自动处理 analyze_image/rebuild_vector 类型的任务
             if analysis_count > 0:
@@ -161,7 +157,7 @@ async def lifespan(app: FastAPI):
                 logger.info(f"启动队列处理，{analysis_count} 个分析任务待处理")
             
             if sync_count > 0:
-                logger.info(f"已启动 {sync_count} 个同步任务")
+                logger.info(f"{sync_count} 个未完成同步任务将由租约恢复服务检查")
         else:
             logger.info(f"没有未完成的任务需要恢复")
     except Exception as e:
@@ -174,8 +170,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"启动备份定时任务失败: {e}")
     
+    storage_recovery = asyncio.create_task(recover_storage_tasks())
     yield
-    
+    storage_recovery.cancel()
+    await asyncio.gather(storage_recovery, return_exceptions=True)
+    storage_service.close()
+
     # 应用关闭时释放资源
     logger.info("应用关闭，释放资源")
     await close_db()

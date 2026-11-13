@@ -296,35 +296,35 @@ class UploadService:
         Returns:
             Tuple[bytes, str]: (图片内容, MIME 类型)
         """
-        start_time = time.perf_counter()
         logger.debug("获取远程图片")
         
         try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                
-                content = response.content
-                
-                # 获取 MIME 类型
-                content_type = response.headers.get("content-type", "image/jpeg")
-                mime_type = content_type.split(";")[0].strip()
-                
-                # 验证是否为图片
-                if not mime_type.startswith("image/"):
-                    raise ValueError(f"URL 返回的不是图片: {mime_type}")
-                
-                process_time = time.perf_counter() - start_time
-                logger.debug("远程图片获取完成: elapsed_ms=%.2f bytes=%s", process_time * 1000, len(content))
-                
-                return content, mime_type
-                
+            return await asyncio.wait_for(self._stream_remote_image(url), timeout=30.0)
+        except asyncio.TimeoutError as error:
+            logger.warning("远程图片下载超时")
+            raise ValueError("远程图片下载超时") from error
         except httpx.HTTPError as e:
             logger.error(f"获取远程图片失败: {str(e)}")
             raise ValueError(f"无法获取远程图片: {str(e)}")
         except Exception as e:
             logger.error(f"获取远程图片失败: {str(e)}")
             raise
+
+    async def _stream_remote_image(self, url: str) -> Tuple[bytes, str]:
+        """按实际接收字节数限制大小，避免先把超大响应完整载入内存。"""
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+                mime_type = response.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                if not mime_type.startswith("image/"):
+                    raise ValueError(f"URL 返回的不是图片: {mime_type}")
+                content = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                    if len(content) + len(chunk) > settings.MAX_UPLOAD_SIZE:
+                        raise ValueError("远程图片超过上传大小限制")
+                    content.extend(chunk)
+                logger.debug("远程图片获取完成: bytes=%s", len(content))
+                return bytes(content), mime_type
     
     async def save_remote_image(self, url: str) -> Tuple[str, str, bytes]:
         """获取并保存远程图片

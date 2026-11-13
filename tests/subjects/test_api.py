@@ -179,7 +179,7 @@ async def test_reference_images_requires_admin_and_bounds_page_size(monkeypatch)
         read.assert_awaited_once_with(None, 7, page=2, size=12, keyword='菲比')
 
 
-@pytest.mark.parametrize('role,status', [('admin', 400), ('user', 403)])
+@pytest.mark.parametrize('role,status', [('admin', 400), ('user', 404)])
 async def test_failed_extraction_cannot_replay_old_references_from_task_retry(monkeypatch, role, status):
     class Session:
         async def __aenter__(self): return self
@@ -187,10 +187,11 @@ async def test_failed_extraction_cannot_replay_old_references_from_task_retry(mo
 
     monkeypatch.setattr(task_api, 'async_session_maker', Session)
     monkeypatch.setattr(task_api.task_repository, 'get_by_id', AsyncMock(return_value=SimpleNamespace(type='extract_subject', status='failed')))
+    monkeypatch.setattr(task_api.task_repository, 'get_visible_by_id', AsyncMock(return_value=None))
     retry = AsyncMock()
     monkeypatch.setattr(task_api.task_queue, 'retry_task', retry)
     with pytest.raises(HTTPException) as error:
-        await task_api.retry_task('failed-extraction', {'role': role})
+        await task_api.retry_task('failed-extraction', {'id': 1, 'role': role})
     assert error.value.status_code == status
     if role == 'admin': assert '重新选择参考图' in error.value.detail
     retry.assert_not_awaited()

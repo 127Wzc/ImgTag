@@ -24,6 +24,7 @@ from imgtag.models.image_location import ImageLocation
 from imgtag.models.user import User
 from imgtag.services import storage_service, storage_sync_service
 from imgtag.services.storage_deletion_service import storage_deletion_service
+from imgtag.services.storage_management_service import storage_management_service
 from imgtag.schemas.storage import (
     ActiveTaskInfo,
     EndpointCreate,
@@ -34,6 +35,7 @@ from imgtag.schemas.storage import (
     DeletionImpactResponse,
     SoftDeleteRequest,
     HardDeleteRequest,
+    ForceCleanupRequest,
 )
 
 logger = get_logger(__name__)
@@ -60,24 +62,19 @@ async def list_endpoints(
     else:
         endpoints = await storage_endpoint_repository.get_all(session)
     
-    # 定义存储任务类型
-    # 使用枚举常量而非硬编码
-    storage_task_types = StorageTaskType.all_values()
-    
     result = []
     for ep in endpoints:
         count = await image_location_repository.count_by_endpoint(session, ep.id)
         
         # 查询活动任务
         active_task_info = None
-        active_task = await task_repository.get_active_for_endpoint(
-            session, ep.id, storage_task_types
-        )
+        active_tasks = await task_repository.get_active_storage_for_endpoint(session, ep.id)
+        active_task = active_tasks[0] if active_tasks else None
         if active_task:
             # 计算进度
             payload = active_task.payload or {}
             result_data = active_task.result or {}
-            total = payload.get("total_count", 0)
+            total = payload.get("total_count", payload.get("batch_size", 0))
             success = result_data.get("success_count", 0)
             failed = result_data.get("failed_count", 0)
             progress = ((success + failed) / total * 100) if total > 0 else 0
@@ -114,6 +111,9 @@ async def list_endpoints(
             read_priority=ep.read_priority,
             read_weight=ep.read_weight,
             is_healthy=ep.is_healthy,
+            last_health_check=ep.last_health_check,
+            health_check_error=ep.health_check_error,
+            has_active_sync=any(task.type == StorageTaskType.SYNC.value for task in active_tasks),
             location_count=count,
             active_task=active_task_info,
         ))
@@ -138,12 +138,8 @@ async def create_endpoint(
     if existing:
         raise HTTPException(400, f"Endpoint name '{data.name}' already exists")
     
-    # 检查备份端点唯一性：只允许一个备份端点
-    if data.role == EndpointRole.BACKUP.value:
-        backup_eps = await storage_endpoint_repository.get_backup_endpoints(session)
-        if backup_eps:
-            raise HTTPException(400, f"已存在备份端点 '{backup_eps[0].name}'，系统只允许一个备份端点")
-    
+    await storage_management_service.validate_create(session, data)
+
     # Create endpoint
     endpoint = await storage_endpoint_repository.create(
         session,
@@ -200,6 +196,8 @@ async def create_endpoint(
         read_priority=endpoint.read_priority,
         read_weight=endpoint.read_weight,
         is_healthy=endpoint.is_healthy,
+        last_health_check=endpoint.last_health_check,
+        health_check_error=endpoint.health_check_error,
         location_count=0,
     )
 
@@ -242,6 +240,8 @@ async def get_endpoint(
         read_priority=endpoint.read_priority,
         read_weight=endpoint.read_weight,
         is_healthy=endpoint.is_healthy,
+        last_health_check=endpoint.last_health_check,
+        health_check_error=endpoint.health_check_error,
         location_count=count,
     )
 
@@ -260,64 +260,8 @@ async def update_endpoint(
     """
     logger.info("更新存储端点: user_id=%s endpoint_id=%s", current_user["id"], endpoint_id)
     
-    endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
-    if not endpoint:
-        raise HTTPException(404, "Endpoint not found")
-    
-    # Update fields
-    update_data = data.model_dump(exclude_unset=True)
-    
-    # Check if trying to modify bucket_name or path_prefix when endpoint has images
-    # These fields affect file paths, so changing them would break existing images
-    location_count = await image_location_repository.count_by_endpoint(session, endpoint_id)
-    
-    new_bucket = update_data.get("bucket_name")
-    if new_bucket is not None and new_bucket != endpoint.bucket_name:
-        if location_count > 0:
-            raise HTTPException(
-                400,
-                f"无法修改存储目录：该端点有 {location_count} 张关联图片。请先解绑或迁移图片。"
-            )
-    
-    new_path_prefix = update_data.get("path_prefix")
-    if new_path_prefix is not None and new_path_prefix != endpoint.path_prefix:
-        if location_count > 0:
-            raise HTTPException(
-                400,
-                f"无法修改路径前缀：该端点有 {location_count} 张关联图片。请先解绑或迁移图片。"
-            )
-    
-    # Restrict default local endpoint (id=1) to storage and read strategy fields
-    if endpoint_id == 1:
-        allowed_fields = {"bucket_name", "public_url_prefix", "read_priority", "read_weight", "is_default_upload"}
-        # Filter to only allowed fields instead of rejecting
-        update_data = {k: v for k, v in update_data.items() if k in allowed_fields}
-    
-    # 检查备份端点唯一性：只允许一个备份端点
-    new_role = update_data.get("role")
-    if new_role == EndpointRole.BACKUP.value and endpoint.role != EndpointRole.BACKUP.value:
-        backup_eps = await storage_endpoint_repository.get_backup_endpoints(session)
-        if backup_eps:
-            raise HTTPException(400, f"已存在备份端点 '{backup_eps[0].name}'，系统只允许一个备份端点")
-    
-    # Handle credentials separately (encrypted)
-    # Only update if a non-empty value is provided (preserve existing on empty/null)
-    access_key = update_data.pop("access_key_id", None)
-    secret_key = update_data.pop("secret_access_key", None)
-    
-    if update_data:
-        await storage_endpoint_repository.update(session, endpoint, **update_data)
-    
-    # Only update credentials if non-empty value provided
-    if access_key:  # Truthy check: not None and not empty string
-        endpoint.access_key_id = access_key
-    if secret_key:  # Truthy check: not None and not empty string
-        endpoint.secret_access_key = secret_key
-    
-    # Handle default upload
-    if data.is_default_upload:
-        await storage_endpoint_repository.set_default_upload(session, endpoint_id)
-    
+    endpoint = await storage_management_service.update(session, endpoint_id, data.model_dump(exclude_unset=True))
+
     await session.commit()
     await session.refresh(endpoint)
     
@@ -345,6 +289,8 @@ async def update_endpoint(
         read_priority=endpoint.read_priority,
         read_weight=endpoint.read_weight,
         is_healthy=endpoint.is_healthy,
+        last_health_check=endpoint.last_health_check,
+        health_check_error=endpoint.health_check_error,
         location_count=count,
     )
 
@@ -364,34 +310,36 @@ async def delete_endpoint(
     """
     logger.info("删除存储端点: user_id=%s endpoint_id=%s", current_user["id"], endpoint_id)
     
-    # Protect default local endpoint
-    if endpoint_id == 1:
-        raise HTTPException(400, "Cannot delete the default local endpoint")
-    
-    endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
-    if not endpoint:
-        raise HTTPException(404, "Endpoint not found")
-    
-    # Check for associated locations
-    count = await image_location_repository.count_by_endpoint(session, endpoint_id)
-    if count > 0 and not force:
-        raise HTTPException(
-            400,
-            f"Cannot delete endpoint: {count} images are stored here. "
-            "Use /endpoints/{id}/locations to remove associations first, "
-            "or pass force=true to force delete."
-        )
-    
-    # If force=True and has locations, delete them first
-    if count > 0:
-        await image_location_repository.delete_by_endpoint(session, endpoint_id)
-    
-    await storage_endpoint_repository.delete(session, endpoint)
-    await session.commit()
-    
-    return {"message": "Endpoint deleted", "locations_removed": count}
+    return await storage_management_service.force_cleanup(
+        session, endpoint_id, remove_endpoint=True, require_empty=not force, initiated_by=current_user["username"],
+    )
 
 
+@router.post("/endpoints/{endpoint_id}/force-cleanup")
+async def force_cleanup_endpoint(
+    endpoint_id: int, data: ForceCleanupRequest,
+    current_user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    if not data.confirm:
+        raise HTTPException(400, "请确认清理操作")
+    logger.info("强制清理端点本地关联: user_id=%s endpoint_id=%s remove_endpoint=%s",
+                current_user["id"], endpoint_id, data.remove_endpoint)
+    return await storage_management_service.force_cleanup(
+        session, endpoint_id, remove_endpoint=data.remove_endpoint, expected_name=data.endpoint_name, initiated_by=current_user["username"],
+    )
+
+
+@router.post("/endpoints/{endpoint_id}/cancel-tasks")
+async def cancel_endpoint_tasks(
+    endpoint_id: int, current_user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_async_session),
+):
+    if not await storage_endpoint_repository.get_by_id(session, endpoint_id):
+        raise HTTPException(404, "端点不存在")
+    ids = await storage_management_service.cancel(session, endpoint_id)
+    logger.info("中断端点任务: user_id=%s endpoint_id=%s tasks=%s", current_user["id"], endpoint_id, len(ids))
+    return {"cancelled_task_ids": ids, "message": f"已中断 {len(ids)} 个任务"}
 
 
 @router.get("/endpoints/{endpoint_id}/deletion-impact", response_model=DeletionImpactResponse)
@@ -467,7 +415,7 @@ async def soft_delete_endpoint_locations(
     Starts a background task for batch processing with:
     - Progress tracking via task system
     - Optional physical file deletion
-    - Orphan metadata cleanup
+    - 成功项逐项清理；删除文件后无其他位置的图片一并删除图库记录
     
     Requires admin access with confirmation.
     """
@@ -575,7 +523,7 @@ async def get_endpoint_active_task(
     # Calculate progress
     payload = active_task.payload or {}
     result_data = active_task.result or {}
-    total = payload.get("total_count", 0)
+    total = payload.get("total_count", payload.get("batch_size", 0))
     success = result_data.get("success_count", 0)
     failed = result_data.get("failed_count", 0)
     progress = ((success + failed) / total * 100) if total > 0 else 0
@@ -730,19 +678,9 @@ async def set_default_endpoint(
     
     Requires admin access.
     """
-    endpoint = await storage_endpoint_repository.get_by_id(session, endpoint_id)
-    if not endpoint:
-        raise HTTPException(404, "Endpoint not found")
-    
-    await storage_endpoint_repository.set_default_upload(session, endpoint_id)
+    await storage_management_service.update(session, endpoint_id, {"is_default_upload": True})
     await session.commit()
-    
-    logger.info("设置默认上传端点: user_id=%s endpoint_id=%s", current_user["id"], endpoint_id)
-    
-    return {"message": f"Default upload endpoint set to: {endpoint.name}"}
-
-
-# === Sync APIs ===
+    return {"message": "默认上传端点已更新"}
 
 
 @router.post("/sync/start")
@@ -773,13 +711,14 @@ async def start_sync(
     
     # 双向同步已支持：Local ↔ S3
     
-    task_ids = await storage_sync_service.start_batch_sync(
-        source_endpoint_id=data.source_endpoint_id,
-        target_endpoint_id=data.target_endpoint_id,
-        image_ids=data.image_ids,
-        force_overwrite=data.force_overwrite,
-    )
-    
+    try:
+        task_ids = await storage_sync_service.start_batch_sync(
+            source_endpoint_id=data.source_endpoint_id, target_endpoint_id=data.target_endpoint_id,
+            image_ids=data.image_ids, force_overwrite=data.force_overwrite,
+        )
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
+
     return {
         "message": f"Started {len(task_ids)} sync task(s)",
         "task_ids": task_ids,
@@ -811,21 +750,8 @@ async def cancel_sync(
 ):
     """Cancel a sync task.
     
-    Note: Only marks task as cancelled, running operations complete.
+    撤销执行资格并通知执行器中断；已发送到远程的请求可能仍会完成。
     Requires admin access.
     """
-    # task_repository imported at top level
-    
-    task = await task_repository.get_by_id(session, task_id)
-    if not task:
-        raise HTTPException(404, "Task not found")
-    
-    if task.status in ("completed", "failed"):
-        raise HTTPException(400, f"Task already {task.status}")
-    
-    await task_repository.update_status(session, task_id, "cancelled")
-    await session.commit()
-    
-    logger.info("取消存储同步任务: user_id=%s task_id=%s", current_user["id"], task_id)
-    
-    return {"message": "Task cancelled"}
+    await storage_management_service.cancel_sync(session, task_id)
+    return {"message": "同步任务已中断"}

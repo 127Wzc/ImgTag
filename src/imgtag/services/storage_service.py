@@ -11,10 +11,13 @@ import os
 import random
 import re
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from functools import wraps
 from typing import Optional, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 
@@ -22,16 +25,32 @@ from imgtag.core.config import settings
 from imgtag.core.logging_config import get_logger
 from imgtag.core.search_logging import search_stage
 from imgtag.core.storage_constants import DEFAULT_PRIORITY, StorageProvider
+from imgtag.core.storage_runtime import storage_attempt, notify_storage_tasks
 from imgtag.db.database import async_session_maker
 from imgtag.db.repositories import (
     image_location_repository,
     storage_endpoint_repository,
+    task_repository,
 )
 from imgtag.models.image import Image
 from imgtag.models.image_location import ImageLocation
 from imgtag.models.storage_endpoint import StorageEndpoint
 
 logger = get_logger(__name__)
+
+
+def storage_timeout(failure):
+    """超时沿用存储接口的失败返回值，使调用方能够继续回退。"""
+    def decorate(operation):
+        @wraps(operation)
+        async def bounded(*args, **kwargs):
+            try:
+                return await asyncio.wait_for(operation(*args, **kwargs), timeout=settings.STORAGE_ITEM_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning("存储操作超时：%s", operation.__name__)
+                return failure
+        return bounded
+    return decorate
 
 
 def _select_by_weight(
@@ -97,6 +116,55 @@ class StorageService:
     Handles file upload/download across multiple storage backends
     with automatic endpoint selection and failover support.
     """
+
+    def __init__(self):
+        self._s3_executor = None
+        self._s3_slots = None
+        self._pending_deletes = set()
+
+    async def _run_s3(self, operation, *, drain_on_cancel=False, before_submit=None):
+        """S3 使用独立且有界的线程池；协程取消后，实际请求结束才归还容量。"""
+        if self._s3_executor is None:
+            self._s3_executor = ThreadPoolExecutor(
+                max_workers=settings.STORAGE_SYNC_CONCURRENCY, thread_name_prefix="imgtag-s3"
+            )
+            self._s3_slots = asyncio.Semaphore(settings.STORAGE_SYNC_CONCURRENCY)
+        slots = self._s3_slots
+        await slots.acquire()
+        loop = asyncio.get_running_loop()
+        try:
+            if before_submit is not None:
+                await before_submit()
+            future = self._s3_executor.submit(operation)
+        except (Exception, asyncio.CancelledError):
+            slots.release()
+            raise
+
+        def release_capacity(_):
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(slots.release)
+
+        future.add_done_callback(release_capacity)
+        wrapped = asyncio.wrap_future(future)
+        if not drain_on_cancel:
+            return await wrapped
+        try:
+            return await asyncio.shield(wrapped)
+        except asyncio.CancelledError:
+            # 删除不能撤回；收尾前保留数据库中的禁写标记。
+            while not wrapped.done():
+                try:
+                    await asyncio.shield(wrapped)
+                except asyncio.CancelledError:
+                    continue
+            wrapped.result()
+            raise
+
+    def close(self):
+        if self._s3_executor is not None:
+            self._s3_executor.shutdown(wait=False, cancel_futures=True)
+            self._s3_executor = None
+            self._s3_slots = None
 
     def generate_object_key(self, file_hash: str, extension: str) -> str:
         """Generate unified object key based on file hash.
@@ -483,6 +551,7 @@ class StorageService:
         
         return ""
 
+    @storage_timeout(False)
     async def upload_to_endpoint(
         self,
         file_content: bytes,
@@ -553,6 +622,9 @@ class StorageService:
             addressing_style = "path" if endpoint.path_style else "virtual"
             config = BotoConfig(
                 signature_version="s3v4",
+                connect_timeout=settings.STORAGE_CONNECT_TIMEOUT,
+                read_timeout=settings.STORAGE_READ_TIMEOUT,
+                retries={"mode": "standard", "total_max_attempts": settings.STORAGE_REQUEST_ATTEMPTS},
                 s3={"addressing_style": addressing_style},
             )
             
@@ -565,16 +637,16 @@ class StorageService:
                 config=config,
             )
             
-            client.put_object(
-                Bucket=endpoint.bucket_name,
-                Key=full_key,
-                Body=file_content,
-            )
+            try:
+                client.put_object(Bucket=endpoint.bucket_name, Key=full_key, Body=file_content)
+            finally:
+                client.close()
         
-        await asyncio.to_thread(_do_upload)
+        await self._run_s3(_do_upload)
         logger.info(f"Uploaded to {endpoint.name}: {object_key}")
         return True
 
+    @storage_timeout(None)
     async def download_from_endpoint(
         self,
         object_key: str,
@@ -629,6 +701,9 @@ class StorageService:
             addressing_style = "path" if endpoint.path_style else "virtual"
             config = BotoConfig(
                 signature_version="s3v4",
+                connect_timeout=settings.STORAGE_CONNECT_TIMEOUT,
+                read_timeout=settings.STORAGE_READ_TIMEOUT,
+                retries={"mode": "standard", "total_max_attempts": settings.STORAGE_REQUEST_ATTEMPTS},
                 s3={"addressing_style": addressing_style},
             )
             
@@ -641,11 +716,16 @@ class StorageService:
                 config=config,
             )
             
-            buffer = io.BytesIO()
-            client.download_fileobj(endpoint.bucket_name, full_key, buffer)
-            return buffer.getvalue()
+            try:
+                buffer = io.BytesIO()
+                client.download_fileobj(
+                    endpoint.bucket_name, full_key, buffer, Config=TransferConfig(use_threads=False)
+                )
+                return buffer.getvalue()
+            finally:
+                client.close()
         
-        return await asyncio.to_thread(_do_download)
+        return await self._run_s3(_do_download)
 
     @staticmethod
     def _object_hash(object_key: str) -> tuple[str, str] | None:
@@ -672,6 +752,7 @@ class StorageService:
             return False
         return True
 
+    @storage_timeout(False)
     async def file_exists(
         self,
         object_key: str,
@@ -729,6 +810,9 @@ class StorageService:
             addressing_style = "path" if endpoint.path_style else "virtual"
             config = BotoConfig(
                 signature_version="s3v4",
+                connect_timeout=settings.STORAGE_CONNECT_TIMEOUT,
+                read_timeout=settings.STORAGE_READ_TIMEOUT,
+                retries={"mode": "standard", "total_max_attempts": settings.STORAGE_REQUEST_ATTEMPTS},
                 s3={"addressing_style": addressing_style},
             )
             
@@ -746,9 +830,12 @@ class StorageService:
                 return True
             except ClientError:
                 return False
+            finally:
+                client.close()
         
-        return await asyncio.to_thread(_check)
+        return await self._run_s3(_check)
 
+    @storage_timeout(False)
     async def delete_from_endpoint(
         self,
         object_key: str,
@@ -789,6 +876,9 @@ class StorageService:
             addressing_style = "path" if endpoint.path_style else "virtual"
             config = BotoConfig(
                 signature_version="s3v4",
+                connect_timeout=settings.STORAGE_CONNECT_TIMEOUT,
+                read_timeout=settings.STORAGE_READ_TIMEOUT,
+                retries={"mode": "standard", "total_max_attempts": settings.STORAGE_REQUEST_ATTEMPTS},
                 s3={"addressing_style": addressing_style},
             )
             
@@ -801,63 +891,41 @@ class StorageService:
                 config=config,
             )
             
-            client.delete_object(Bucket=endpoint.bucket_name, Key=full_key)
+            try:
+                client.delete_object(Bucket=endpoint.bucket_name, Key=full_key)
+            finally:
+                client.close()
         
-        await asyncio.to_thread(_do_delete)
-        return True
+        attempt = storage_attempt.get()
 
-    async def copy_between_endpoints(
-        self,
-        session,
-        image_id: int,
-        source_endpoint: StorageEndpoint,
-        target_endpoint: StorageEndpoint,
-        object_key: str,
-    ) -> bool:
-        """在端点之间复制文件并创建 location 记录。
-        
-        Args:
-            session: Database session.
-            image_id: 图片ID.
-            source_endpoint: 源端点.
-            target_endpoint: 目标端点.
-            object_key: 对象键.
-            
-        Returns:
-            True if successful.
-        """
-        try:
-            # 下载源文件
-            content = await self.download_from_endpoint(object_key, source_endpoint)
-            if not content:
-                logger.warning(f"无法从端点 {source_endpoint.name} 下载 {object_key}")
-                return False
-            
-            # 上传到目标端点
-            success = await self.upload_to_endpoint(content, object_key, target_endpoint)
-            if not success:
-                return False
-            
-            # 创建 location 记录
-            from imgtag.models.image_location import ImageLocation
-            from datetime import datetime, timezone
-            
-            location = ImageLocation(
-                image_id=image_id,
-                endpoint_id=target_endpoint.id,
-                object_key=object_key,
-                is_primary=False,  # 备份不是主存储
-                sync_status="synced",
-                synced_at=datetime.now(timezone.utc),
-            )
-            session.add(location)
-            await session.flush()
-            
-            logger.info(f"图片 {image_id} 已复制到端点 {target_endpoint.name}")
+        async def mark_started():
+            if attempt:
+                async with async_session_maker() as session:
+                    await storage_endpoint_repository.guard_write(session, {endpoint.id: endpoint.operation_generation or 0})
+                    await task_repository.set_delete_in_flight(session, *attempt, True)
+                    await session.commit()
+
+        async def delete_and_release():
+            try:
+                await self._run_s3(_do_delete, drain_on_cancel=True, before_submit=mark_started)
+            finally:
+                if attempt:
+                    async with async_session_maker() as session:
+                        released = await task_repository.set_delete_in_flight(session, *attempt, False)
+                        await session.commit()
+                    if released:
+                        notify_storage_tasks()
             return True
-        except Exception as e:
-            logger.error(f"复制图片 {image_id} 到 {target_endpoint.name} 失败: {e}")
-            return False
+
+        # 取消调用者立即返回；独立收尾保留禁写标记，直到实际删除结束。
+        finishing = asyncio.create_task(delete_and_release())
+        self._pending_deletes.add(finishing)
+        def finished(task):
+            self._pending_deletes.discard(task)
+            if not task.cancelled() and task.exception() is not None:
+                logger.warning("远程删除收尾失败：%s", task.exception())
+        finishing.add_done_callback(finished)
+        return await asyncio.shield(finishing)
 
     @staticmethod
     def compute_file_hash(content: bytes) -> str:

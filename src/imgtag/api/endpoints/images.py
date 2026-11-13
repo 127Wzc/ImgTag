@@ -13,7 +13,6 @@ import logging
 import os
 import time
 import zipfile
-from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -75,6 +74,7 @@ from imgtag.schemas import (
     SuggestSubjectRequest,
 )
 from imgtag.services.search_service import search_service
+from imgtag.services.storage_deletion_service import storage_deletion_service
 from imgtag.services import embedding_service, storage_service, upload_service
 from imgtag.services.analysis_review_service import analysis_review_service
 from imgtag.services.image_update_service import image_update_service
@@ -387,6 +387,7 @@ async def analyze_and_create_from_url(
             session,
             image_id=new_image.id,
             endpoint_id=target_endpoint.id,
+            expected_generation=getattr(target_endpoint, "operation_generation", 0) or 0,
             object_key=full_object_key,
             category_code=category_code,
             is_primary=True,
@@ -650,9 +651,11 @@ async def upload_and_analyze(
                 # Fallback 到本地
                 target_endpoint = local_endpoint
                 is_local_endpoint = True
-                await storage_service.upload_to_endpoint(
+                upload_success = await storage_service.upload_to_endpoint(
                     file_content, full_object_key, target_endpoint
                 )
+                if not upload_success:
+                    raise HTTPException(status_code=500, detail="文件保存失败")
                 location_object_key = full_object_key
                 access_url = f"/uploads/{full_object_key}"
             else:
@@ -683,6 +686,7 @@ async def upload_and_analyze(
             session,
             image_id=new_image.id,
             endpoint_id=actual_endpoint_id,
+            expected_generation=(getattr(target_endpoint, "operation_generation", 0) or 0) if target_endpoint else None,
             object_key=location_object_key,
             category_code=category_code,
             is_primary=True,
@@ -782,6 +786,10 @@ async def upload_zip(
         if category_id:
             category_code = await get_category_code_cached(session, category_id)
 
+        # 保留本次上传的配置；单项回滚不会使端点属性过期并触发隐式查询。
+        session.expunge(target_endpoint)
+        # 网络上传期间不占用事务；每张图片独立提交，及时释放端点行锁。
+        await session.commit()
         with zipfile.ZipFile(io.BytesIO(zip_content), "r") as zf:
             for zip_info in zf.infolist():
                 if zip_info.is_dir():
@@ -796,7 +804,7 @@ async def upload_zip(
                     continue
 
                 try:
-                    file_content = zf.read(zip_info.filename)
+                    file_content = await asyncio.to_thread(zf.read, zip_info.filename)
                     
                     # 计算哈希和大小
                     file_size = round(len(file_content) / (1024 * 1024), 2)
@@ -813,9 +821,11 @@ async def upload_zip(
                     full_object_key = storage_service.get_full_object_key(object_key, category_code)
                     
                     # Upload to target endpoint
-                    await storage_service.upload_to_endpoint(
+                    uploaded = await storage_service.upload_to_endpoint(
                         file_content, full_object_key, target_endpoint
                     )
+                    if not uploaded:
+                        raise ValueError("存储端点上传失败")
 
                     new_image = await image_repository.create_image(
                         session,
@@ -833,6 +843,7 @@ async def upload_zip(
                         session,
                         image_id=new_image.id,
                         endpoint_id=target_endpoint.id,
+                        expected_generation=getattr(target_endpoint, "operation_generation", 0) or 0,
                         object_key=full_object_key,
                         category_code=category_code,
                         is_primary=True,
@@ -849,14 +860,13 @@ async def upload_zip(
                             sort_order=0,
                         )
 
+                    await session.commit()
                     uploaded_ids.append(new_image.id)
 
                 except Exception as e:
+                    await session.rollback()
                     logger.error(f"处理 ZIP 内文件 {filename} 失败: {e}")
                     failed_files.append(filename)
-
-        # Commit all in one transaction
-        await session.commit()
 
         total_time = time.perf_counter() - start_time
         logger.debug(
@@ -1725,47 +1735,12 @@ async def batch_delete_images(
             "process_time": "0秒",
         }
 
-    # 收集需要删除的文件信息（在事务前完成）
-    files_to_delete: list[dict] = []
-    
     try:
-        # 权限过滤
-        owner_id = get_owner_filter(user)
-        
-        # 如果需要删除物理文件，先收集文件位置信息
-        if delete_files:
-            from sqlalchemy.orm import selectinload
-            
-            stmt = select(Image).where(
-                Image.id.in_(image_ids)
-            ).options(selectinload(Image.locations))
-            
-            if owner_id is not None:
-                stmt = stmt.where(Image.uploaded_by == owner_id)
-            
-            result = await session.execute(stmt)
-            images = result.scalars().all()
-            
-            for image in images:
-                for location in image.locations:
-                    files_to_delete.append({
-                        "endpoint_id": location.endpoint_id,
-                        "object_key": location.object_key,
-                    })
-
-        # 事务内删除元数据（ImageLocations 通过 CASCADE 自动删除）
-        deleted_count, _ = await image_repository.delete_by_ids(
-            session, image_ids, owner_id=owner_id
+        result = await storage_deletion_service.delete_images(
+            session, image_ids, owner_id=get_owner_filter(user), delete_files=delete_files,
+            initiated_by=user.get("username", "system"),
         )
-        
-        # 提交事务
-        await session.commit()
-
-        # 后台异步删除物理文件（不阻塞响应）
-        if files_to_delete:
-            asyncio.create_task(
-                _delete_files_async(files_to_delete, logger)
-            )
+        deleted_count = result["deleted_count"]
 
         process_time = time.perf_counter() - start_time
         logger.debug("批量删除耗时: elapsed_ms=%.2f", process_time * 1000)
@@ -1776,87 +1751,19 @@ async def batch_delete_images(
             "message": f"批量删除完成: 成功 {deleted_count} 张，失败 {fail_count} 张",
             "success_count": deleted_count,
             "fail_count": fail_count,
-            "files_scheduled": len(files_to_delete) if delete_files else 0,
+            "files_scheduled": result["files_scheduled"],
+            "task_ids": result["task_ids"],
             "process_time": f"{process_time:.4f}秒",
         }
+    except ValueError as e:
+        await session.rollback()
+        logger.warning("批量删除与端点任务冲突: %s", e)
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         await session.rollback()
         logger.error(f"批量删除失败: {e}")
         raise HTTPException(status_code=500, detail=f"批量删除失败: {e}")
 
-
-async def _delete_files_async(
-    files: list[dict],
-    log: Any,
-) -> None:
-    """后台异步删除物理文件。
-    
-    Args:
-        files: 文件位置列表 [{"endpoint_id": int, "object_key": str}, ...]
-        log: Logger instance.
-    """
-    from imgtag.db.database import async_session_maker
-    
-    deleted = 0
-    skipped = 0
-    failed = 0
-    
-    # 按 endpoint_id 分组，并去重相同的 object_key
-    # （批量删除重复图片时可能有多个相同的 object_key）
-    files_by_endpoint: dict[int, set[str]] = defaultdict(set)
-    for f in files:
-        files_by_endpoint[f["endpoint_id"]].add(f["object_key"])
-    
-    async with async_session_maker() as session:
-        # 批量查询每个 endpoint 的引用计数
-        ref_counts_cache: dict[tuple[int, str], int] = {}
-        for endpoint_id, object_keys in files_by_endpoint.items():
-            counts = await image_location_repository.batch_count_by_object_keys(
-                session, endpoint_id, object_keys
-            )
-            for obj_key, count in counts.items():
-                ref_counts_cache[(endpoint_id, obj_key)] = count
-        
-        # 缓存 endpoint 对象
-        endpoint_cache: dict[int, Any] = {}
-        
-        # 迭代去重后的文件集合
-        for endpoint_id, object_keys in files_by_endpoint.items():
-            # 从缓存获取 endpoint
-            if endpoint_id not in endpoint_cache:
-                endpoint_cache[endpoint_id] = await storage_endpoint_repository.get_by_id(
-                    session, endpoint_id
-                )
-            endpoint = endpoint_cache[endpoint_id]
-            
-            if not endpoint:
-                continue
-            
-            for object_key in object_keys:
-                try:
-                    # 从缓存获取引用计数
-                    ref_count = ref_counts_cache.get((endpoint_id, object_key), 0)
-                    if ref_count > 0:
-                        log.debug(
-                            f"跳过删除文件 {object_key}: 仍有 {ref_count} 个 location 引用"
-                        )
-                        skipped += 1
-                        continue
-                    
-                    # 使用 delete_from_endpoint 统一删除（同时支持本地和远程）
-                    success = await storage_service.delete_from_endpoint(
-                        object_key=object_key,
-                        endpoint=endpoint,
-                    )
-                    if success:
-                        deleted += 1
-                    else:
-                        failed += 1
-                except Exception as e:
-                    failed += 1
-                    log.warning(f"删除文件失败: {object_key}, 错误: {e}")
-    
-    log.info(f"后台删除文件完成: 成功 {deleted}, 跳过 {skipped}, 失败 {failed}")
 
 
 class BatchUpdateTagsRequest(BaseModel):

@@ -5,6 +5,8 @@ import { useTasks, useTask, useRetryTask } from '@/api/queries'
 import { useMutation, useQueryClient } from '@tanstack/vue-query'
 import apiClient from '@/api/client'
 import type { Task as TaskItem } from '@/types'
+import { useUserStore } from '@/stores'
+import { Permission } from '@/constants/permissions'
 import ImageAnalysisHistoryDialog from '@/components/ImageAnalysisHistoryDialog.vue'
 import SubjectVersionsDialog from '@/components/SubjectVersionsDialog.vue'
 const showImageHistory = ref(false)
@@ -39,6 +41,12 @@ const total = computed(() => taskData.value?.total || 0)
 
 // Mutations
 const retryTaskMutation = useRetryTask()
+const userStore = useUserStore()
+const canRetry = (task: TaskItem) => task.status === 'failed' && (
+  task.type === 'storage_sync'
+    ? userStore.isAdmin
+    : ['analyze_image', 'rebuild_vector'].includes(task.type) && userStore.checkPermission(Permission.AI_ANALYZE)
+)
 
 // 批量删除 mutation
 const deleteMutation = useMutation({
@@ -81,8 +89,11 @@ const taskResult = computed(() => {
   return result
 })
 
-// 可删除的任务（已完成或失败）
-const deletableTasks = computed(() => tasks.value.filter(t => t.status === 'completed' || t.status === 'failed'))
+// 只允许删除已结束的任务记录。
+function canDelete(task: TaskItem) {
+  return ['completed', 'failed', 'cancelled'].includes(task.status) && !task.payload?.delete_in_flight
+}
+const deletableTasks = computed(() => tasks.value.filter(canDelete))
 const allSelected = computed(() => 
   deletableTasks.value.length > 0 && deletableTasks.value.every(t => selectedIds.value.includes(t.id))
 )
@@ -133,6 +144,7 @@ function getStatusLabel(status: string) {
     case 'processing': return '处理中'
     case 'completed': return '已完成'
     case 'failed': return '失败'
+    case 'cancelled': return '已中断'
     default: return status
   }
 }
@@ -145,6 +157,8 @@ function getTaskTypeLabel(type: string) {
     case 'vector_embed': return '向量嵌入'
     case 'storage_sync': return '存储同步'
     case 'storage_unlink': return '存储解绑'
+    case 'storage_delete': return '存储文件删除'
+    case 'storage_cleanup': return '端点本地清理'
     default: return type
   }
 }
@@ -180,9 +194,9 @@ const statusOptions = [
   { value: 'processing', label: '处理中' },
   { value: 'completed', label: '已完成' },
   { value: 'failed', label: '失败' },
+  { value: 'cancelled', label: '已中断' },
 ]
 
-const canDelete = (status: string) => status === 'completed' || status === 'failed'
 </script>
 
 <template>
@@ -275,7 +289,7 @@ const canDelete = (status: string) => status === 'completed' || status === 'fail
           <!-- 多选框 -->
           <div class="shrink-0" @click.stop>
             <input 
-              v-if="canDelete(task.status)"
+              v-if="canDelete(task)"
               type="checkbox" 
               :checked="selectedIds.includes(task.id)"
               @change="toggleSelect(task.id)"
@@ -326,7 +340,7 @@ const canDelete = (status: string) => status === 'completed' || status === 'fail
               <Eye class="w-4 h-4" />
             </Button>
             <Button 
-              v-if="task.status === 'failed' && ['analyze_image', 'rebuild_vector', 'storage_sync'].includes(task.type)"
+              v-if="canRetry(task)"
               variant="ghost" 
               size="icon"
               @click="handleRetry(task.id)"

@@ -6,18 +6,54 @@ Provides CRUD and specialized queries for storage_endpoints table.
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from imgtag.core.storage_constants import EndpointRole
+from imgtag.core.storage_constants import EndpointRole, StorageTaskType
+from imgtag.core.storage_runtime import StorageOperationStopped, storage_attempt
 from imgtag.db.repositories.base import BaseRepository
 from imgtag.models.storage_endpoint import StorageEndpoint
+from imgtag.models.task import Task
 
 
 class StorageEndpointRepository(BaseRepository[StorageEndpoint]):
     """Repository for StorageEndpoint model."""
 
     model = StorageEndpoint
+
+    async def lock_all(self, session):
+        result = await session.execute(select(self.model).order_by(self.model.id).with_for_update()
+                                       .execution_options(populate_existing=True))
+        return list(result.scalars().all())
+
+    async def guard_write(self, session, generations: dict[int, int]) -> None:
+        """端点检查、任务资格检查与元数据写入必须处于同一个短事务。"""
+        result = await session.execute(select(self.model).where(self.model.id.in_(generations))
+            .order_by(self.model.id).with_for_update().execution_options(populate_existing=True))
+        endpoints = {ep.id: ep for ep in result.scalars().all()}
+        if any(ep_id not in endpoints or endpoints[ep_id].operation_generation != generation
+               for ep_id, generation in generations.items()):
+            raise StorageOperationStopped("端点已被清理，旧操作禁止回写")
+        attempt = storage_attempt.get()
+        if attempt:
+            result = await session.execute(select(Task).where(Task.id == attempt[0]).with_for_update()
+                                           .execution_options(populate_existing=True))
+            task = result.scalar_one_or_none()
+            if not task or task.status != "processing" or task.run_token != attempt[1]:
+                raise StorageOperationStopped("任务已中断或由新的执行接管")
+
+    async def clear_sync_dependencies(self, session, endpoint_id: int) -> None:
+        await session.execute(update(self.model).where(self.model.sync_from_endpoint_id == endpoint_id)
+            .values(sync_from_endpoint_id=None, auto_sync_enabled=False))
+
+    async def has_cleanup_task(self, session, endpoint_id: int) -> bool:
+        result = await session.execute(select(Task.id).where(
+            Task.type.in_([StorageTaskType.DELETE.value, StorageTaskType.UNLINK.value]),
+            or_(Task.status.in_(["pending", "processing"]),
+                Task.payload["delete_in_flight"].as_boolean().is_(True)),
+            Task.payload["endpoint_id"].as_integer() == endpoint_id,
+        ).limit(1))
+        return result.scalar_one_or_none() is not None
 
     async def get_by_name(
         self,
@@ -110,11 +146,15 @@ class StorageEndpointRepository(BaseRepository[StorageEndpoint]):
                 return None, f"存储端点 {endpoint_id} 不可用"
             if endpoint.role == EndpointRole.BACKUP.value:
                 return None, "不能直接上传到备份端点"
+            if await self.has_cleanup_task(session, endpoint.id):
+                return None, "存储端点有清理任务，请先完成或中断"
             return endpoint, None
         else:
             endpoint = await self.get_default_upload(session)
             if not endpoint:
                 return None, "未配置可用的存储端点"
+            if await self.has_cleanup_task(session, endpoint.id):
+                return None, "默认存储端点有清理任务，请先完成或中断"
             return endpoint, None
 
     async def set_default_upload(

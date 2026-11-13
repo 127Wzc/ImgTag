@@ -118,6 +118,9 @@ class StorageEndpoint(Base, TimestampMixin):
     )
 
     # Health status
+    operation_generation: Mapped[int] = mapped_column(
+        Integer, server_default="0", nullable=False, comment="强制清理代次，拒绝旧操作回写"
+    )
     is_healthy: Mapped[bool] = mapped_column(
         Boolean, server_default="true", nullable=False, comment="是否健康"
     )
