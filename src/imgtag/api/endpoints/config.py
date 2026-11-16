@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.endpoints.auth import require_admin
 from imgtag.core.config_cache import config_cache
-from imgtag.core.config_defaults import DEFAULT_CONFIG, DEFAULT_CATEGORY_PROMPTS
+from imgtag.core.config_defaults import DEFAULT_CONFIG, DEFAULT_CATEGORY_PROMPTS, parse_max_upload_size
 from imgtag.core.logging_config import get_logger
 from imgtag.core.gif_analysis import validate_gif_analysis_config
 from imgtag.core.internal_config import validate_public_config_keys
@@ -100,6 +100,8 @@ async def update_configs(
         validate_subject_extraction_config(request.configs)
         validate_gif_analysis_config(request.configs)
         validate_search_config(request.configs)
+        if "max_upload_size" in request.configs:
+            parse_max_upload_size(request.configs["max_upload_size"])
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
     
@@ -153,6 +155,8 @@ async def update_single_config(
         validate_subject_extraction_config({key: value})
         validate_gif_analysis_config({key: value})
         validate_search_config({key: value})
+        if key == "max_upload_size":
+            parse_max_upload_size(value)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
     

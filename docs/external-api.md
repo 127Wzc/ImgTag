@@ -61,7 +61,7 @@ GET /api/v1/external/images/random?api_key=YOUR_API_KEY
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/images/random` | GET | 随机获取图片 |
-| `/images` | POST | 添加图片（支持 AI 分析） |
+| `/images` | POST | 通过 URL 或单文件表单添加图片（支持 AI 分析） |
 | `/images/{id}` | GET | 获取图片详情 |
 | `/images/search` | GET | 搜索图片 |
 
@@ -106,20 +106,24 @@ curl "http://your-domain/api/v1/external/images/random?api_key=YOUR_KEY&tags=风
 
 ### 2. 添加图片
 
-`POST /images`
+统一使用 `POST /images`：`application/json` 传 `image_url`，`multipart/form-data` 传 `file`。两者共用标签、分类、权限、存储、备份和分析流程。
+
+需要上传图片权限；创建新标签或实际执行 AI 分析时，还需对应的新建标签或 AI 分析权限。
 
 #### 参数
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `image_url` | string | **是** | - | 图片 URL |
-| `tags` | array | 否 | `[]` | 用户标签 |
+| `image_url` | string | **JSON 必填** | - | JSON 请求使用的图片 URL |
+| `file` | binary | **表单必填** | - | multipart 请求使用的单张图片文件 |
+| `tags` | array | 否 | `[]` | JSON 传数组；表单重复提交 `tags` 字段 |
 | `description` | string | 否 | `""` | 图片描述 |
 | `category_id` | int | 否 | - | 主分类 ID |
+| `endpoint_id` | int | 否 | - | 目标存储端点 ID，未指定时使用默认上传端点 |
 | `auto_analyze` | bool | 否 | `true` | 是否 AI 分析 |
 | `analysis_instructions` | string / null | 否 | `""` | 仅本次分析的补充要求，最多 6000 字符；未传、null、空串或纯空白均不生效 |
 | `callback_url` | string | 否 | - | 分析完成回调 URL |
-| `callback_headers` | object | 否 | `{}` | 可选的自定义回调请求头，名称和值原样用于回调。未指定 `callback_url` 时忽略 |
+| `callback_headers` | object / string | 否 | `{}` | JSON 传对象；表单传 JSON 对象字符串。名称和值原样用于回调；未指定 `callback_url` 时忽略 |
 | `is_public` | bool | 否 | `true` | 是否公开 |
 
 > [!TIP]
@@ -127,7 +131,7 @@ curl "http://your-domain/api/v1/external/images/random?api_key=YOUR_KEY&tags=风
 
 上传的 `tags` 以人工来源保存。新图片实际进入视觉分析时，若标签唯一命中已启用主体的名称或别名，且没有当前主体关联或显式选择记录，可自动建立 `source=tag、state=confirmed` 的关联；这是标签驱动的信任，不是先经过视觉验证。跳过视觉分析时不触发此流程。字段与完整条件见[主体资料与状态说明](subject-extraction.md#输入状态如何产生)。
 
-#### 示例
+#### URL JSON 示例
 
 ```bash
 # AI 自动分析
@@ -155,6 +159,24 @@ curl -X POST "http://your-domain/api/v1/external/images" \
     "description": "美丽的海边日落"
   }'
 ```
+
+#### 单文件表单上传
+
+`POST /images` 使用 `multipart/form-data` 时必填 `file`，每次提交一张图片，不传 `image_url`。其余选项与上表一致：表单中布尔值使用 `true` / `false`，多个标签重复提交 `tags`，`callback_headers` 使用 JSON 对象字符串。
+
+```bash
+curl -X POST "http://your-domain/api/v1/external/images" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -F "file=@/path/to/photo.png" \
+  -F "tags=风景" \
+  -F "tags=日落" \
+  -F "auto_analyze=true" \
+  -F "analysis_instructions=重点描述表情和动作" \
+  -F "callback_url=https://your-server.com/webhook" \
+  -F 'callback_headers={"Authorization":"Bearer YOUR_CALLBACK_TOKEN"}'
+```
+
+文件与 URL 下载统一使用后台“最大上传 (MB)”配置（默认 10 MiB），接收或下载过程中超限立即停止。表单文件按实际内容识别格式，默认支持 JPG/JPEG、PNG、GIF、WebP、BMP。响应与 URL 添加相同，`original_url` 为 `null`。空文件或无效图片返回 `400`，超过大小限制返回 `413`，不支持的文件类型返回 `415`；缺少文件或表单字段格式错误返回 `422`。
 
 #### 响应
 
@@ -609,8 +631,12 @@ Claude Desktop 配置（`~/.claude/claude_desktop_config.json`）：
 
 | 状态码 | 说明 |
 |--------|------|
+| `400` | 空文件、无效图片或存储端点配置不适用 |
 | `401` | 缺少或无效的 API Key |
+| `403` | 缺少上传、新建标签或 AI 分析权限 |
 | `404` | 资源不存在 |
+| `413` | 文件超过上传大小限制 |
+| `415` | 不支持的图片文件类型 |
 | `422` | 参数验证失败 |
 | `500` | 服务器内部错误 |
 

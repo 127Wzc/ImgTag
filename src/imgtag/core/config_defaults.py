@@ -9,6 +9,17 @@ Both ConfigService and ConfigRepository import from here.
 from imgtag.core.search_limits import SEARCH_DEFAULTS
 
 
+def parse_max_upload_size(value: str) -> int:
+    """后台最大上传以 MB 保存，统一换算为字节。"""
+    try:
+        size = int(float(value) * 1024 * 1024)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("最大上传必须是大于 0 的有效 MB 数值") from None
+    if size <= 0:
+        raise ValueError("最大上传必须大于 0")
+    return size
+
+
 SUBJECT_ANALYSIS_RULES = """# 描述结构与主体资料融合
 分类提示词负责 description 的具体结构、顺序、标点和信息粒度；分类未规定结构时才使用全局的通用描述。主体资料和核实结果不得改写分类要求的描述格式。
 仅当所选分类要求以下表情包格式时：主体: xxx。文字: xxx。心情/氛围: xxx。表述含义: xxx。必须保留这四项，按此顺序输出为一个字符串，不增加动作、场景、风格等平级分项，也不改成长段叙述。

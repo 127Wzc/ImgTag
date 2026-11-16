@@ -164,7 +164,7 @@ CREATE INDEX ON images USING ivfflat (embedding vector_cosine_ops);
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/v1/external/images` | POST | 添加图片 |
+| `/api/v1/external/images` | POST | 通过 URL 或单文件表单添加图片 |
 | `/api/v1/external/images/{id}` | GET | 获取详情 |
 | `/api/v1/external/images/random` | GET | 随机图片 |
 | `/api/v1/external/images/search` | GET | 搜索图片 |

@@ -17,11 +17,47 @@ import aiofiles
 import httpx
 import os
 
+from starlette.datastructures import Headers
+from starlette.formparsers import MultiPartException, MultiPartParser
+
 from imgtag.core.config import settings
+from imgtag.core.config_cache import config_cache
+from imgtag.core.config_defaults import parse_max_upload_size
 from imgtag.core.logging_config import get_logger
 from imgtag.core.storage_constants import get_extension_from_mime
 
 logger = get_logger(__name__)
+
+
+class UploadSizeExceeded(ValueError):
+    """表单文件或 URL 下载超过后台上传大小限制。"""
+
+
+class _FileSizeExceeded(MultiPartException):
+    """沿用解析器的异常清理，确保超限时关闭已创建的临时文件。"""
+
+
+class _UploadParser(MultiPartParser):
+    def __init__(self, headers, stream, max_size):
+        super().__init__(headers, stream, max_files=1)
+        self.max_size = max_size
+        self.file_bytes = 0
+
+    def on_part_data(self, data: bytes, start: int, end: int) -> None:
+        if self._current_part.file is not None:
+            self.file_bytes += end - start
+            if self.file_bytes > self.max_size:
+                raise _FileSizeExceeded("图片超过上传大小限制")
+        super().on_part_data(data, start, end)
+
+    async def parse(self):
+        try:
+            return await super().parse()
+        except (Exception, asyncio.CancelledError):
+            # 畸形表单、接收中断与超限都应立即释放部分写入的临时文件。
+            for file in self._files_to_close_on_error:
+                file.close()
+            raise
 
 
 class UploadService:
@@ -44,6 +80,22 @@ class UploadService:
         logger.info("初始化上传服务")
         self._upload_dir = settings.get_upload_path()
         self._initialized = True
+
+    async def get_max_upload_size(self, *, session=None) -> int:
+        value = await config_cache.get("max_upload_size", str(settings.MAX_UPLOAD_SIZE / (1024 * 1024)), session=session)
+        try:
+            return parse_max_upload_size(value)
+        except ValueError:
+            logger.warning("最大上传配置无效，使用默认上传大小限制")
+            return settings.MAX_UPLOAD_SIZE
+
+    async def parse_upload_form(self, headers: Headers, stream):
+        """接收时逐块检查文件大小，超限不再写入临时文件。"""
+        parser = _UploadParser(headers, stream, await self.get_max_upload_size())
+        try:
+            return await parser.parse()
+        except _FileSizeExceeded as error:
+            raise UploadSizeExceeded(error.message) from error
     
     def _get_extension(self, filename: str) -> str:
         """获取文件扩展名"""
@@ -210,12 +262,12 @@ class UploadService:
         logger.info(f"保存上传文件: {original_filename}, 大小: {len(file_content)} 字节")
         
         try:
-            # 使用配置常量获取最大上传大小 (默认 10MB)
-            max_size_bytes = settings.MAX_UPLOAD_SIZE
+            # 使用后台最大上传配置 (默认 10MB)
+            max_size_bytes = await self.get_max_upload_size()
             
             # 验证文件大小
             if len(file_content) > max_size_bytes:
-                raise ValueError(f"文件太大，最大允许 {max_size_mb}MB")
+                raise UploadSizeExceeded("图片超过上传大小限制")
             
             # 获取并验证扩展名
             extension = self._get_extension(original_filename)
@@ -287,7 +339,7 @@ class UploadService:
             logger.error(f"保存文件失败: {str(e)}")
             raise
     
-    async def fetch_remote_image(self, url: str) -> Tuple[bytes, str]:
+    async def fetch_remote_image(self, url: str, *, session=None) -> Tuple[bytes, str]:
         """获取远程图片
         
         Args:
@@ -299,7 +351,7 @@ class UploadService:
         logger.debug("获取远程图片")
         
         try:
-            return await asyncio.wait_for(self._stream_remote_image(url), timeout=30.0)
+            return await asyncio.wait_for(self._stream_remote_image(url, session=session), timeout=30.0)
         except asyncio.TimeoutError as error:
             logger.warning("远程图片下载超时")
             raise ValueError("远程图片下载超时") from error
@@ -310,8 +362,9 @@ class UploadService:
             logger.error(f"获取远程图片失败: {str(e)}")
             raise
 
-    async def _stream_remote_image(self, url: str) -> Tuple[bytes, str]:
+    async def _stream_remote_image(self, url: str, *, session=None) -> Tuple[bytes, str]:
         """按实际接收字节数限制大小，避免先把超大响应完整载入内存。"""
+        max_size = await self.get_max_upload_size(session=session)
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             async with client.stream("GET", url) as response:
                 response.raise_for_status()
@@ -320,13 +373,13 @@ class UploadService:
                     raise ValueError(f"URL 返回的不是图片: {mime_type}")
                 content = bytearray()
                 async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
-                    if len(content) + len(chunk) > settings.MAX_UPLOAD_SIZE:
-                        raise ValueError("远程图片超过上传大小限制")
+                    if len(content) + len(chunk) > max_size:
+                        raise UploadSizeExceeded("远程图片超过上传大小限制")
                     content.extend(chunk)
                 logger.debug("远程图片获取完成: bytes=%s", len(content))
                 return bytes(content), mime_type
     
-    async def save_remote_image(self, url: str) -> Tuple[str, str, bytes]:
+    async def save_remote_image(self, url: str, *, session=None) -> Tuple[str, str, bytes]:
         """获取并保存远程图片
         
         Args:
@@ -340,7 +393,7 @@ class UploadService:
         
         try:
             # 获取远程图片
-            content, mime_type = await self.fetch_remote_image(url)
+            content, mime_type = await self.fetch_remote_image(url, session=session)
             
             # 根据 MIME 类型确定扩展名（使用统一常量）
             extension = get_extension_from_mime(mime_type)

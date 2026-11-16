@@ -6,69 +6,34 @@
 Third-party integration using API key authentication.
 """
 
-import asyncio
-import hashlib
+import json
 import time
-from datetime import datetime, timezone as tz
 from math import ceil
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from pydantic import ValidationError
+from python_multipart.exceptions import MultipartParseError
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from imgtag.api.dependencies import require_api_key
-from imgtag.core.analysis_instructions import AnalysisInstructions
+from imgtag.api.permission_guards import ensure_create_tags_if_missing, ensure_permission
 from imgtag.core.logging_config import get_logger
 from imgtag.core.search_logging import traced_search
-from imgtag.api.permission_guards import ensure_create_tags_if_missing, ensure_permission
 from imgtag.core.permissions import Permission
-from imgtag.core.storage_constants import StorageProvider
 from imgtag.db import get_async_session
-from imgtag.db.repositories import (
-    image_location_repository,
-    image_repository,
-    image_tag_repository,
-    storage_endpoint_repository,
-    tag_repository,
-)
-from imgtag.core.category_cache import get_category_code_cached
-from imgtag.schemas.task import CallbackHeaders
-from imgtag.services import embedding_service
-from imgtag.services.backup_service import trigger_backup_for_image
+from imgtag.db.repositories import image_repository
+from imgtag.schemas.external import ExternalImageCreate, ExternalImageForm, ExternalImageOptions
+from imgtag.services.external_image_service import create_external_image, needs_analysis
 from imgtag.services.storage_service import storage_service
-from imgtag.services.task_queue import task_queue
-from imgtag.services.upload_service import upload_service
+from imgtag.services.upload_service import UploadSizeExceeded, upload_service
 
 logger = get_logger(__name__)
 
 router = APIRouter()
-
-
-class ExternalImageCreate(BaseModel):
-    """External API image create request.
-    
-    标签处理逻辑：
-    - 若同时提供 tags 和 description 且无补充要求，跳过 AI 分析，只生成向量嵌入
-    - 若只提供 tags，先保存为用户标签(source=user)，再进行 AI 分析
-    - AI 分析的标签会与用户标签合并，重名标签优先保留用户标签
-    - 若都不指定，正常进行 AI 分析
-    """
-
-    image_url: str = Field(..., description="图片URL")
-    tags: list[str] = Field(default=[], description="用户自定义标签列表")
-    description: str = Field(default="", description="用户提供的描述")
-    category_id: int | None = Field(default=None, description="主分类ID")
-    endpoint_id: int | None = Field(default=None, description="目标存储端点ID")
-    auto_analyze: bool = Field(default=True, description="是否启用 AI 分析")
-    analysis_instructions: AnalysisInstructions = Field(default="", max_length=6000, description="仅本次分析的补充要求；未传、null 或空白不生效")
-    callback_url: str | None = Field(default=None, description="分析完成后的回调URL")
-    callback_headers: CallbackHeaders = Field(
-        default_factory=dict, repr=False,
-        description="可选的自定义回调请求头，名称和值原样用于回调",
-    )
-    is_public: bool = Field(default=True, description="是否公开可见")
-
 
 
 @router.get("/images/random")
@@ -127,187 +92,80 @@ async def random_images(
         raise HTTPException(status_code=500, detail=f"查询失败: {e}")
 
 
-@router.post("/images")
+async def _add_external_image(options: ExternalImageOptions, api_user: dict, session: AsyncSession,
+                              *, image_url: str | None = None, file: UploadFile | None = None):
+    try:
+        await ensure_create_tags_if_missing(session, api_user, options.tags)
+        if needs_analysis(options):
+            ensure_permission(api_user, Permission.AI_ANALYZE)
+        return await create_external_image(session, api_user, options, image_url=image_url, file=file)
+    except UploadSizeExceeded as error:
+        raise HTTPException(413, str(error)) from error
+    except HTTPException:
+        raise
+    except Exception as error:
+        logger.error("外部添加图片失败: %s", error)
+        raise HTTPException(500, "添加图片失败") from error
+
+
+def _validate_upload(model, data):
+    try:
+        return model.model_validate(data)
+    except ValidationError as error:
+        raise RequestValidationError([
+            {**item, "loc": ("body", *item["loc"])} for item in error.errors()
+        ]) from error
+
+
+_form_schema = ExternalImageForm.model_json_schema()
+_form_schema["properties"]["file"] = {"type": "string", "format": "binary", "description": "单张图片文件"}
+_form_schema["required"] = ["file"]
+
+
+@router.post("/images", openapi_extra={"requestBody": {"required": True, "content": {
+    "application/json": {"schema": ExternalImageCreate.model_json_schema()},
+    "multipart/form-data": {"schema": _form_schema},
+}}})
 async def analyze_image_from_url(
-    request: ExternalImageCreate,
+    request: Request,
     api_user: dict = Depends(require_api_key),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Add and analyze image from URL.
-
-    Downloads image, saves to specified endpoint (or local), queues for analysis.
-
-    Args:
-        request: Image URL and options.
-        api_user: API user.
-        session: Database session.
-
-    Returns:
-        Created image info. If wait_for_result=True, includes AI-generated tags and description.
-    """
-    
-    start_time = time.perf_counter()
-    logger.info("外部添加图片: user_id=%s", api_user.get("id"))
-
-    try:
-        ensure_permission(api_user, Permission.UPLOAD_IMAGE)
-        await ensure_create_tags_if_missing(session, api_user, request.tags)
-
-        # 权限校验需在上传/落库前完成，避免产生副作用
-        skip_analyze = not request.auto_analyze  # 绝对优先级
-        has_valid_tags = bool([t for t in request.tags if t and t.strip()])
-        has_valid_description = bool(request.description and request.description.strip())
-        user_provided_full = has_valid_tags and has_valid_description
-        need_analysis = request.auto_analyze and (bool(request.analysis_instructions.strip()) or not user_provided_full)
-        if need_analysis:
-            ensure_permission(api_user, Permission.AI_ANALYZE)
-
-        # 获取目标端点
-        target_endpoint, err = await storage_endpoint_repository.resolve_upload_endpoint(
-            session, request.endpoint_id
-        )
-        if err:
-            raise HTTPException(400, err)
-        
-        # Download and save image
-        file_path, local_url, content = await upload_service.save_remote_image(
-            request.image_url
-        )
-
-        # Calculate hash and size
-        file_hash = await asyncio.to_thread(lambda: hashlib.md5(content).hexdigest())
-        file_size = round(len(content) / (1024 * 1024), 2)
-        
-        # 提取图片尺寸（PIL 操作移至线程池，避免阻塞）
-        width, height = await asyncio.to_thread(
-            upload_service.extract_image_dimensions, content
-        )
-        file_type = file_path.split(".")[-1] if "." in file_path else "jpg"
-
-        new_image = await image_repository.create_image(
-            session,
-            file_hash=file_hash,
-            file_type=file_type,
-            file_size=file_size,
-            width=width,
-            height=height,
-            description=request.description,
-            original_url=request.image_url,
-            embedding=None,
-            uploaded_by=api_user.get("id"),
-            is_public=request.is_public,
-        )
-        
-        # 生成统一的 object_key
-        object_key = storage_service.generate_object_key(file_hash, file_type)
-        
-        # 获取分类代码（如果指定了分类）
-        category_code = None
-        if request.category_id:
-            category_code = await get_category_code_cached(session, request.category_id)
-        
-        full_object_key = storage_service.get_full_object_key(object_key, category_code)
-        
-        # 上传到目标端点
-        upload_success = await storage_service.upload_to_endpoint(
-            content, full_object_key, target_endpoint
-        )
-        if not upload_success:
-            raise HTTPException(500, f"上传到端点 {target_endpoint.name} 失败")
-        
-        # 创建 ImageLocation 记录
-        await image_location_repository.create(
-            session,
-            image_id=new_image.id,
-            endpoint_id=target_endpoint.id,
-            expected_generation=getattr(target_endpoint, "operation_generation", 0) or 0,
-            object_key=full_object_key,
-            category_code=category_code,
-            is_primary=True,
-            sync_status="synced",
-            synced_at=datetime.now(tz.utc),
-        )
-
-        # Set tags if provided
-        if request.tags:
-            await image_tag_repository.set_image_tags(
-                session,
-                new_image.id,
-                request.tags,
-                source="user",
-                added_by=api_user.get("id"),
-            )
-        
-        # Set category tag if provided
-        if request.category_id:
-            await image_tag_repository.add_tag_to_image(
-                session,
-                new_image.id,
-                request.category_id,
-                source="user",
-                sort_order=0,
-                added_by=api_user.get("id"),
-            )
-        
-        # Set resolution tag
-        if width and height:
-            resolution_name = upload_service.get_resolution_level(width, height)
-            if resolution_name != "unknown":
-                resolution_tag = await tag_repository.get_or_create(
-                    session, resolution_name, source="system", level=1
-                )
-                await image_tag_repository.add_tag_to_image(
-                    session, new_image.id, resolution_tag.id, source="system", sort_order=1
-                )
-        
-        await session.commit()
-        
-        # 触发自动备份到备份端点（必须在 commit 之后）
-        asyncio.create_task(
-            trigger_backup_for_image(new_image.id, target_endpoint.id)
-        )
-
-        # 判断是否需要 AI 分析
-        if need_analysis:
-            # 加入 AI 分析任务队列
-            # - 如果用户提供了部分标签，AI 会补充并合并
-            await task_queue.add_tasks(
-                [new_image.id], 
-                callback_url=request.callback_url,
-                analysis_instructions=request.analysis_instructions,
-                callback_headers=request.callback_headers,
-            )
-        elif user_provided_full:
-            # 用户已提供完整内容，只需生成向量（后台执行）
-            asyncio.create_task(
-                embedding_service.save_embedding_for_image(
-                    new_image.id, request.description, request.tags
-                )
-            )
-
-        process_time = time.perf_counter() - start_time
-        
-        display_url = await storage_service.get_read_url(new_image) or ""
-        
-        # 获取当前标签（用户标签 + 分类 + 分辨率）
-        final_tags = await image_repository.get_image_tags_with_source(session, new_image.id)
-
-        return {
-            "id": new_image.id,
-            "image_url": display_url,
-            "original_url": request.image_url,
-            "tags": final_tags,
-            "description": new_image.description or request.description,
-            "width": width,
-            "height": height,
-            "skip_analyze": skip_analyze,
-            "process_time": f"{process_time:.4f}秒",
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"添加图片失败: {e}")
-        raise HTTPException(status_code=500, detail=f"添加失败: {e}")
+    """添加图片：JSON 传 image_url，multipart/form-data 传单个 file。"""
+    ensure_permission(api_user, Permission.UPLOAD_IMAGE)
+    # 身份认证只读事务在接收请求体前结束，慢上传不占用数据库连接。
+    await session.rollback()
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type == "multipart/form-data":
+        try:
+            form = await upload_service.parse_upload_form(request.headers, request.stream())
+        except UploadSizeExceeded as error:
+            raise HTTPException(413, str(error)) from error
+        except MultiPartException as error:
+            raise HTTPException(400, error.message) from error
+        except MultipartParseError as error:
+            raise HTTPException(400, "无效的表单数据") from error
+        try:
+            file = form.get("file")
+            if not isinstance(file, UploadFile):
+                raise RequestValidationError([{"type": "missing", "loc": ("body", "file"), "msg": "Field required", "input": None}])
+            data = dict(form)
+            data["tags"] = form.getlist("tags")
+            for key in ("category_id", "endpoint_id"):
+                if data.get(key) == "":
+                    data[key] = None
+            options = _validate_upload(ExternalImageForm, data)
+            return await _add_external_image(options, api_user, session, file=file)
+        finally:
+            await form.close()
+    if not content_type or content_type == "application/json" or content_type.startswith("application/") and content_type.endswith("+json"):
+        try:
+            data = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise RequestValidationError([{"type": "json_invalid", "loc": ("body",), "msg": "Invalid JSON", "input": None}]) from error
+        options = _validate_upload(ExternalImageCreate, data)
+        return await _add_external_image(options, api_user, session, image_url=options.image_url)
+    raise HTTPException(415, "请使用 application/json 或 multipart/form-data")
 
 
 @router.get("/images/search")

@@ -415,7 +415,7 @@ async def _tool_add_image(
             )
 
     # 下载并保存图片
-    file_path, local_url, content = await upload_service.save_remote_image(image_url)
+    file_path, local_url, content = await upload_service.save_remote_image(image_url, session=session)
     file_hash = hashlib.md5(content).hexdigest()
     file_size = round(len(content) / (1024 * 1024), 2)
     width, height = upload_service.extract_image_dimensions(content)

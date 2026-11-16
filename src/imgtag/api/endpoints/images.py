@@ -314,7 +314,7 @@ async def analyze_and_create_from_url(
         description = request.description or ""
 
         # 下载远程图片（流式获取内容，不保存中间文件）
-        file_content, mime_type = await upload_service.fetch_remote_image(request.image_url)
+        file_content, mime_type = await upload_service.fetch_remote_image(request.image_url, session=session)
         
         # 计算文件哈希和大小 (线程池执行避免阻塞)
         file_hash = await asyncio.to_thread(lambda: hashlib.md5(file_content).hexdigest())

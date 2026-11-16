@@ -28,6 +28,7 @@ from imgtag.schemas.model_test import ModelListRequest, ModelListResponse
 from imgtag.services.embedding_service import embedding_service
 from imgtag.services.model_test_service import fetch_vision_models
 from imgtag.services.task_queue import task_queue
+from imgtag.services.upload_service import upload_service
 
 logger = get_logger(__name__)
 
@@ -188,7 +189,7 @@ async def get_config():
         "embedding_api_base_url": settings.EMBEDDING_API_BASE_URL,
         "embedding_model": settings.EMBEDDING_MODEL,
         "embedding_dimensions": settings.EMBEDDING_DIMENSIONS,
-        "max_upload_size": settings.MAX_UPLOAD_SIZE,
+        "max_upload_size": await upload_service.get_max_upload_size(),
         "allowed_extensions": list(settings.ALLOWED_EXTENSIONS),
     }
 
